@@ -1,0 +1,48 @@
+version: "3.9"
+services:
+  tapp:
+    configs:
+      - source: run.sh
+        target: /root/run.sh
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+    build:
+      dockerfile_inline: |
+        FROM ubuntu:22.04
+        RUN apt-get update && apt install -y curl wget
+        WORKDIR /root
+
+        # Foundry
+        RUN wget https://github.com/foundry-rs/foundry/releases/download/nightly-c3069a50ba18cccfc4e7d5de9b9b388811d9cc7b/foundry_nightly_linux_amd64.tar.gz
+        RUN tar -xzf ./foundry_nightly_linux_amd64.tar.gz -C /usr/local/bin
+
+        # Helios
+        RUN curl -L 'https://github.com/a16z/helios/releases/download/0.7.0/helios_linux_amd64.tar.gz' | tar -xzC .
+
+        CMD [ "bash", "/root/run.sh" ]
+
+configs:
+  run.sh:
+    content: |
+      # First run Helios in the background
+      # Provide a reasonable checkpoint.
+      (
+      /root/helios ethereum --network=holesky --checkpoint 0x9260657ed4167f2bbe57317978ff181b6b96c1065ecf9340bba05ba3578128fe \
+      --consensus-rpc http://testing.holesky.beacon-api.nimbus.team --execution-rpc $${ETH_RPC_URL}
+      ) &
+
+      # Let it sync #TODO do this smarter
+      sleep 5
+      
+      # Then run some queries. This would be a good place to run an api server.
+      # Cast <-> Helios <-> Untrusted RPCs
+      cast block --rpc-url=localhost:8545 | tee response.txt
+
+      # Fetch the quote
+      HASH=$$(sha256sum response.txt)
+      PAYLOAD="{\"report_data\": \"$$(echo -n $$HASH | od -A n -t x1 | tr -d ' \n')\"}"
+      ATTEST=$$(curl -X POST --unix-socket /var/run/tappd.sock -d "$$PAYLOAD" http://localhost/prpc/Tappd.TdxQuote?json)
+      # TODO: Fallback to the dummy remote attestation
+      
+      echo ATTEST=$${ATTEST} >> response.txt
+      cat response.txt
