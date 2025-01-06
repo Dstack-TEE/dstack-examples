@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   tapp:
     configs:
@@ -7,6 +6,7 @@ services:
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
     build:
+      context: .
       dockerfile_inline: |
         FROM ubuntu:22.04
         RUN apt-get update && apt install -y curl wget
@@ -20,7 +20,7 @@ services:
         RUN curl -L 'https://github.com/a16z/helios/releases/download/0.7.0/helios_linux_amd64.tar.gz' | tar -xzC .
 
         CMD [ "bash", "/root/run.sh" ]
-
+    platform: linux/amd64
 configs:
   run.sh:
     content: |
