@@ -3,8 +3,6 @@ services:
     configs:
       - source: run.sh
         target: run.sh
-    ports:
-      - "8080:8080"
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
     build:
@@ -12,7 +10,7 @@ services:
         FROM ubuntu:22.04
         RUN apt-get update
         RUN apt install -y curl openssl ntpsec-ntpdate
-    command: bash -c "bash run.sh | tee -a /root/log.txt"
+    command: bash run.sh
 
 configs:
   run.sh:
@@ -20,9 +18,6 @@ configs:
       #!/bin/bash
       key=$$(openssl genpkey -algorithm Ed25519)
       echo "Public Key:"; echo "$$key" | openssl pkey -pubout
-
-      # Serve the log file (TODO: dashboard not working?)
-      (cd /root && python3 -m http.server 8080) &
       
       # Get timestamp from cloudflare and add 5 minutes
       get_time() { ntpdate -4q time.cloudflare.com 2>/dev/null | head -1 | cut -d' ' -f1,2 | date +%s -f -; }
