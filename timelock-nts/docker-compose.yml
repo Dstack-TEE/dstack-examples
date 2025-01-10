@@ -6,11 +6,13 @@ services:
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
     build:
+      context: .
       dockerfile_inline: |
         FROM ubuntu:22.04
         RUN apt-get update
         RUN apt install -y curl openssl ntpsec-ntpdate
     command: bash run.sh
+    platform: linux/amd64
 
 configs:
   run.sh:
