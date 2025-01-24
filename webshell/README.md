@@ -32,6 +32,8 @@ apk update && apk add openssh-client
 ssh root@localhost
 ```
 
+![image](./image.jpg)
+
 This will allow you to SSH into the host CVM for debugging purposes.
 
 ---
