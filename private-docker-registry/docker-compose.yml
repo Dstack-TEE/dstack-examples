@@ -1,0 +1,40 @@
+services:
+  init:
+    image: docker:latest
+    container_name: init
+    environment:
+      DOCKER_USERNAME: ${DOCKER_USERNAME}
+      DOCKER_PASSWORD: ${DOCKER_PASSWORD}
+      PRIVATE_REGISTRY_URL: ${PRIVATE_REGISTRY_URL}
+      PRIVATE_REGISTRY_USERNAME: ${PRIVATE_REGISTRY_USERNAME}
+      PRIVATE_REGISTRY_PASSWORD: ${PRIVATE_REGISTRY_PASSWORD}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./tapd:/tapd
+    command:
+      - /bin/sh
+      - -c
+      - |
+        docker login -u $DOCKER_USERNAME -p $DOCKER_PASSWORD &&
+        docker login -u $PRIVATE_REGISTRY_USERNAME -p $PRIVATE_REGISTRY_PASSWORD $PRIVATE_REGISTRY_URL &&
+        echo 'login success' &&
+        echo '
+        services:
+          httpbin_example_1:
+            image: 0xii/httpbin:latest
+            container_name: httpbin1
+            ports:
+              - "1080:80"
+        ' > /tapd/httpbin_example_1.yaml &&
+        echo '
+        services:
+          httpbin_example_2:
+            image: your-private-registry.com/0xii/httpbin:latest
+            container_name: httpbin2
+            ports:
+              - "1081:80"
+        ' > /tapd/httpbin_example_2.yaml &&
+        docker compose -f /tapd/httpbin_example_1.yaml up -d &&
+        docker compose -f /tapd/httpbin_example_2.yaml up -d &&
+        sleep infinity
+    restart: "no"
