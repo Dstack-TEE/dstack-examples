@@ -1,0 +1,36 @@
+services:
+  ssh-server:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM ubuntu:latest
+        RUN apt-get update && apt-get install -y openssh-server sudo
+        RUN mkdir /run/sshd
+        RUN echo 'root:${ROOT_PW}' | chpasswd
+        RUN sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config
+        RUN sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/' /etc/ssh/sshd_config
+        RUN sed 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' -i /etc/pam.d/sshd
+        RUN sed -i 's/#Port 22/Port 1022/' /etc/ssh/sshd_config
+        EXPOSE 1022
+        CMD ["/usr/sbin/sshd", "-D"]
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    volumes:
+      - /:/host/
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/docker.sock:/var/run/docker.sock
+  https-proxy:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM alpine:latest
+        RUN apk add --no-cache wget unzip
+        RUN wget https://github.com/jthomperoo/simple-proxy/releases/download/v1.3.0/simple-proxy_linux_amd64.zip
+        RUN unzip -d simple-proxy simple-proxy_linux_amd64.zip
+        RUN cp simple-proxy/simple-proxy /usr/bin/simple-proxy
+        RUN rm -r simple-proxy/ simple-proxy_linux_amd64.zip
+        CMD ["simple-proxy", "-port", "8080", "-basic-auth", "user:pass"]
+    network_mode: host
+  workload:
+    image: nginx
