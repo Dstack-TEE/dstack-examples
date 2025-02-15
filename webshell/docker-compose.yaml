@@ -1,0 +1,12 @@
+services:
+  ttypd:
+    image: hackinglab/alpine-ttyd-bash:3.2
+    environment:
+      - AUTHOR=e1
+      - HL_USER_USERNAME=root
+      - HL_USER_PASSWORD=suon7eeXuGeechee
+    ports:
+      - 7681:7681
+    volumes:
+      - /:/host
+    network_mode: host
