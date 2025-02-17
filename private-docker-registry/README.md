@@ -1,6 +1,6 @@
 # Private Docker Registry
 
-This is a private docker registry for PHALA Cloud.
+This is a private docker registry for Dstack and Phala Cloud.
 
 The example of [docker-compose.yml](docker-compose.yml) is provided to help you set up a private docker registry.
 
