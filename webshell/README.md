@@ -11,7 +11,7 @@ Copy the `ttyd` service definition from the [docker-compose.yaml](docker-compose
 
 ### 2. Update the CVM Configuration
 
-Update the CVM with the updated `docker-compose.yaml` to include the `ttyd` service in PHALA Cloud. This operation will restart the CVM.
+Update the CVM with the updated `docker-compose.yaml` to include the `ttyd` service in Dstack or Phala Cloud. This operation will restart the CVM.
 
 ### 3. Access the Webshell Endpoint
 
