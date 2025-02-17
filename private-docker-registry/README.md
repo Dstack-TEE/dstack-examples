@@ -6,7 +6,7 @@ The example of [docker-compose.yml](docker-compose.yml) is provided to help you 
 
 ## Notices
 
-- The environtment variables are required to be set in the PHALA Cloud through the `Encrypted Secrets`.
+- The environment variables are required to be set in the Dstack and Phala Cloud through the `Encrypted Secrets` feature.
 
     ```
     DOCKER_USERNAME=
