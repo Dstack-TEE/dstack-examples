@@ -9,6 +9,17 @@ When developing with Dstack CVM using a development image (e.g., dstack-dev-0.3.
 
 Copy the `ttyd` service definition from the [docker-compose.yaml](docker-compose.yaml) file provided and include it in your own `docker-compose.yaml` file.
 
+
+The `ttyd` service environment variables are as follows:
+```yaml
+    environment:
+      - HL_USER_USERNAME=root
+      - HL_USER_PASSWORD=suon7eeXuGeechee
+```
+
+The `AUTHOR` is the author of the CVM, and the `HL_USER_USERNAME` and `HL_USER_PASSWORD` are the username and password for the webshell and you can change them to your own.
+
+
 ### 2. Update the CVM Configuration
 
 Update the CVM with the updated `docker-compose.yaml` to include the `ttyd` service in PHALA Cloud. This operation will restart the CVM.
