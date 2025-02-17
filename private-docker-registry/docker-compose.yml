@@ -3,8 +3,10 @@ services:
     image: docker:latest
     container_name: init
     environment:
+      # The username and password for docker hub if you want to pull images from docker hub.
       DOCKER_USERNAME: ${DOCKER_USERNAME}
       DOCKER_PASSWORD: ${DOCKER_PASSWORD}
+      # The url, username and password for your private docker registry if you want to load images from your private docker registry.
       PRIVATE_REGISTRY_URL: ${PRIVATE_REGISTRY_URL}
       PRIVATE_REGISTRY_USERNAME: ${PRIVATE_REGISTRY_USERNAME}
       PRIVATE_REGISTRY_PASSWORD: ${PRIVATE_REGISTRY_PASSWORD}

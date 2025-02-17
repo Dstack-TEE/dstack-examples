@@ -16,6 +16,10 @@ The example of [docker-compose.yml](docker-compose.yml) is provided to help you 
     PRIVATE_REGISTRY_PASSWORD=
     ```
 
+    The `DOCKER_USERNAME` and `DOCKER_PASSWORD` are the username and password for docker hub if you want to pull images from docker hub.
+    
+    And the `PRIVATE_REGISTRY_URL`, `PRIVATE_REGISTRY_USERNAME` and `PRIVATE_REGISTRY_PASSWORD` are the url, username and password for your private docker registry if you want to load images from your private docker registry.
+
 - When the CVM is created, the `init` service will be executed to pull the images from the private registry and run the containers. All services created by the `init` service, could be accessed through the link looks like:
 
     ```
