@@ -21,6 +21,8 @@ After the CVM is updated, locate the endpoint URL for the `ttyd` service. The UR
 https://<app-id>-7681.dstack-prod4.phala.network/
 ```
 
+Additionally, the `7681` is the default port for the webshell.
+
 Open this URL in your browser to access the webshell.
 
 ### 4. Install SSH Client and Connect to Host CVM
