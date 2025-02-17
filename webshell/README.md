@@ -22,7 +22,7 @@ The `AUTHOR` is the author of the CVM, and the `HL_USER_USERNAME` and `HL_USER_P
 
 ### 2. Update the CVM Configuration
 
-Update the CVM with the updated `docker-compose.yaml` to include the `ttyd` service in PHALA Cloud. This operation will restart the CVM.
+Update the CVM with the updated `docker-compose.yaml` to include the `ttyd` service in Dstack or Phala Cloud. This operation will restart the CVM.
 
 ### 3. Access the Webshell Endpoint
 
