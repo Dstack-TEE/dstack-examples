@@ -1,6 +1,6 @@
-# User Private Docker Registry
+# Private Docker Image Deployment
 
-This is a user private docker registry example for Dstack and Phala Cloud.
+This is a private docker image deployment from docker hub or user private registry example for Dstack and Phala Cloud.
 
 The example of [docker-compose.yml](docker-compose.yml) is provided to help you to load docker images from a private docker registry.
 
