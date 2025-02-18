@@ -1,4 +1,4 @@
-# Private Docker Registry
+# User Private Docker Registry
 
 This is a private docker registry for Dstack and Phala Cloud.
 
