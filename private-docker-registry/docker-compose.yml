@@ -12,7 +12,7 @@ services:
       PRIVATE_REGISTRY_PASSWORD: ${PRIVATE_REGISTRY_PASSWORD}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - ./tapd:/tapd
+      - /tapp:/tapp
     command:
       - /bin/sh
       - -c
@@ -27,7 +27,7 @@ services:
             container_name: httpbin1
             ports:
               - "1080:80"
-        ' > /tapd/httpbin_example_1.yaml &&
+        ' > /tapp/httpbin_example_1.yaml &&
         echo '
         services:
           httpbin_example_2:
@@ -35,8 +35,8 @@ services:
             container_name: httpbin2
             ports:
               - "1081:80"
-        ' > /tapd/httpbin_example_2.yaml &&
-        docker compose -f /tapd/httpbin_example_1.yaml up -d &&
-        docker compose -f /tapd/httpbin_example_2.yaml up -d &&
+        ' > /tapp/httpbin_example_2.yaml &&
+        docker compose -f /tapp/httpbin_example_1.yaml up -d &&
+        docker compose -f /tapp/httpbin_example_2.yaml up -d &&
         sleep infinity
     restart: "no"
