@@ -35,16 +35,6 @@ services:
       - node3-zk:/data/zookeeper
       - node3-pg:/data/postgres
 
-  node4:
-    build: .
-    hostname: node4
-    environment:
-      - NODE_NAME=node4
-      - NODE_IP=node4
-    volumes:
-      - node4-zk:/data/zookeeper
-      - node4-pg:/data/postgres
-
 volumes:
   node1-zk:
   node1-pg:
@@ -52,5 +42,3 @@ volumes:
   node2-pg:
   node3-zk:
   node3-pg:
-  node4-zk:
-  node4-pg:
