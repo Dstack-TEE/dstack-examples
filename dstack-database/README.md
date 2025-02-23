@@ -10,7 +10,7 @@ It's a docker-compose simulation environment for 3 nodes.
 You can crash/pause any 1 of them, and the other 2 will make progress.
 
 - `./Dockerfile` starts from ubuntu, mainly installs postgres patroni and zookeeper
-- `./docker-compose.yml` defines three services
+- `./docker-compose.yml` defines three identical services
 - `./patroni.yml` configures the postgres
 - `./start.sh` runs zookeeper, fixes directory permissions, runs patroni
 - `./zoo.cfg` zookeeper consensus
