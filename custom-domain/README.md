@@ -6,8 +6,9 @@ This example demonstrates how to setup custom domains that points to a service r
 
 This setup allows you to:
 1. Create and automatically renew SSL certificates for your custom domain
-2. Set up a CNAME record in Cloudflare pointing your custom domain to the Tproxy server
-3. Serve a simple HTML page over HTTPS
+2. Set up a CNAME record in Cloudflare for your custom domain pointing to the Tproxy server
+3. Set up a TXT record in Cloudflare for your custom domain pointing to the destination App address and port.
+4. Serve a simple HTML page in the destination App over HTTPS
 
 ## Environment Variables
 
