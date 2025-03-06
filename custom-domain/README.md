@@ -1,10 +1,6 @@
 # Custom Domain
 
-This example demonstrates how to setup custom domains that points to a service running in Tapp behind a Tproxy.
-
-## Note
-This example points your custom domain to a Tproxy domain, which means that the Tproxy domain owner or its host owner will have the opportunity to request certificates for your custom domain through HTTP-01 challenge.
-To avoid this situation, please set up [CAA](https://letsencrypt.org/docs/caa/) for your domain to prohibit CA authorities from using challenges other than DNS-01.
+This example demonstrates how to setup custom domains that point to a service running in a Tapp behind a Tproxy.
 
 ## Overview
 
@@ -13,6 +9,13 @@ This setup allows you to:
 2. Set up a CNAME record in Cloudflare for your custom domain pointing to the Tproxy server
 3. Set up a TXT record in Cloudflare for your custom domain pointing to the destination App address and port.
 4. Serve a simple HTML page in the destination App over HTTPS
+
+### Note on Tproxy trust model and CA Authorization
+This example points your custom domain to a Tproxy domain, which means that the Tproxy domain owner or its host owner will have the opportunity to request certificates for your custom domain through HTTP-01 challenge.
+To avoid this situation, please set up [CAA](https://letsencrypt.org/docs/caa/) for your domain to prohibit CA authorities from using challenges other than DNS-01.
+
+### Note on Cloudflare
+Cloudflare is used here just as an example DNS service with an API. You could adapt this to whatever you use for managing your domain name.
 
 ## Environment Variables
 
