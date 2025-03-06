@@ -2,6 +2,10 @@
 
 This example demonstrates how to setup custom domains that points to a service running in Tapp behind a Tproxy.
 
+## Note
+This example points your custom domain to a Tproxy domain, which means that the Tproxy domain owner or its host owner will have the opportunity to request certificates for your custom domain through HTTP-01 challenge.
+To avoid this situation, please set up [CAA](https://letsencrypt.org/docs/caa/) for your domain to prohibit CA authorities from using challenges other than DNS-01.
+
 ## Overview
 
 This setup allows you to:
