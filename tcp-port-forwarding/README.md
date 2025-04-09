@@ -1,0 +1,77 @@
+# TCP Port Forwarding Guide
+
+This guide outlines methods for forwarding TCP ports between your local machine and remote dstack app instances.
+
+## SSH Access
+For dstack apps using dev OS images, SSH access is available through the CVM. Connect via dstack-gateway (formerly tproxy) by:
+
+1. Configure SSH (~/.ssh/config):
+```bash
+Host my-dstack-app
+    HostName <your-app-id>-22.<the-dstack-gateway-domain>
+    Port 443
+    ProxyCommand openssl s_client -quiet -connect %h:%p
+```
+
+Change the 443 to the port of the dstack-gateway if not using the default one.
+
+2. Connect:
+```bash
+ssh root@my-dstack-app
+```
+
+## TCP Port Forwarding Options
+
+### Using socat (Unix-like systems)
+
+Let's set some variables for convenience.
+```bash
+APP_ID=<your-app-id>
+DSTACK_GATEWAY_DOMAIN=<the-dstack-gateway-domain>
+GATEWAY_PORT=<the-dstack-gateway-port>
+```
+
+On Unix-like systems, we can use `socat` to forward ports.
+
+Assuming we have a nginx server listening on port `80` in the dstack app, we can access it via the dstack-gateway `HTTPS` endpoint.
+```
+curl https://<app-id>.<dstack-gateway-domain>
+```
+
+If our client doesn't support `HTTPS`, we can use `socat` to forward port `80` to the local machine.
+
+```bash
+socat TCP-LISTEN:1080,bind=127.0.0.1,fork,reuseaddr OPENSSL:${APP_ID}-80.${DSTACK_GATEWAY_DOMAIN}:${GATEWAY_PORT}
+```
+
+Then we can access the nginx server over plain HTTP via the local port `1080`.
+
+```bash
+curl http://127.0.0.1:1080
+```
+
+Similarly, we can forward port `22` to the local machine.
+
+```bash
+socat TCP-LISTEN:1022,bind=127.0.0.1,fork,reuseaddr OPENSSL:${APP_ID}-22.${DSTACK_GATEWAY_DOMAIN}:${GATEWAY_PORT}
+```
+
+Then we can access the SSH server via the local port `1022`.
+
+```bash
+ssh root@127.0.0.1 -p 1022
+```
+
+### Using python script
+
+If socat is unavailable, particularly on Windows systems, we can utilize a Python script for port forwarding.
+
+```bash
+python3 port_forwarder.py -l 127.0.0.1:1080 -r ${APP_ID}-80.${DSTACK_GATEWAY_DOMAIN}:${GATEWAY_PORT}
+```
+
+Subsequently, we can connect to the Nginx server through plain HTTP using local port `1080`.
+
+```bash
+curl http://127.0.0.1:1080
+```
