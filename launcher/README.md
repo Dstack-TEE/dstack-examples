@@ -53,7 +53,7 @@ Key areas to customize for your own implementation:
 1. Build the launcher container:
 
 ```bash
-docker build -t yourusername/launcher .
+./build-image.sh yourusername/launcher
 ```
 
 2. Push the image to Docker Hub (recommended for production use):
