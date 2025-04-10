@@ -4,7 +4,13 @@ set -e
 PORT=${PORT:-443}
 TXT_PREFIX=${TXT_PREFIX:-"_tapp-address"}
 
-source /opt/app-venv/bin/activate
+setup_py_env() {
+    if [ ! -d "/opt/app-venv" ]; then
+        python3 -m venv --system-site-packages /opt/app-venv
+    fi
+    source /opt/app-venv/bin/activate
+    pip install certbot-dns-cloudflare==4.0.0
+}
 
 setup_nginx_conf() {
     cat <<EOF > /etc/nginx/conf.d/default.conf
@@ -96,6 +102,7 @@ set_caa_record() {
 
 bootstrap() {
     echo "Obtaining new certificate for $DOMAIN"
+    setup_py_env
     obtain_certificate
     generate-evidences.sh
     set_cname_record
@@ -108,6 +115,7 @@ bootstrap() {
 if [ ! -f "/etc/letsencrypt/bootstrapped" ]; then
     bootstrap
 else
+    source /opt/app-venv/bin/activate
     echo "Certificate for $DOMAIN already exists"
 fi
 
