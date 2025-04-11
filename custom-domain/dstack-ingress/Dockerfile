@@ -23,8 +23,8 @@ RUN set -e; \
 
 RUN mkdir -p /etc/letsencrypt /var/www/certbot /usr/share/nginx/html
 
-COPY renew-certificate.sh entrypoint.sh generate-evidences.sh cloudflare_dns.py renewal-daemon.sh /scripts/
-RUN chmod +x /scripts/*.sh /scripts/*.py
+COPY ./scripts/* /scripts/
+RUN chmod +x /scripts/*
 ENV PATH="/scripts:$PATH"
 
 ENTRYPOINT ["/scripts/entrypoint.sh"]

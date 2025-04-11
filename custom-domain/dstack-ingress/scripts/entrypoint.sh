@@ -104,7 +104,7 @@ bootstrap() {
     set_cname_record
     set_txt_record
     set_caa_record
-    touch /etc/letsencrypt/bootstrapped
+    touch /.bootstrapped
 }
 
 # Create Cloudflare credentials file
@@ -113,7 +113,7 @@ echo "dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN" > ~/.cloudflare/cloudfla
 chmod 600 ~/.cloudflare/cloudflare.ini
 
 # Check if it's the first time the container is started
-if [ ! -f "/etc/letsencrypt/bootstrapped" ]; then
+if [ ! -f "/.bootstrapped" ]; then
     bootstrap
 else
     source /opt/app-venv/bin/activate
