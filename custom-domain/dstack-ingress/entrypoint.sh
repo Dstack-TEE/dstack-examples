@@ -34,14 +34,10 @@ EOF
 }
 
 obtain_certificate() {
-    # Create Cloudflare credentials file
-    mkdir -p ~/.cloudflare
-    echo "dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN" > ~/.cloudflare/cloudflare.ini
-    chmod 600 ~/.cloudflare/cloudflare.ini
-    
     # Request certificate using the virtual environment
     certbot certonly --dns-cloudflare \
         --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini \
+        --dns-cloudflare-propagation-seconds 120 \
         --email $CERTBOT_EMAIL \
         --agree-tos --no-eff-email --non-interactive \
         -d $DOMAIN
@@ -111,6 +107,11 @@ bootstrap() {
     touch /etc/letsencrypt/bootstrapped
 }
 
+# Create Cloudflare credentials file
+mkdir -p ~/.cloudflare
+echo "dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN" > ~/.cloudflare/cloudflare.ini
+chmod 600 ~/.cloudflare/cloudflare.ini
+
 # Check if it's the first time the container is started
 if [ ! -f "/etc/letsencrypt/bootstrapped" ]; then
     bootstrap
@@ -119,9 +120,7 @@ else
     echo "Certificate for $DOMAIN already exists"
 fi
 
-# Add cron job for certificate renewal
-echo "0 0,12 * * * /usr/bin/env renew-certificate.sh" > /etc/crontabs/root
-crond
+renewal-daemon.sh &
 
 setup_nginx_conf
 

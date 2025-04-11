@@ -1,19 +1,29 @@
-FROM nginx:alpine@sha256:4ff102c5d78d254a6f0da062b3cf39eaf07f01eec0927fd21e219d0af8bc0591
+FROM nginx@sha256:b6653fca400812e81569f9be762ae315db685bc30b12ddcdc8616c63a227d3ca
 
-RUN apk add --no-cache \
-    certbot=3.0.1-r0 \
-    openssl=3.3.3-r0 \
-    bash=5.2.37-r0 \
-    python3=3.12.9-r0 \
-    py3-pip=24.3.1-r0 \
-    py3-requests=2.32.3-r0 \
-    curl=8.12.1-r1 \
-    jq=1.7.1-r0 \
-    coreutils=9.5-r2
+# Use a specific Debian snapshot for reproducible builds
+RUN set -e; \
+    # Create a sources.list file pointing to a specific snapshot
+    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20250411T024939Z bookworm main' > /etc/apt/sources.list && \
+    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20250411T024939Z bookworm-security main' >> /etc/apt/sources.list && \
+    echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10no-check-valid-until && \
+    # Install packages with exact versions for reproducibility
+    apt-get -o Acquire::Check-Valid-Until=false update && \
+    apt-get install -y --no-install-recommends \
+        certbot=2.1.0-4 \
+        openssl=3.0.15-1~deb12u1 \
+        bash=5.2.15-2+b7 \
+        python3=3.11.2-1+b1 \
+        python3-pip=23.0.1+dfsg-1 \
+        python3-requests=2.28.1+dfsg-1 \
+        python3.11-venv=3.11.2-6+deb12u5 \
+        curl=7.88.1-10+deb12u12 \
+        jq=1.6-2.1 \
+        coreutils=9.1-1 && \
+    rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /etc/letsencrypt /var/www/certbot /usr/share/nginx/html
 
-COPY renew-certificate.sh entrypoint.sh generate-evidences.sh cloudflare_dns.py /scripts/
+COPY renew-certificate.sh entrypoint.sh generate-evidences.sh cloudflare_dns.py renewal-daemon.sh /scripts/
 RUN chmod +x /scripts/*.sh /scripts/*.py
 ENV PATH="/scripts:$PATH"
 

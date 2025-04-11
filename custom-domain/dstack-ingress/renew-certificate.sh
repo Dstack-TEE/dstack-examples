@@ -3,8 +3,8 @@ source /opt/app-venv/bin/activate
 
 echo "Renewing certificate for $DOMAIN"
 
-# Perform the actual renewal and capture the output
-RENEW_OUTPUT=$(certbot renew --non-interactive 2>&1)
+# Perform the actual renewal with explicit credentials and capture the output
+RENEW_OUTPUT=$(certbot renew --dns-cloudflare --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini --dns-cloudflare-propagation-seconds 120 --non-interactive 2>&1)
 RENEW_STATUS=$?
 
 # Check if renewal failed
