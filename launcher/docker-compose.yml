@@ -1,6 +1,6 @@
 services:
   launcher:
-    image: kvin/launcher@sha256:a88bf37dca9bd1afb7cfeac2a4e47891020e3a4d6f4dcad71a99e3490a514214
+    image: kvin/launcher@sha256:873dd2117b0159575d62b79863dafd984cd02be25b46ff164e3b83ed5c9642f7
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     restart: always
