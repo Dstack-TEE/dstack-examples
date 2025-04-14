@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.1"
+echo "Running Phala Cloud Pre-Launch Script v0.0.2"
 echo "----------------------------------------------"
 set -e
 
@@ -45,7 +45,11 @@ if [[ -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
     else
         echo "Logging in to Docker registry..."
         # Login without exposing password in process list
-        echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin
+        if [[ -n "$DSTACK_DOCKER_REGISTRY" ]]; then
+            echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin "$DSTACK_DOCKER_REGISTRY"
+        else
+            echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin
+        fi
         
         if [ $? -eq 0 ]; then
             echo "Docker login successful"
@@ -61,7 +65,7 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     # Check if AWS CLI is installed
     if ! command -v aws &> /dev/null; then
         echo "AWS CLI not installed, installing..."
-        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.24.14.zip" -o "awscliv2.zip"
         echo "6ff031a26df7daebbfa3ccddc9af1450 awscliv2.zip" | md5sum -c
         if [ $? -ne 0 ]; then
             echo "MD5 checksum failed"
