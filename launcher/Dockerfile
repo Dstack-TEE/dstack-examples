@@ -8,13 +8,7 @@ RUN set -e; \
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10no-check-valid-until && \
     # Install packages with exact versions for reproducibility
     apt-get -o Acquire::Check-Valid-Until=false update && \
-    apt-get install -y --no-install-recommends \
-        docker.io=20.10.24+dfsg1-1+deb12u1 \
-        docker-compose=1.29.2-3 \
-        curl=7.88.1-10+deb12u12 \
-        jq=1.6-2.1 \
-        bash=5.2.15-2+b7 \
-        coreutils=9.1-1 && \
+    apt-get install -y --no-install-recommends docker-compose=1.29.2-3 && \
     rm -rf /var/lib/apt/lists/* && \
     rm -rf /var/log/* /var/cache/ldconfig/aux-cache
 
