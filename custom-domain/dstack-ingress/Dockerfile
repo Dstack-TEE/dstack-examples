@@ -19,7 +19,8 @@ RUN set -e; \
         curl=7.88.1-10+deb12u12 \
         jq=1.6-2.1 \
         coreutils=9.1-1 && \
-    rm -rf /var/lib/apt/lists/*
+        rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
+
 
 RUN mkdir -p /etc/letsencrypt /var/www/certbot /usr/share/nginx/html
 
