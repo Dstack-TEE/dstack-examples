@@ -1,0 +1,24 @@
+services:
+  dstack-ingress:
+    image: kvin/dstack-ingress@sha256:5cbf6eff9983fad4018de90ed11b0593c84f2022ddfc64b9eb513d1ba79970c7
+    ports:
+      - "443:443"
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      - DOMAIN=${DOMAIN}
+      - GATEWAY_DOMAIN=${GATEWAY_DOMAIN}
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL}
+      - SET_CAA=true
+      - TARGET_ENDPOINT=http://app:80
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - cert-data:/etc/letsencrypt
+    restart: unless-stopped
+
+  app:
+    image: nginx
+    restart: unless-stopped
+
+volumes:
+  cert-data:
+
