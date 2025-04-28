@@ -31,6 +31,7 @@ server {
     }
 }
 EOF
+    mkdir -p /var/log/nginx
 }
 
 obtain_certificate() {

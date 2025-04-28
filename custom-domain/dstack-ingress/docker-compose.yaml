@@ -1,6 +1,6 @@
 services:
   dstack-ingress:
-    image: kvin/dstack-ingress@sha256:5cbf6eff9983fad4018de90ed11b0593c84f2022ddfc64b9eb513d1ba79970c7
+    image: kvin/dstack-ingress@sha256:8fad2a37bf2b4d2f9529e8953bca341bea17475b72d0ba746789395e5eace9d1
     ports:
       - "443:443"
     environment:
