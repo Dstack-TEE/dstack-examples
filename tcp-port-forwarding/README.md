@@ -2,6 +2,52 @@
 
 This guide outlines methods for forwarding TCP ports between your local machine and remote dstack app instances.
 
+## A simple TCP echo server
+
+Let's create a simple TCP echo server in python and deploy it to dstack:
+
+```yaml
+services:
+  echo-server:
+    image: python:3.9-slim
+    command: |
+      python -c "
+      import socket;
+      HOST = '0.0.0.0';
+      PORT = 8080;
+      s = socket.socket(socket.AF_INET, socket.SOCK_STREAM);
+      s.bind((HOST, PORT));
+      s.listen();
+      while True:
+        conn, addr = s.accept();
+        print('Connected by', addr);
+        conn.sendall(b'welcome')
+        while True:
+          data = conn.recv(1024);
+          if not data:
+            break;
+          conn.sendall(data)
+      "
+    ports:
+      - "8080:8080"
+```
+
+Run the following command to forward local port `8080` to the echo server:
+
+```bash
+socat TCP-LISTEN:8080,fork,reuseaddr OPENSSL:<app-id>-8080.<dstack-gateway-domain>:443
+```
+
+Use `nc` as client to test the echo server:
+
+```bash
+$ nc 127.0.0.1 8080
+hello
+hello
+```
+Press Ctrl+C to stop the nc client.
+
+
 ## SSH Access
 For dstack apps using dev OS images, SSH access is available through the CVM. Connect via dstack-gateway (formerly tproxy) by:
 
