@@ -1,0 +1,16 @@
+services:
+  app:
+    image: nginx@sha256:eee5eae48e79b2e75178328c7c585b89d676eaae616f03f9a1813aaed820745a
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    ports:
+      - "8888:80"
+    restart: always
+    command: >
+      /bin/bash -c '
+        mkdir -p /usr/share/nginx/html &&
+        echo "Fetching quote from Dstack..." &&
+        curl --unix-socket /var/run/dstack.sock "http://dstack/GetQuote?report_data=0x1234" -s > /usr/share/nginx/html/quote.json &&
+        echo "Quote saved to /usr/share/nginx/html/quote.json" &&
+        nginx -g "daemon off;"
+      '
