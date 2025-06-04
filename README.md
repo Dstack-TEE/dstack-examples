@@ -15,6 +15,7 @@ These show useful patterns you may want to copy:
 ## Illustrating Dstack Features
 - [./prelaunch-script](./prelaunch-script)
 - [./private-docker-image-deployment](./private-docker-image-deployment)
+- [./attestation](./attestation) shows how to verify attestation for Dstack apps
 ## App examples
 - [./timelock-nts](./timelock-nts) a timelock decryption example using secure NTP (NTS) from Cloudflare as a time oracle
 ## Tutorial (Coming soon)
