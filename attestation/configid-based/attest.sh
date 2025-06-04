@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Configuration variables with default values
-IMAGE_VERSION="0.5.1"
+IMAGE_VERSION="0.5.2"
 VCPU_COUNT="2"
 MEM_SIZE="2048"
 
@@ -181,7 +181,7 @@ calc_mrs_command() {
     # Calculate mr_config_id from app-compose.json and pad to 48 bytes (96 hex characters)
     original_hash=$(sha256sum app-compose.json | cut -d' ' -f1)
     # Pad with zeros if needed to reach 96 characters
-    mr_config_id=$(printf "%-96s" "$original_hash" | tr ' ' '0')
+    mr_config_id=$(printf "01%-94s" "$original_hash" | tr ' ' '0')
     echo "Using mr_config_id: $mr_config_id"
 
     # Run dstack-mr with metadata.json from the image
