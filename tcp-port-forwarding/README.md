@@ -55,6 +55,7 @@ For dstack apps using dev OS images, SSH access is available through the CVM. Co
 ```bash
 Host my-dstack-app
     HostName <your-app-id>-22.<the-dstack-gateway-domain>
+    User root
     Port 443
     ProxyCommand openssl s_client -quiet -connect %h:%p
 ```
@@ -63,9 +64,19 @@ Change the 443 to the port of the dstack-gateway if not using the default one.
 
 2. Connect:
 ```bash
-ssh root@my-dstack-app
+ssh my-dstack-app
 ```
 
+> [!WARNING]  
+> macOS users may encounter connection timeout problem when connecting to the tls endpoint. That's
+> because the `openssl` shipped with the OS is LibraSSL and the syntax is slightly different. You
+> can confirm your `openssl` version by `openssl version`.
+>
+> There's a simple fix. Install [homebrew](https://brew.sh/) and install OpenSSL:
+>
+> `brew install openssl`
+>
+> Then the connection should be good.
 ## TCP Port Forwarding Options
 
 ### Using socat (Unix-like systems)
