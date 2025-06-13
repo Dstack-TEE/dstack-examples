@@ -61,32 +61,43 @@ class CloudflareDNSClient:
 
     def get_zone_id(self, domain: str) -> Optional[str]:
         """Get the zone ID for a domain."""
-        # Extract the root domain (e.g., example.com from sub.example.com)
-        parts = domain.split('.')
-        if len(parts) > 2:
-            root_domain = '.'.join(parts[-2:])
-        else:
-            root_domain = domain
+        # Find the zone with the longest matching suffix for the domain
+        zone_name_len = 0
+        zone_id = None
 
-        print(f"Fetching zone ID for domain: {root_domain}")
-        result = self._make_request("GET", f"zones?name={root_domain}")
+        page = 1
+        total_pages = 1
 
-        if not result.get("success", False):
-            return None
+        while page <= total_pages:
+            result = self._make_request("GET", f"zones?page={page}")
 
-        zones = result.get("result", [])
-        if not zones:
-            print(f"No zones found for domain: {root_domain}", file=sys.stderr)
-            return None
+            if not result.get("success", False):
+                return None
 
-        zone_id = zones[0].get("id")
+            zones = result.get("result", [])
+            if not zones and page == 1:
+                print(f"No zones found for any domain", file=sys.stderr)
+                return None
+
+            result_info = result.get("result_info", {})
+            if result_info:
+                total_pages = result_info.get("total_pages", total_pages)
+
+            for zone in zones:
+                zone_name = zone.get("name", "")
+                if domain == zone_name:
+                    return zone.get("id")
+                if domain.endswith(f".{zone_name}") and len(zone_name) > zone_name_len:
+                    zone_name_len = len(zone_name)
+                    zone_id = zone.get("id")
+
+            page += 1
+
         if zone_id:
-            print(f"Successfully retrieved zone ID: {zone_id} for domain {root_domain}")
-            # Store the zone ID separately from any print output
             self.zone_id = zone_id
             return zone_id
         else:
-            print(f"Zone ID not found in response for domain: {root_domain}", file=sys.stderr)
+            print(f"Zone ID not found in response for domain: {domain}", file=sys.stderr)
             return None
 
     def get_dns_records(self, name: str, record_type: Optional[str] = None) -> List[Dict]:
