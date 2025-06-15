@@ -8,7 +8,7 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        FROM ubuntu:22.04
+        FROM ubuntu:22.04@sha256:01a3ee0b5e413cefaaffc6abe68c9c37879ae3cced56a8e088b1649e5b269eee
         RUN apt-get update
         RUN apt install -y curl openssl ntpsec-ntpdate
     command: bash run.sh

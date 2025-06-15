@@ -1,6 +1,6 @@
 services:
   ttypd:
-    image: hackinglab/alpine-ttyd-bash:3.2
+    image: hackinglab/alpine-ttyd-bash:3.2@sha256:ccf936e52a19948b55737ba812ccee1a2ad3d0e8b8b7268fd09595259131e265
     environment:
       - HL_USER_USERNAME=root
       - HL_USER_PASSWORD=suon7eeXuGeechee

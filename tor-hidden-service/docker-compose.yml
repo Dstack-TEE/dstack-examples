@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile_inline: |
-        FROM debian:bullseye-slim
+        FROM debian:bullseye-slim@sha256:779034981fec838da124ff6ab9211499ba5d4e769dabdfd6c42c6ae2553b9a3b
         RUN apt-get update && apt-get install -y tor && apt-get clean && rm -rf /var/lib/apt/lists/*
         RUN mkdir -p /var/lib/tor/hidden_service && chown -R debian-tor:debian-tor /var/lib/tor/hidden_service/ && \
             chmod 700 /var/lib/tor/hidden_service/ && echo "HiddenServiceDir /var/lib/tor/hidden_service/" > /etc/tor/torrc && \
@@ -18,7 +18,7 @@ services:
 
   nginx:
     depends_on: [tor]
-    image: nginx:alpine
+    image: nginx:alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
       - tor_data:/tor_data:ro

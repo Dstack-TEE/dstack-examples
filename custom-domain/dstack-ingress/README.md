@@ -52,7 +52,7 @@ The fastest way to get started is to use our pre-built image. Simply use the fol
 ```yaml
 services:
   dstack-ingress:
-    image: kvin/dstack-ingress@sha256:8dfc3536d1bd0be0cb938140aeff77532d35514ae580d8bec87d3d5a26a21470
+    image: kvin/dstack-ingress@sha256:0f9d97aee13764895f967a00874418330a56e20cf4b0a4c2700934c5755b3350
     ports:
       - "443:443"
     environment:
