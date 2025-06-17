@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.2"
+echo "Running Phala Cloud Pre-Launch Script v0.0.4"
 echo "----------------------------------------------"
 set -e
 
@@ -79,11 +79,25 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     else
         echo "AWS CLI is already installed: $(which aws)"
     fi
+
+    # Set AWS credentials as environment variables
+    export AWS_ACCESS_KEY_ID="$DSTACK_AWS_ACCESS_KEY_ID"
+    export AWS_SECRET_ACCESS_KEY="$DSTACK_AWS_SECRET_ACCESS_KEY"
+    export AWS_DEFAULT_REGION="$DSTACK_AWS_REGION"
     
-    # Configure AWS CLI
-    aws configure set aws_access_key_id "$DSTACK_AWS_ACCESS_KEY_ID"
-    aws configure set aws_secret_access_key "$DSTACK_AWS_SECRET_ACCESS_KEY"
-    aws configure set default.region $DSTACK_AWS_REGION
+    # Set session token if provided (for temporary credentials)
+    if [[ -n "$DSTACK_AWS_SESSION_TOKEN" ]]; then
+        echo "AWS session token found, using temporary credentials"
+        export AWS_SESSION_TOKEN="$DSTACK_AWS_SESSION_TOKEN"
+    fi
+    
+    # Test AWS credentials before attempting ECR login
+    echo "Testing AWS credentials..."
+    if ! aws sts get-caller-identity &> /dev/null; then
+        echo "AWS credentials test failed"
+        exit 1
+    fi
+
     echo "Logging in to AWS ECR..."
     aws ecr get-login-password --region $DSTACK_AWS_REGION | docker login --username AWS --password-stdin "$DSTACK_AWS_ECR_REGISTRY"
     if [ $? -eq 0 ]; then
@@ -95,6 +109,28 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
 fi
 
 perform_cleanup
+
+#
+# Set root password if DSTACK_ROOT_PASSWORD is set.
+#
+if [[ -n "$DSTACK_ROOT_PASSWORD" ]]; then
+    echo "root:$DSTACK_ROOT_PASSWORD" | chpasswd
+    unset $DSTACK_ROOT_PASSWORD
+    echo "Root password set"
+fi
+if [[ -n "$DSTACK_ROOT_PUBLIC_KEY" ]]; then
+    mkdir -p /root/.ssh
+    echo "$DSTACK_ROOT_PUBLIC_KEY" > /root/.ssh/authorized_keys
+    unset $DSTACK_ROOT_PUBLIC_KEY
+    echo "Root public key set"
+fi
+
+
+if [[ -e /var/run/dstack.sock ]]; then
+    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://dstack/Info | jq -j .app_id)
+else
+    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://dstack/prpc/Tappd.Info | jq -j .app_id)
+fi
 
 echo "----------------------------------------------"
 echo "Script execution completed"
