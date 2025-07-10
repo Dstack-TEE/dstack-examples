@@ -22,7 +22,6 @@ Set the `SWAP_SIZE_MB` environment variable to configure swap file size in megab
 SWAP_SIZE_MB=1024   # 1GB
 SWAP_SIZE_MB=2048   # 2GB (default)
 SWAP_SIZE_MB=4096   # 4GB
-SWAP_SIZE_MB=8192   # 8GB
 ```
 
 You can set this when deploying to your cloud platform using environment variables or by modifying the docker-compose.yml file.
@@ -31,10 +30,6 @@ You can set this when deploying to your cloud platform using environment variabl
 
 Deploy this docker-compose.yml to dstack or Phala Cloud. You can customize the swap size using the `SWAP_SIZE_MB` environment variable:
 
-**Option 1: Set via platform environment variables**
-Deploy the docker-compose.yml as-is and set `SWAP_SIZE_MB=4096` through your cloud platform's environment variable configuration.
-
-**Option 2: Set directly in docker-compose.yml**
 ```yaml
 services:
   swap-creator:
