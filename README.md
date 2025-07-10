@@ -10,6 +10,7 @@ These show useful patterns you may want to copy:
 - [./custom-domain](./custom-domain) shows how to serve a secure website from a custom domain, by requesting a letsencrypt certificate from within the app
 - [./ssh-over-tproxy](./ssh-over-tproxy) shows how to tunnel arbitrary sockets over https so it can work with tproxy
 - [./webshell](./webshell) This is an alternative way to allow logging into a Dstack container (for debug only!)
+- [./swap-volume](./swap-volume) demonstrates how to create and enable a swap volume for CVMs to extend available memory
 ## Showcases of porting existing tools
 - [./tor-hidden-service](./tor-hidden-service) connects to the tor network and serves a website as a hidden service
 ## Illustrating Dstack Features

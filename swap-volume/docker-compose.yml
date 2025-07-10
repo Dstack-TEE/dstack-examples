@@ -1,0 +1,43 @@
+services:
+  swap-creator:
+    image: alpine
+    container_name: init-swap
+    privileged: true
+    environment:
+      - SWAP_SIZE_MB=2048
+      - SWAP_FILE_PATH=/host/swapfile
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Setting up swap on host system..."
+        
+        # Check if swap file already exists on host
+        if [ ! -f "$$SWAP_FILE_PATH" ]; then
+          echo "Creating $${SWAP_SIZE_MB}MB swapfile at $$SWAP_FILE_PATH..."
+          dd if=/dev/zero of="$$SWAP_FILE_PATH" bs=1M count=$$SWAP_SIZE_MB
+          chmod 600 "$$SWAP_FILE_PATH"
+          mkswap "$$SWAP_FILE_PATH"
+          echo "Swapfile created successfully."
+        else
+          echo "Swapfile already exists at $$SWAP_FILE_PATH"
+        fi
+        
+        # Enable swap on host if not already enabled
+        if ! grep -q "$$SWAP_FILE_PATH" /proc/swaps 2>/dev/null; then
+          echo "Enabling swap on host..."
+          swapon "$$SWAP_FILE_PATH"
+          echo "Swap enabled successfully."
+        else
+          echo "Swap already enabled for $$SWAP_FILE_PATH"
+        fi
+        
+        # Show current swap status
+        echo "Current swap status:"
+        cat /proc/swaps
+        
+        # Keep container running
+        tail -f /dev/null
+    volumes:
+      - /:/host
+    restart: unless-stopped 
