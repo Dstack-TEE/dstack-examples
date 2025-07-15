@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.5"
+echo "Running Phala Cloud Pre-Launch Script v0.0.6"
 echo "----------------------------------------------"
 set -e
 
@@ -145,6 +145,11 @@ if [[ -e /var/run/dstack.sock ]]; then
     export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://dstack/Info | jq -j .app_id)
 else
     export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://dstack/prpc/Tappd.Info | jq -j .app_id)
+fi
+# Check if app-compose.json has default_gateway_domain field and DSTACK_GATEWAY_DOMAIN is not set
+# If true, set DSTACK_GATEWAY_DOMAIN from app-compose.json
+if [[ $(jq 'has("default_gateway_domain")' app-compose.json) == "true" && -z "$DSTACK_GATEWAY_DOMAIN" ]]; then
+    export DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)
 fi
 
 echo "----------------------------------------------"
