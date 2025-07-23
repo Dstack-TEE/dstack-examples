@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.6"
+echo "Running Phala Cloud Pre-Launch Script v0.0.7"
 echo "----------------------------------------------"
 set -e
 
@@ -150,6 +150,9 @@ fi
 # If true, set DSTACK_GATEWAY_DOMAIN from app-compose.json
 if [[ $(jq 'has("default_gateway_domain")' app-compose.json) == "true" && -z "$DSTACK_GATEWAY_DOMAIN" ]]; then
     export DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)
+fi
+if [[ -n "$DSTACK_GATEWAY_DOMAIN" ]]; then
+    export DSTACK_APP_DOMAIN=$DSTACK_APP_ID"."$DSTACK_GATEWAY_DOMAIN
 fi
 
 echo "----------------------------------------------"
