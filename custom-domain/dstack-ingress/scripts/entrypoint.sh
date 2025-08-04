@@ -15,14 +15,49 @@ setup_py_env() {
 setup_nginx_conf() {
     cat <<EOF > /etc/nginx/conf.d/default.conf
 server {
-    listen ${PORT} ssl;
+    listen ${PORT} ssl http2;
     server_name ${DOMAIN};
     
+    # SSL certificate configuration
     ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
     
+    # Modern SSL configuration - TLS 1.2 and 1.3 only
+    ssl_protocols TLSv1.2 TLSv1.3;
+    
+    # Strong cipher suites - Only AES-GCM and ChaCha20-Poly1305
+    ssl_ciphers 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
+    
+    # Prefer server cipher suites
+    ssl_prefer_server_ciphers on;
+    
+    # ECDH curve for ECDHE ciphers
+    ssl_ecdh_curve secp384r1;
+    
+    # Enable OCSP stapling
+    ssl_stapling on;
+    ssl_stapling_verify on;
+    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/chain.pem;
+    resolver 8.8.8.8 8.8.4.4 valid=300s;
+    resolver_timeout 5s;
+    
+    # SSL session configuration
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:50m;
+    ssl_session_tickets off;
+    
+    # SSL buffer size (optimized for TLS 1.3)
+    ssl_buffer_size 4k;
+    
+    # Disable SSL renegotiation
+    ssl_early_data off;
+    
     location / {
         proxy_pass ${TARGET_ENDPOINT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
     location /evidences/ {

@@ -10,6 +10,7 @@ This project enables you to run dstack applications with your own custom domain,
 - Cloudflare DNS configuration for CNAME, TXT, and CAA records
 - Nginx reverse proxy to route traffic to your application
 - Certificate evidence generation for verification
+- Strong SSL/TLS configuration with modern cipher suites (AES-GCM and ChaCha20-Poly1305)
 
 ## How It Works
 
