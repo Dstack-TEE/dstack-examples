@@ -88,16 +88,24 @@ Explanation of environment variables:
 If you prefer to build the image yourself:
 
 1. Clone this repository
-2. Build the Docker image:
+2. Build the Docker image using the provided build script:
 
 ```bash
-docker build -t yourusername/dstack-ingress .
+./build-image.sh yourusername/dstack-ingress:tag
 ```
+
+**Important**: You must use the `build-image.sh` script to build the image. This script ensures reproducible builds with:
+- Specific buildkit version (v0.20.2)
+- Deterministic timestamps (`SOURCE_DATE_EPOCH=0`)
+- Package pinning for consistency
+- Git revision tracking
+
+Direct `docker build` commands will not work properly due to the specialized build requirements.
 
 3. Push to your registry (optional):
 
 ```bash
-docker push yourusername/dstack-ingress
+docker push yourusername/dstack-ingress:tag
 ```
 
 4. Update the docker-compose.yaml file with your image name and deploy

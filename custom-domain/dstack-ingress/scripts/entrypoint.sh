@@ -15,7 +15,8 @@ setup_py_env() {
 setup_nginx_conf() {
     cat <<EOF > /etc/nginx/conf.d/default.conf
 server {
-    listen ${PORT} ssl http2;
+    listen ${PORT} ssl;
+    http2 on;
     server_name ${DOMAIN};
     
     # SSL certificate configuration
@@ -37,7 +38,7 @@ server {
     # Enable OCSP stapling
     ssl_stapling on;
     ssl_stapling_verify on;
-    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/chain.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
     resolver 8.8.8.8 8.8.4.4 valid=300s;
     resolver_timeout 5s;
     
