@@ -1,0 +1,109 @@
+name: Bug Report
+description: Report a bug in one of the examples
+title: "[BUG] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the form below to help us understand and fix the issue.
+
+  - type: dropdown
+    id: example
+    attributes:
+      label: Example Name
+      description: Which example is experiencing the issue?
+      options:
+        - attestation/configid-based
+        - attestation/rtmr3-based
+        - custom-domain
+        - launcher
+        - lightclient
+        - phala-cloud-prelaunch-script
+        - prelaunch-script
+        - private-docker-image-deployment
+        - ssh-over-gateway
+        - tcp-port-forwarding
+        - timelock-nts
+        - tor-hidden-service
+        - webshell
+        - Other (specify in description)
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Bug Description
+      description: A clear and concise description of what the bug is.
+      placeholder: Describe the bug...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Deploy example with `docker compose up -d`
+        2. Run command `...`
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: A clear description of what you expected to happen
+      placeholder: What should have happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened?
+      placeholder: What actually happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Please provide information about your environment
+      value: |
+        - OS: [e.g. Ubuntu 22.04, macOS 13.0]
+        - Docker version: [e.g. 24.0.0]
+        - Docker Compose version: [e.g. v2.20.0]
+        - Dstack version: [e.g. v0.5.1]
+      render: markdown
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Please paste any relevant logs or error messages
+      placeholder: Paste logs here...
+      render: shell
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Add any other context about the problem here
+      placeholder: Any additional information...
+
+  - type: checkboxes
+    id: security
+    attributes:
+      label: Security Impact
+      description: Does this bug have security implications?
+      options:
+        - label: This bug has security implications (please also email dstack@phala.network)
+          required: false

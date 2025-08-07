@@ -1,0 +1,29 @@
+---
+# yamllint configuration for dstack-examples
+
+extends: default
+
+rules:
+  # Don't require document start marker (---)
+  document-start: disable
+  
+  # Reasonable line length for docker-compose files
+  line-length:
+    max: 160
+    level: warning
+  
+  # Allow both styles of bracketed lists
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+  
+  # Be flexible with truthy values (yes, true, on, etc.)
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no', 'on', 'off']
+  
+  # Don't be too strict about comments
+  comments:
+    min-spaces-from-content: 1
+  
+  # Allow empty values which are common in docker-compose
+  empty-values: enable
