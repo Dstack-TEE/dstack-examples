@@ -51,16 +51,12 @@ Commands:
     security            Run security checks
     lint                Run linting (shellcheck, yamllint)
     check-all           Run all checks (validate, security, lint)
-    build <example>     Build Docker image for an example
     docs                Show documentation status
     help                Show this help message
 
 Examples:
     $0 validate attestation/configid-based
-    $0 build custom-domain/dstack-ingress
     $0 check-all
-
-Note: Examples run in dstack cloud environments, not locally.
 EOF
 }
 
@@ -202,31 +198,6 @@ lint_checks() {
     log_success "Lint checks completed"
 }
 
-# Build Docker image
-build_image() {
-    local example=$1
-    
-    if [ -z "${example}" ]; then
-        log_error "Please specify an example: $0 build <path/to/example>"
-        exit 1
-    fi
-    
-    if [ ! -d "${example}" ]; then
-        log_error "Example directory not found: ${example}"
-        exit 1
-    fi
-    
-    if [ -f "${example}/build-image.sh" ]; then
-        log_info "Building Docker image using build script: ${example}"
-        cd "${example}" && ./build-image.sh
-    elif [ -f "${example}/Dockerfile" ]; then
-        log_info "Building Docker image: ${example}"
-        cd "${example}" && docker build -t "$(basename "${example}"):latest" .
-    else
-        log_warning "No Dockerfile or build script found in: ${example}"
-    fi
-}
-
 # Documentation status
 docs_status() {
     log_info "Documentation status:"
@@ -278,9 +249,6 @@ main() {
             ;;
         check-all)
             check_all
-            ;;
-        build)
-            build_image "${2:-}"
             ;;
         docs)
             docs_status
