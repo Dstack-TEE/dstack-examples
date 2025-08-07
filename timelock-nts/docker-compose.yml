@@ -16,11 +16,11 @@ services:
 
 configs:
   run.sh:
-    content: |
+    content: |-
       #!/bin/bash
       key=$$(openssl genpkey -algorithm Ed25519)
       echo "Public Key:"; echo "$$key" | openssl pkey -pubout
-      
+
       # Get timestamp from cloudflare and add 5 minutes
       get_time() { ntpdate -4q time.cloudflare.com 2>/dev/null | head -1 | cut -d' ' -f1,2 | date +%s -f -; }
       deadline=$$(($$(get_time) + 300))
@@ -28,7 +28,7 @@ configs:
       echo "Release: $$deadline_str"
 
       # Fetch the quote
-      get_quote() {         
+      get_quote() {
          PAYLOAD="{\"report_data\": \"$$(echo -n $$1 | od -A n -t x1 | tr -d ' \n')\"}"
          curl -X POST --unix-socket /var/run/tappd.sock -d "$$PAYLOAD" http://localhost/prpc/Tappd.TdxQuote?json
       }

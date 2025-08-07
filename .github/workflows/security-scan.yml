@@ -2,9 +2,9 @@ name: Security Scan
 
 on:
   push:
-    branches: [ main ]
+    branches: [main]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   schedule:
     # Run security scan weekly
     - cron: '0 2 * * 1'
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      
+
       - name: Run TruffleHog OSS
         uses: trufflesecurity/trufflehog@main
         with:
@@ -35,25 +35,25 @@ jobs:
       - name: Scan for vulnerable dependencies
         run: |
           echo "Scanning for vulnerable dependencies..."
-          
+
           # Find all package.json files
           find . -name "package.json" -not -path "./node_modules/*" | while read -r package_file; do
             echo "Scanning: $package_file"
             dir=$(dirname "$package_file")
-            
+
             if command -v npm >/dev/null 2>&1; then
               cd "$dir"
               npm audit --audit-level=high || echo "❌ Vulnerabilities found in $package_file"
               cd - > /dev/null
             fi
           done
-          
+
           # Find all requirements.txt files
           find . -name "requirements.txt" -not -path "./venv/*" | while read -r req_file; do
             echo "Found Python requirements: $req_file"
             echo "⚠️ Consider using 'pip-audit' for Python dependency scanning"
           done
-          
+
           # Find all go.mod files
           find . -name "go.mod" | while read -r go_file; do
             echo "Found Go module: $go_file"
@@ -89,35 +89,35 @@ jobs:
       - name: Security check for Docker Compose files
         run: |
           echo "Checking Docker Compose files for security issues..."
-          
+
           # Find all docker-compose files
           find . -name "docker-compose.y*ml" | while read -r compose_file; do
             echo "Checking: $compose_file"
-            
+
             # Check for privileged containers
             if grep -q "privileged.*true" "$compose_file"; then
               echo "❌ Privileged container found in: $compose_file"
             fi
-            
+
             # Check for host network mode
             if grep -q "network_mode.*host" "$compose_file"; then
               echo "⚠️ Host network mode found in: $compose_file"
             fi
-            
+
             # Check for dangerous volume mounts
             if grep -q "/var/run/docker.sock" "$compose_file"; then
               echo "❌ Docker socket mount found in: $compose_file"
             fi
-            
+
             if grep -q ":/proc" "$compose_file"; then
               echo "⚠️ /proc mount found in: $compose_file"
             fi
-            
+
             # Check for exposed sensitive ports
             if grep -E "ports:.*:(22|3306|5432|6379|27017|9200)" "$compose_file"; then
               echo "⚠️ Sensitive ports exposed in: $compose_file"
             fi
-            
+
             # Check for missing restart policies
             if ! grep -q "restart:" "$compose_file"; then
               echo "ℹ️ No restart policy specified in: $compose_file"
@@ -149,20 +149,20 @@ jobs:
     needs: [secret-scan, dependency-scan, dockerfile-scan, compose-security, code-security]
     if: always()
     name: Security Summary
-    
+
     steps:
       - name: Security Scan Summary
         run: |
           echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
+
           # Check job results
           secret_result="${{ needs.secret-scan.result }}"
           dependency_result="${{ needs.dependency-scan.result }}"
           dockerfile_result="${{ needs.dockerfile-scan.result }}"
           compose_result="${{ needs.compose-security.result }}"
           code_result="${{ needs.code-security.result }}"
-          
+
           echo "| Security Check | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| Secret Detection | $secret_result |" >> $GITHUB_STEP_SUMMARY
@@ -171,7 +171,7 @@ jobs:
           echo "| Compose Security | $compose_result |" >> $GITHUB_STEP_SUMMARY
           echo "| Code Analysis | $code_result |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          
+
           # Overall status
           if [[ "$secret_result $dependency_result $dockerfile_result $compose_result $code_result" == *"failure"* ]]; then
             echo "🔴 **Security issues detected!** Please review the scan results." >> $GITHUB_STEP_SUMMARY

@@ -33,7 +33,7 @@ configs:
 
       # Let it sync #TODO do this smarter
       sleep 5
-      
+
       # Then run some queries. This would be a good place to run an api server.
       # Cast <-> Helios <-> Untrusted RPCs
       cast block --rpc-url=localhost:8545 | tee response.txt
@@ -43,6 +43,6 @@ configs:
       PAYLOAD="{\"report_data\": \"$$(echo -n $$HASH | od -A n -t x1 | tr -d ' \n')\"}"
       ATTEST=$$(curl -X POST --unix-socket /var/run/tappd.sock -d "$$PAYLOAD" http://localhost/prpc/Tappd.TdxQuote?json)
       # TODO: Fallback to the dummy remote attestation
-      
+
       echo ATTEST=$${ATTEST} >> response.txt
       cat response.txt
