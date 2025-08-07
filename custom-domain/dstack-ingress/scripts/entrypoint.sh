@@ -12,6 +12,11 @@ setup_py_env() {
     pip install certbot-dns-cloudflare==4.0.0
 }
 
+PROXY_CMD="proxy"
+if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
+    PROXY_CMD="grpc"
+fi
+
 setup_nginx_conf() {
     cat <<EOF > /etc/nginx/conf.d/default.conf
 server {
@@ -54,11 +59,11 @@ server {
     ssl_early_data off;
     
     location / {
-        proxy_pass ${TARGET_ENDPOINT};
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        ${PROXY_CMD}_pass ${TARGET_ENDPOINT};
+        ${PROXY_CMD}_set_header Host \$host;
+        ${PROXY_CMD}_set_header X-Real-IP \$remote_addr;
+        ${PROXY_CMD}_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        ${PROXY_CMD}_set_header X-Forwarded-Proto \$scheme;
     }
 
     location /evidences/ {

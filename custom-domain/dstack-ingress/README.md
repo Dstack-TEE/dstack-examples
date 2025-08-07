@@ -53,7 +53,7 @@ The fastest way to get started is to use our pre-built image. Simply use the fol
 ```yaml
 services:
   dstack-ingress:
-    image: kvin/dstack-ingress@sha256:0f9d97aee13764895f967a00874418330a56e20cf4b0a4c2700934c5755b3350
+    image: kvin/dstack-ingress@sha256:b61d50360c7a4e5ab7d22f5ce87677714f3f64a65db34ee5eebcc54683950c89
     ports:
       - "443:443"
     environment:
@@ -109,6 +109,37 @@ docker push yourusername/dstack-ingress:tag
 ```
 
 4. Update the docker-compose.yaml file with your image name and deploy
+
+
+#### gRPC Support
+
+If your dstack application uses gRPC, you can set `TARGET_ENDPOINT` to `grpc://app:50051`.
+
+example:
+
+```yaml
+services:
+  dstack-ingress:
+    image: kvin/dstack-ingress@sha256:b61d50360c7a4e5ab7d22f5ce87677714f3f64a65db34ee5eebcc54683950c89
+    ports:
+      - "443:443"
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      - DOMAIN=${DOMAIN}
+      - GATEWAY_DOMAIN=${GATEWAY_DOMAIN}
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL}
+      - SET_CAA=true
+      - TARGET_ENDPOINT=grpc://app:50051
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - cert-data:/etc/letsencrypt
+    restart: unless-stopped
+  app:
+    image: your-grpc-app
+    restart: unless-stopped
+volumes:
+  cert-data:
+```
 
 ## Domain Attestation and Verification
 
