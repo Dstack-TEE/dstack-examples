@@ -91,7 +91,8 @@ download_command() {
     # Download and extract image
     echo "Downloading Dstack image..."
     local image_url="${IMAGE_DL_URL}"
-    local image_filename="$(basename "${image_url}")"
+    local image_filename
+    image_filename="$(basename "${image_url}")"
     local image_path="${IMAGES_DIR}/${image_filename}"
 
     echo "Downloading image from ${image_url}"
@@ -186,7 +187,7 @@ calc_mrs_command() {
 
     # Run dstack-mr with metadata.json from the image
     echo "Running dstack-mr to calculate MRs..."
-    ${TOOLS_DIR}/dstack-mr -metadata "${IMAGES_DIR}/dstack-${IMAGE_VERSION}/metadata.json" \
+    "${TOOLS_DIR}/dstack-mr" -metadata "${IMAGES_DIR}/dstack-${IMAGE_VERSION}/metadata.json" \
                        -cpu ${VCPU_COUNT} \
                        -memory "${MEM_SIZE}M" \
                        -json > "known_good_mrs.json.tmp"
@@ -245,7 +246,7 @@ EOF
             if [ -n "$instance_id" ]; then
                 echo "✅ App started successfully!"
                 echo "Instance ID: $instance_id"
-                echo $instance_id > instance_id.txt
+                echo "$instance_id" > instance_id.txt
                 break
             fi
             # Check for boot errors

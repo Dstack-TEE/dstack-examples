@@ -6,8 +6,8 @@ CERT_FILE=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
 
 mkdir -p /evidences
 cd /evidences
-cp ${ACME_ACCOUNT_FILE} acme-account.json
-cp ${CERT_FILE} cert.pem
+cp "${ACME_ACCOUNT_FILE}" acme-account.json
+cp "${CERT_FILE}" cert.pem
 
 sha256sum acme-account.json cert.pem > sha256sum.txt
 
@@ -20,5 +20,5 @@ while [ ${#PADDED_HASH} -lt 128 ]; do
 done
 QUOTED_HASH="${PADDED_HASH}"
 
-curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.RawQuote?report_data=${QUOTED_HASH} > quote.json
+curl -s --unix-socket /var/run/tappd.sock "http://localhost/prpc/Tappd.RawQuote?report_data=${QUOTED_HASH}" > quote.json
 echo "Generated evidences successfully"

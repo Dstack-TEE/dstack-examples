@@ -6,7 +6,7 @@ EXTERNAL_PORT=10080
 SERVICE_NAME=server
 
 
-cd $WORKDIR
+cd $WORKDIR || exit
 
 check-update() {
     echo "Checking for updates..."
