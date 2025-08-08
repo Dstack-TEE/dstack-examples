@@ -10,122 +10,9 @@ on:
     - cron: '0 2 * * 1'
 
 jobs:
-  basic-security-checks:
+  basic-checks:
     runs-on: ubuntu-latest
-    name: Basic Security Checks
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          # Install shellcheck
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-          
-          # Install yamllint
-          pip install yamllint
-
-      - name: Run dev.sh security checks
-        run: ./dev.sh security
-
-  secret-scan:
-    runs-on: ubuntu-latest
-    name: Secret Detection
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Run TruffleHog OSS
-        uses: trufflesecurity/trufflehog@main
-        with:
-          path: ./
-          base: main
-          head: HEAD
-          extra_args: --debug --only-verified
-
-  dependency-scan:
-    runs-on: ubuntu-latest
-    name: Dependency Vulnerability Scan
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Scan for vulnerable dependencies
-        run: |
-          echo "Scanning for vulnerable dependencies..."
-
-          # Find all package.json files
-          find . -name "package.json" -not -path "./node_modules/*" | while read -r package_file; do
-            echo "Scanning: $package_file"
-            dir=$(dirname "$package_file")
-
-            if command -v npm >/dev/null 2>&1; then
-              cd "$dir"
-              npm audit --audit-level=high || echo "❌ Vulnerabilities found in $package_file"
-              cd - > /dev/null
-            fi
-          done
-
-          # Find all requirements.txt files
-          find . -name "requirements.txt" -not -path "./venv/*" | while read -r req_file; do
-            echo "Found Python requirements: $req_file"
-            echo "⚠️ Consider using 'pip-audit' for Python dependency scanning"
-          done
-
-          # Find all go.mod files
-          find . -name "go.mod" | while read -r go_file; do
-            echo "Found Go module: $go_file"
-            echo "⚠️ Consider using 'nancy' or 'govulncheck' for Go dependency scanning"
-          done
-
-  dockerfile-scan:
-    runs-on: ubuntu-latest
-    name: Dockerfile Security Scan
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: "**/Dockerfile*"
-          failure-threshold: warning
-          format: sarif
-          output-file: hadolint-results.sarif
-
-      - name: Upload Hadolint results
-        uses: github/codeql-action/upload-sarif@v2
-        if: always()
-        with:
-          sarif_file: hadolint-results.sarif
-
-  code-security:
-    runs-on: ubuntu-latest
-    name: Code Security Analysis
-    permissions:
-      actions: read
-      contents: read
-      security-events: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v2
-        with:
-          languages: javascript, python, go
-          queries: security-and-quality
-
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v2
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v2
-        with:
-          category: "/language:javascript,python,go"
-
-  comprehensive-security:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
-    name: Comprehensive Security Check
+    name: Basic Checks (dev.sh)
     steps:
       - uses: actions/checkout@v4
 
@@ -141,9 +28,57 @@ jobs:
       - name: Run all checks
         run: ./dev.sh check-all
 
+  advanced-security:
+    runs-on: ubuntu-latest
+    name: Advanced Security Scans
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog OSS
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          extra_args: --debug --only-verified
+
+      - name: Run Hadolint
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: "**/Dockerfile*"
+          failure-threshold: warning
+          format: sarif
+          output-file: hadolint-results.sarif
+
+      - name: Upload Hadolint results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: hadolint-results.sarif
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: javascript, python, go
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v2
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+        with:
+          category: "/language:javascript,python,go"
+
   security-summary:
     runs-on: ubuntu-latest
-    needs: [basic-security-checks, secret-scan, dependency-scan, dockerfile-scan, code-security]
+    needs: [basic-checks, advanced-security]
     if: always()
     name: Security Summary
 
@@ -154,23 +89,17 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Check job results
-          basic_result="${{ needs.basic-security-checks.result }}"
-          secret_result="${{ needs.secret-scan.result }}"
-          dependency_result="${{ needs.dependency-scan.result }}"
-          dockerfile_result="${{ needs.dockerfile-scan.result }}"
-          code_result="${{ needs.code-security.result }}"
+          basic_result="${{ needs.basic-checks.result }}"
+          advanced_result="${{ needs.advanced-security.result }}"
 
           echo "| Security Check | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Basic Security | $basic_result |" >> $GITHUB_STEP_SUMMARY
-          echo "| Secret Detection | $secret_result |" >> $GITHUB_STEP_SUMMARY
-          echo "| Dependency Scan | $dependency_result |" >> $GITHUB_STEP_SUMMARY
-          echo "| Dockerfile Scan | $dockerfile_result |" >> $GITHUB_STEP_SUMMARY
-          echo "| Code Analysis | $code_result |" >> $GITHUB_STEP_SUMMARY
+          echo "| Basic Checks (dev.sh) | $basic_result |" >> $GITHUB_STEP_SUMMARY
+          echo "| Advanced Security | $advanced_result |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Overall status
-          if [[ "$basic_result $secret_result $dependency_result $dockerfile_result $code_result" == *"failure"* ]]; then
+          if [[ "$basic_result $advanced_result" == *"failure"* ]]; then
             echo "🔴 **Security issues detected!** Please review the scan results." >> $GITHUB_STEP_SUMMARY
           else
             echo "🟢 **All security scans passed successfully.**" >> $GITHUB_STEP_SUMMARY

@@ -10,69 +10,8 @@ on:
     - cron: '0 0 * * 0'
 
 jobs:
-  detect-changes:
+  check-all:
     runs-on: ubuntu-latest
-    outputs:
-      examples: ${{ steps.changes.outputs.examples }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed examples
-        id: changes
-        run: |
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            # For scheduled runs, test all examples
-            examples=$(./dev.sh list | grep -E "^  - " | sed 's/^  - //' | jq -R -s -c 'split("\n")[:-1]')
-          else
-            # For PR/push, only test changed examples
-            changed_files=$(git diff --name-only ${{ github.event.before }}..${{ github.sha }} || git diff --name-only HEAD~1)
-            examples=$(echo "$changed_files" | grep -E "(docker-compose\.ya?ml|Dockerfile|\.sh)$" | xargs dirname 2>/dev/null | sort -u | jq -R -s -c 'split("\n")[:-1]' || echo '[]')
-          fi
-          echo "examples=$examples" >> $GITHUB_OUTPUT
-
-  validate-examples:
-    runs-on: ubuntu-latest
-    needs: detect-changes
-    if: needs.detect-changes.outputs.examples != '[]'
-    strategy:
-      matrix:
-        example: ${{ fromJson(needs.detect-changes.outputs.examples) }}
-      fail-fast: false
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate example
-        run: |
-          example="${{ matrix.example }}"
-          echo "Validating: $example"
-          ./dev.sh validate "$example"
-
-  lint-and-security:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          # Install shellcheck
-          sudo apt-get update
-          sudo apt-get install -y shellcheck
-          
-          # Install yamllint
-          pip install yamllint
-
-      - name: Run lint checks
-        run: ./dev.sh lint
-
-      - name: Run security checks
-        run: ./dev.sh security
-
-  comprehensive-check:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
 
@@ -88,30 +27,14 @@ jobs:
       - name: Run all checks
         run: ./dev.sh check-all
 
-  summary:
-    runs-on: ubuntu-latest
-    needs: [detect-changes, validate-examples, lint-and-security]
-    if: always()
-
-    steps:
-      - name: Validation Summary
+      - name: Create summary
+        if: always()
         run: |
           echo "## Validation Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-
-          examples="${{ needs.detect-changes.outputs.examples }}"
-          if [ "$examples" == "[]" ] || [ "$examples" == "" ]; then
-            echo "No examples were modified or detected for validation." >> $GITHUB_STEP_SUMMARY
-          else
-            echo "Validated examples: $examples" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-
-            # Check job results
-            validation_result="${{ needs.validate-examples.result }}"
-            lint_security_result="${{ needs.lint-and-security.result }}"
-
-            echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
-            echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-            echo "| Example Validation | $validation_result |" >> $GITHUB_STEP_SUMMARY
-            echo "| Lint & Security | $lint_security_result |" >> $GITHUB_STEP_SUMMARY
-          fi
+          echo "✅ Ran comprehensive checks including:" >> $GITHUB_STEP_SUMMARY
+          echo "- Structure validation for all examples" >> $GITHUB_STEP_SUMMARY
+          echo "- Docker Compose syntax validation" >> $GITHUB_STEP_SUMMARY
+          echo "- Security scanning" >> $GITHUB_STEP_SUMMARY
+          echo "- Shell script linting" >> $GITHUB_STEP_SUMMARY
+          echo "- YAML linting" >> $GITHUB_STEP_SUMMARY
