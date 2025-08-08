@@ -1,0 +1,40 @@
+name: Validate Examples
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # Run weekly to catch dependency issues
+    - cron: '0 0 * * 0'
+
+jobs:
+  check-all:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # Install shellcheck
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          
+          # Install yamllint
+          pip install yamllint
+
+      - name: Run all checks
+        run: ./dev.sh check-all
+
+      - name: Create summary
+        if: always()
+        run: |
+          echo "## Validation Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Ran comprehensive checks including:" >> $GITHUB_STEP_SUMMARY
+          echo "- Structure validation for all examples" >> $GITHUB_STEP_SUMMARY
+          echo "- Docker Compose syntax validation" >> $GITHUB_STEP_SUMMARY
+          echo "- Security scanning" >> $GITHUB_STEP_SUMMARY
+          echo "- Shell script linting" >> $GITHUB_STEP_SUMMARY
+          echo "- YAML linting" >> $GITHUB_STEP_SUMMARY

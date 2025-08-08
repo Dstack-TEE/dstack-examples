@@ -1,0 +1,112 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run security scan weekly
+    - cron: '0 2 * * 1'
+
+jobs:
+  basic-checks:
+    runs-on: ubuntu-latest
+    name: Basic Checks (dev.sh)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # Install shellcheck
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          
+          # Install yamllint
+          pip install yamllint
+
+      - name: Run all checks
+        run: ./dev.sh check-all
+
+  advanced-security:
+    runs-on: ubuntu-latest
+    name: Advanced Security Scans
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run TruffleHog OSS
+        uses: trufflesecurity/trufflehog@main
+        with:
+          path: ./
+          base: main
+          head: HEAD
+          extra_args: --debug --only-verified
+
+      - name: Find and scan Dockerfiles
+        run: |
+          # Find all Dockerfiles and run hadolint on each
+          dockerfiles=$(find . -name "Dockerfile*" -type f | grep -v node_modules | grep -v .git)
+          if [ -n "$dockerfiles" ]; then
+            echo "Found Dockerfiles:"
+            echo "$dockerfiles"
+            # Run hadolint on all found Dockerfiles
+            docker run --rm -i hadolint/hadolint:latest-debian hadolint --format sarif - < <(cat $dockerfiles) > hadolint-results.sarif || true
+          else
+            echo "No Dockerfiles found"
+            echo '{"version": "2.1.0", "runs": []}' > hadolint-results.sarif
+          fi
+
+      - name: Upload Hadolint results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: hadolint-results.sarif
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          queries: security-and-quality
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:python"
+
+  security-summary:
+    runs-on: ubuntu-latest
+    needs: [basic-checks, advanced-security]
+    if: always()
+    name: Security Summary
+
+    steps:
+      - name: Security Scan Summary
+        run: |
+          echo "## Security Scan Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Check job results
+          basic_result="${{ needs.basic-checks.result }}"
+          advanced_result="${{ needs.advanced-security.result }}"
+
+          echo "| Security Check | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|----------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Basic Checks (dev.sh) | $basic_result |" >> $GITHUB_STEP_SUMMARY
+          echo "| Advanced Security | $advanced_result |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Overall status
+          if [[ "$basic_result $advanced_result" == *"failure"* ]]; then
+            echo "🔴 **Security issues detected!** Please review the scan results." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "🟢 **All security scans passed successfully.**" >> $GITHUB_STEP_SUMMARY
+          fi

@@ -29,8 +29,8 @@ MINUTE=$(date +%-M)
 # Use time-based selection instead of random to create more predictable upgrade patterns
 # This will switch images roughly every minute
 if [ $((MINUTE % 2)) -eq 0 ]; then
-    echo "nginx@sha256:d67fed8b03f1ed3d2a5e3cbc5ca268ad7a7528adfdd1220c420c8cf4e3802d9c" > $OUTPUT
+    echo "nginx@sha256:d67fed8b03f1ed3d2a5e3cbc5ca268ad7a7528adfdd1220c420c8cf4e3802d9c" > "$OUTPUT"
 else
-    echo "nginx@sha256:81aa342ba08035632898b78d46d0e11d79abeee63b3a6994a44ac34e102ef888" > $OUTPUT
+    echo "nginx@sha256:81aa342ba08035632898b78d46d0e11d79abeee63b3a6994a44ac34e102ef888" > "$OUTPUT"
 fi
 

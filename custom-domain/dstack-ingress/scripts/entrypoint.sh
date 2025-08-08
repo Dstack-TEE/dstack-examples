@@ -80,9 +80,9 @@ obtain_certificate() {
     certbot certonly --dns-cloudflare \
         --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini \
         --dns-cloudflare-propagation-seconds 120 \
-        --email $CERTBOT_EMAIL \
+        --email "$CERTBOT_EMAIL" \
         --agree-tos --no-eff-email --non-interactive \
-        -d $DOMAIN
+        -d "$DOMAIN"
 }
 
 set_cname_record() {

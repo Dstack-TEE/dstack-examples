@@ -1,0 +1,8 @@
+formatter:
+  type: basic
+  retain_line_breaks: true
+  trim_trailing_whitespace: true
+  scan_folded_as_literal: true
+  include_document_start: false
+  line_ending: lf
+  indent: 2

@@ -112,7 +112,7 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     fi
 
     echo "Logging in to AWS ECR..."
-    aws ecr get-login-password --region $DSTACK_AWS_REGION | docker login --username AWS --password-stdin "$DSTACK_AWS_ECR_REGISTRY"
+    aws ecr get-login-password --region "$DSTACK_AWS_REGION" | docker login --username AWS --password-stdin "$DSTACK_AWS_ECR_REGISTRY"
     if [ $? -eq 0 ]; then
         echo "AWS ECR login successful"
         notify_host_hoot_info "AWS ECR login successful"
@@ -142,17 +142,21 @@ fi
 
 
 if [[ -e /var/run/dstack.sock ]]; then
-    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://dstack/Info | jq -j .app_id)
+    DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://dstack/Info | jq -j .app_id)
+    export DSTACK_APP_ID
 else
-    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://dstack/prpc/Tappd.Info | jq -j .app_id)
+    DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://dstack/prpc/Tappd.Info | jq -j .app_id)
+    export DSTACK_APP_ID
 fi
 # Check if app-compose.json has default_gateway_domain field and DSTACK_GATEWAY_DOMAIN is not set
 # If true, set DSTACK_GATEWAY_DOMAIN from app-compose.json
 if [[ $(jq 'has("default_gateway_domain")' app-compose.json) == "true" && -z "$DSTACK_GATEWAY_DOMAIN" ]]; then
-    export DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)
+    DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)
+    export DSTACK_GATEWAY_DOMAIN
 fi
 if [[ -n "$DSTACK_GATEWAY_DOMAIN" ]]; then
-    export DSTACK_APP_DOMAIN=$DSTACK_APP_ID"."$DSTACK_GATEWAY_DOMAIN
+    DSTACK_APP_DOMAIN=$DSTACK_APP_ID"."$DSTACK_GATEWAY_DOMAIN
+    export DSTACK_APP_DOMAIN
 fi
 
 echo "----------------------------------------------"

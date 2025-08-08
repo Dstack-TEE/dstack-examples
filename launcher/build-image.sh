@@ -10,6 +10,6 @@ if ! docker buildx inspect buildkit_20 &>/dev/null; then
 fi
 touch pinned-packages.txt
 git rev-parse HEAD > .GIT_REV
-docker buildx build --platform linux/amd64 --builder buildkit_20 --no-cache --build-arg SOURCE_DATE_EPOCH="0" --output type=docker,name=$NAME,rewrite-timestamp=true .
-docker run --rm --entrypoint bash $NAME -c "dpkg -l | grep '^ii' |awk '{print \$2\"=\"\$3}' | sort" > pinned-packages.txt
+docker buildx build --platform linux/amd64 --builder buildkit_20 --no-cache --build-arg SOURCE_DATE_EPOCH="0" --output "type=docker,name=$NAME,rewrite-timestamp=true" .
+docker run --rm --entrypoint bash "$NAME" -c "dpkg -l | grep '^ii' |awk '{print \$2\"=\"\$3}' | sort" > pinned-packages.txt
 rm .GIT_REV
