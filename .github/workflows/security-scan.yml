@@ -10,6 +10,24 @@ on:
     - cron: '0 2 * * 1'
 
 jobs:
+  basic-security-checks:
+    runs-on: ubuntu-latest
+    name: Basic Security Checks
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # Install shellcheck
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          
+          # Install yamllint
+          pip install yamllint
+
+      - name: Run dev.sh security checks
+        run: ./dev.sh security
+
   secret-scan:
     runs-on: ubuntu-latest
     name: Secret Detection
@@ -80,53 +98,13 @@ jobs:
         with:
           sarif_file: hadolint-results.sarif
 
-  compose-security:
-    runs-on: ubuntu-latest
-    name: Docker Compose Security Check
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Security check for Docker Compose files
-        run: |
-          echo "Checking Docker Compose files for security issues..."
-
-          # Find all docker-compose files
-          find . -name "docker-compose.y*ml" | while read -r compose_file; do
-            echo "Checking: $compose_file"
-
-            # Check for privileged containers
-            if grep -q "privileged.*true" "$compose_file"; then
-              echo "❌ Privileged container found in: $compose_file"
-            fi
-
-            # Check for host network mode
-            if grep -q "network_mode.*host" "$compose_file"; then
-              echo "⚠️ Host network mode found in: $compose_file"
-            fi
-
-            # Check for dangerous volume mounts
-            if grep -q "/var/run/docker.sock" "$compose_file"; then
-              echo "❌ Docker socket mount found in: $compose_file"
-            fi
-
-            if grep -q ":/proc" "$compose_file"; then
-              echo "⚠️ /proc mount found in: $compose_file"
-            fi
-
-            # Check for exposed sensitive ports
-            if grep -E "ports:.*:(22|3306|5432|6379|27017|9200)" "$compose_file"; then
-              echo "⚠️ Sensitive ports exposed in: $compose_file"
-            fi
-
-            # Check for missing restart policies
-            if ! grep -q "restart:" "$compose_file"; then
-              echo "ℹ️ No restart policy specified in: $compose_file"
-            fi
-          done
-
   code-security:
     runs-on: ubuntu-latest
     name: Code Security Analysis
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     steps:
       - uses: actions/checkout@v4
 
@@ -144,9 +122,28 @@ jobs:
         with:
           category: "/language:javascript,python,go"
 
+  comprehensive-security:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    name: Comprehensive Security Check
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          # Install shellcheck
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          
+          # Install yamllint
+          pip install yamllint
+
+      - name: Run all checks
+        run: ./dev.sh check-all
+
   security-summary:
     runs-on: ubuntu-latest
-    needs: [secret-scan, dependency-scan, dockerfile-scan, compose-security, code-security]
+    needs: [basic-security-checks, secret-scan, dependency-scan, dockerfile-scan, code-security]
     if: always()
     name: Security Summary
 
@@ -157,23 +154,23 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Check job results
+          basic_result="${{ needs.basic-security-checks.result }}"
           secret_result="${{ needs.secret-scan.result }}"
           dependency_result="${{ needs.dependency-scan.result }}"
           dockerfile_result="${{ needs.dockerfile-scan.result }}"
-          compose_result="${{ needs.compose-security.result }}"
           code_result="${{ needs.code-security.result }}"
 
           echo "| Security Check | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|----------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Basic Security | $basic_result |" >> $GITHUB_STEP_SUMMARY
           echo "| Secret Detection | $secret_result |" >> $GITHUB_STEP_SUMMARY
           echo "| Dependency Scan | $dependency_result |" >> $GITHUB_STEP_SUMMARY
           echo "| Dockerfile Scan | $dockerfile_result |" >> $GITHUB_STEP_SUMMARY
-          echo "| Compose Security | $compose_result |" >> $GITHUB_STEP_SUMMARY
           echo "| Code Analysis | $code_result |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Overall status
-          if [[ "$secret_result $dependency_result $dockerfile_result $compose_result $code_result" == *"failure"* ]]; then
+          if [[ "$basic_result $secret_result $dependency_result $dockerfile_result $code_result" == *"failure"* ]]; then
             echo "🔴 **Security issues detected!** Please review the scan results." >> $GITHUB_STEP_SUMMARY
           else
             echo "🟢 **All security scans passed successfully.**" >> $GITHUB_STEP_SUMMARY

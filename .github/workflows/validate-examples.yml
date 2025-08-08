@@ -24,15 +24,15 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" == "schedule" ]; then
             # For scheduled runs, test all examples
-            examples=$(find . -name "docker-compose.y*ml" -not -path "./.github/*" | xargs dirname | sort -u | jq -R -s -c 'split("\n")[:-1]')
+            examples=$(./dev.sh list | grep -E "^  - " | sed 's/^  - //' | jq -R -s -c 'split("\n")[:-1]')
           else
             # For PR/push, only test changed examples
             changed_files=$(git diff --name-only ${{ github.event.before }}..${{ github.sha }} || git diff --name-only HEAD~1)
-            examples=$(echo "$changed_files" | grep -E "(docker-compose\.ya?ml|Dockerfile|\.sh)$" | xargs dirname | sort -u | jq -R -s -c 'split("\n")[:-1]' || echo '[]')
+            examples=$(echo "$changed_files" | grep -E "(docker-compose\.ya?ml|Dockerfile|\.sh)$" | xargs dirname 2>/dev/null | sort -u | jq -R -s -c 'split("\n")[:-1]' || echo '[]')
           fi
           echo "examples=$examples" >> $GITHUB_OUTPUT
 
-  validate-structure:
+  validate-examples:
     runs-on: ubuntu-latest
     needs: detect-changes
     if: needs.detect-changes.outputs.examples != '[]'
@@ -44,113 +44,53 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate example structure
+      - name: Validate example
         run: |
           example="${{ matrix.example }}"
-          echo "Validating structure for: $example"
+          echo "Validating: $example"
+          ./dev.sh validate "$example"
 
-          # Check if directory exists
-          if [ ! -d "$example" ]; then
-            echo "❌ Example directory does not exist: $example"
-            exit 1
-          fi
-
-          # Check for required files
-          required_files=("README.md")
-          for file in "${required_files[@]}"; do
-            if [ ! -f "$example/$file" ]; then
-              echo "❌ Missing required file: $example/$file"
-              exit 1
-            fi
-          done
-
-          # Check for docker-compose file
-          if [ ! -f "$example/docker-compose.yml" ] && [ ! -f "$example/docker-compose.yaml" ]; then
-            echo "❌ Missing docker-compose file in: $example"
-            exit 1
-          fi
-
-          echo "✅ Structure validation passed for: $example"
-
-  validate-docker-compose:
+  lint-and-security:
     runs-on: ubuntu-latest
-    needs: detect-changes
-    if: needs.detect-changes.outputs.examples != '[]'
-    strategy:
-      matrix:
-        example: ${{ fromJson(needs.detect-changes.outputs.examples) }}
-      fail-fast: false
-
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate Docker Compose files
+      - name: Install dependencies
         run: |
-          example="${{ matrix.example }}"
-          echo "Validating Docker Compose for: $example"
+          # Install shellcheck
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          
+          # Install yamllint
+          pip install yamllint
 
-          cd "$example"
+      - name: Run lint checks
+        run: ./dev.sh lint
 
-          # Find docker-compose file
-          compose_file=""
-          if [ -f "docker-compose.yml" ]; then
-            compose_file="docker-compose.yml"
-          elif [ -f "docker-compose.yaml" ]; then
-            compose_file="docker-compose.yaml"
-          else
-            echo "❌ No docker-compose file found in: $example"
-            exit 1
-          fi
+      - name: Run security checks
+        run: ./dev.sh security
 
-          # Validate compose file syntax
-          if ! docker compose -f "$compose_file" config > /dev/null; then
-            echo "❌ Invalid docker-compose syntax in: $example/$compose_file"
-            exit 1
-          fi
-
-          echo "✅ Docker Compose validation passed for: $example"
-
-  security-scan:
+  comprehensive-check:
     runs-on: ubuntu-latest
-    needs: detect-changes
-    if: needs.detect-changes.outputs.examples != '[]'
-    strategy:
-      matrix:
-        example: ${{ fromJson(needs.detect-changes.outputs.examples) }}
-      fail-fast: false
-
+    if: github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@v4
 
-      - name: Security scan
+      - name: Install dependencies
         run: |
-          example="${{ matrix.example }}"
-          echo "Running security scan for: $example"
+          # Install shellcheck
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          
+          # Install yamllint
+          pip install yamllint
 
-          # Check for common security issues
-          security_issues=0
-
-          # Check for hardcoded secrets (basic patterns)
-          if grep -r -i -E "(password|secret|key|token).*=.*['\"][^'\"]{8,}['\"]" "$example/" 2>/dev/null; then
-            echo "⚠️ Potential hardcoded secrets found in: $example"
-            security_issues=$((security_issues + 1))
-          fi
-
-          # Check for exposed sensitive ports
-          if grep -E "ports:.*:(22|3306|5432|6379|27017)" "$example"/*.yml "$example"/*.yaml 2>/dev/null; then
-            echo "⚠️ Potentially sensitive ports exposed in: $example"
-            security_issues=$((security_issues + 1))
-          fi
-
-          if [ $security_issues -gt 0 ]; then
-            echo "⚠️ Security scan completed with $security_issues potential issues in: $example"
-          else
-            echo "✅ Security scan passed for: $example"
-          fi
+      - name: Run all checks
+        run: ./dev.sh check-all
 
   summary:
     runs-on: ubuntu-latest
-    needs: [detect-changes, validate-structure, validate-docker-compose, security-scan]
+    needs: [detect-changes, validate-examples, lint-and-security]
     if: always()
 
     steps:
@@ -167,13 +107,11 @@ jobs:
             echo "" >> $GITHUB_STEP_SUMMARY
 
             # Check job results
-            structure_result="${{ needs.validate-structure.result }}"
-            compose_result="${{ needs.validate-docker-compose.result }}"
-            security_result="${{ needs.security-scan.result }}"
+            validation_result="${{ needs.validate-examples.result }}"
+            lint_security_result="${{ needs.lint-and-security.result }}"
 
             echo "| Check | Status |" >> $GITHUB_STEP_SUMMARY
             echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-            echo "| Structure | $structure_result |" >> $GITHUB_STEP_SUMMARY
-            echo "| Docker Compose | $compose_result |" >> $GITHUB_STEP_SUMMARY
-            echo "| Security Scan | $security_result |" >> $GITHUB_STEP_SUMMARY
+            echo "| Example Validation | $validation_result |" >> $GITHUB_STEP_SUMMARY
+            echo "| Lint & Security | $lint_security_result |" >> $GITHUB_STEP_SUMMARY
           fi
