@@ -1,13 +1,14 @@
 # Custom Domain Setup for dstack Applications
 
-This repository provides a solution for setting up custom domains with automatic SSL certificate management for dstack applications using Cloudflare DNS and Let's Encrypt.
+This repository provides a solution for setting up custom domains with automatic SSL certificate management for dstack applications using various DNS providers and Let's Encrypt.
 
 ## Overview
 
 This project enables you to run dstack applications with your own custom domain, complete with:
 
 - Automatic SSL certificate provisioning and renewal via Let's Encrypt
-- Cloudflare DNS configuration for CNAME, TXT, and CAA records
+- Multi-provider DNS support (Cloudflare, Linode DNS, more to come)
+- Automatic DNS configuration for CNAME, TXT, and CAA records
 - Nginx reverse proxy to route traffic to your application
 - Certificate evidence generation for verification
 - Strong SSL/TLS configuration with modern cipher suites (AES-GCM and ChaCha20-Poly1305)
@@ -17,16 +18,20 @@ This project enables you to run dstack applications with your own custom domain,
 The dstack-ingress system provides a seamless way to set up custom domains for dstack applications with automatic SSL certificate management. Here's how it works:
 
 1. **Initial Setup**:
+
    - When first deployed, the container automatically obtains SSL certificates from Let's Encrypt using DNS validation
-   - It configures Cloudflare DNS by creating necessary CNAME, TXT, and optional CAA records
+   - It configures your DNS provider by creating necessary CNAME, TXT, and optional CAA records
    - Nginx is configured to use the obtained certificates and proxy requests to your application
 
 2. **DNS Configuration**:
+
    - A CNAME record is created to point your custom domain to the dstack gateway domain
    - A TXT record is added with application identification information to help dstack-gateway to route traffic to your application
    - If enabled, CAA records are set to restrict which Certificate Authorities can issue certificates for your domain
+   - The system automatically detects your DNS provider based on environment variables
 
 3. **Certificate Management**:
+
    - SSL certificates are automatically obtained during initial setup
    - A scheduled task runs twice daily to check for certificate renewal
    - When certificates are renewed, Nginx is automatically reloaded to use the new certificates
@@ -40,7 +45,8 @@ The dstack-ingress system provides a seamless way to set up custom domains for d
 
 ### Prerequisites
 
-- Host your domain on Cloudflare and have access to the Cloudflare account with API token
+- Host your domain on one of the supported DNS providers
+- Have appropriate API credentials for your DNS provider (see [DNS Provider Configuration](DNS_PROVIDERS.md) for details)
 
 ### Deployment
 
@@ -57,7 +63,13 @@ services:
     ports:
       - "443:443"
     environment:
+      # DNS Provider
+      - DNS_PROVIDER=cloudflare
+
+      # Cloudflare example
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+
+      # Common configuration
       - DOMAIN=${DOMAIN}
       - GATEWAY_DOMAIN=${GATEWAY_DOMAIN}
       - CERTBOT_EMAIL=${CERTBOT_EMAIL}
@@ -68,20 +80,22 @@ services:
       - cert-data:/etc/letsencrypt
     restart: unless-stopped
   app:
-    image: nginx  # Replace with your application image
+    image: nginx # Replace with your application image
     restart: unless-stopped
 volumes:
-  cert-data:  # Persistent volume for certificates
+  cert-data: # Persistent volume for certificates
 ```
 
-Explanation of environment variables:
+**Core Environment Variables:**
 
-- `CLOUDFLARE_API_TOKEN`: Your Cloudflare API token
+- `DNS_PROVIDER`: DNS provider to use (cloudflare, linode)
 - `DOMAIN`: Your custom domain
-- `GATEWAY_DOMAIN`: The dstack gateway domain. (e.g. `_.dstack-prod5.phala.network` for Phala Cloud)
+- `GATEWAY_DOMAIN`: The dstack gateway domain (e.g. `_.dstack-prod5.phala.network` for Phala Cloud)
 - `CERTBOT_EMAIL`: Your email address used in Let's Encrypt certificate requests
 - `TARGET_ENDPOINT`: The plain HTTP endpoint of your dstack application
 - `SET_CAA`: Set to `true` to enable CAA record setup
+
+For provider-specific configuration details, see [DNS Provider Configuration](DNS_PROVIDERS.md).
 
 #### Option 2: Build Your Own Image
 
@@ -95,6 +109,7 @@ If you prefer to build the image yourself:
 ```
 
 **Important**: You must use the `build-image.sh` script to build the image. This script ensures reproducible builds with:
+
 - Specific buildkit version (v0.20.2)
 - Deterministic timestamps (`SOURCE_DATE_EPOCH=0`)
 - Package pinning for consistency
@@ -150,10 +165,12 @@ The dstack-ingress system provides mechanisms to verify and attest that your cus
 When certificates are issued or renewed, the system automatically generates a set of cryptographically linked evidence files:
 
 1. **Access Evidence Files**:
+
    - Evidence files are accessible at `https://your-domain.com/evidences/`
    - Key files include `acme-account.json`, `cert.pem`, `sha256sum.txt`, and `quote.json`
 
 2. **Verification Chain**:
+
    - `quote.json` contains a TDX quote with the SHA-256 digest of `sha256sum.txt` embedded in the report_data field
    - `sha256sum.txt` contains cryptographic checksums of both `acme-account.json` and `cert.pem`
    - When the TDX quote is verified, it cryptographically proves the integrity of the entire evidence chain
@@ -178,9 +195,10 @@ The output will display CAA records that restrict certificate issuance exclusive
 All Let's Encrypt certificates are logged in public Certificate Transparency (CT) logs, enabling independent verification:
 
 **CT Log Verification**:
-   - Visit [crt.sh](https://crt.sh/) and search for your domain
-   - Confirm that the certificates match those issued by the dstack-ingress system
-   - This public logging ensures that all certificates are visible and can be monitored for unauthorized issuance
+
+- Visit [crt.sh](https://crt.sh/) and search for your domain
+- Confirm that the certificates match those issued by the dstack-ingress system
+- This public logging ensures that all certificates are visible and can be monitored for unauthorized issuance
 
 ## License
 

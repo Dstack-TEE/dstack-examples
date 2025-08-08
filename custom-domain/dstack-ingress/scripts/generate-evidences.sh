@@ -1,5 +1,4 @@
 #!/bin/bash
-set -e
 
 ACME_ACCOUNT_FILE=$(ls /etc/letsencrypt/accounts/acme-v02.api.letsencrypt.org/directory/*/regr.json)
 CERT_FILE=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
@@ -21,4 +20,8 @@ done
 QUOTED_HASH="${PADDED_HASH}"
 
 curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.RawQuote?report_data=${QUOTED_HASH} > quote.json
+if [ $? -ne 0 ]; then
+    echo "Error: Failed to generate evidences"
+    exit 1
+fi
 echo "Generated evidences successfully"

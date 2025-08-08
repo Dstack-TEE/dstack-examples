@@ -1,32 +1,51 @@
 #!/bin/bash
 source /opt/app-venv/bin/activate
 
-echo "Renewing certificate for $DOMAIN"
+INITIAL=false
+while getopts "n" opt; do
+    case $opt in
+    n)
+        INITIAL=true
+        ;;
+    \?)
+        echo "Invalid option: -$OPTARG" >&2
+        exit 1
+        ;;
+    esac
+done
 
-# Perform the actual renewal with explicit credentials and capture the output
-RENEW_OUTPUT=$(certbot renew --dns-cloudflare --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini --dns-cloudflare-propagation-seconds 120 --non-interactive 2>&1)
-RENEW_STATUS=$?
+# Use the unified certbot manager
+SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
+python3 "$SCRIPT_DIR/certman.py" auto --domain "$DOMAIN" --email "$CERTBOT_EMAIL"
+CERT_STATUS=$?
 
-# Check if renewal failed
-if [ $RENEW_STATUS -ne 0 ]; then
-    echo "Certificate renewal failed" >&2
+if [ $CERT_STATUS -eq 1 ]; then
+    echo "Certificate management failed" >&2
     exit 1
-fi
-
-# Check if no renewals were attempted
-if echo "$RENEW_OUTPUT" | grep -q "No renewals were attempted"; then
+elif [ $CERT_STATUS -eq 2 ]; then
     echo "No certificates need renewal, skipping evidence generation"
-    exit 0
+    if [ "$INITIAL" = false ]; then
+        exit 0
+    fi
 fi
 
-# Only generate evidences if certificates were actually renewed
+# Generate evidences (for both obtain and renew)
+echo "Generating evidence files..."
 generate-evidences.sh
 
-# Only reload Nginx if we got here (meaning certificates were renewed)
-if ! nginx -s reload; then
-    echo "Nginx reload failed" >&2
-    exit 2
+# Reload Nginx for certificate updates
+# Check if certificate exists to determine if this was obtain or renew
+if [ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]; then
+    if [ "$INITIAL" = true ]; then
+        echo "Certificate obtained successfully for $DOMAIN"
+    else
+        if ! nginx -s reload; then
+            echo "Nginx reload failed" >&2
+            exit 2
+        else
+            echo "Certificate renewed and Nginx reloaded successfully for $DOMAIN"
+        fi
+    fi
 fi
 
 exit 0
-

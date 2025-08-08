@@ -32,9 +32,10 @@ RUN set -e; \
 
 RUN mkdir -p /etc/letsencrypt /var/www/certbot /usr/share/nginx/html
 
-COPY ./scripts/* /scripts/
-RUN chmod +x /scripts/*
+COPY ./scripts /scripts/
+RUN chmod +x /scripts/*.sh /scripts/*.py
 ENV PATH="/scripts:$PATH"
+ENV PYTHONPATH="/scripts"
 COPY .GIT_REV /etc/
 
 ENTRYPOINT ["/scripts/entrypoint.sh"]
