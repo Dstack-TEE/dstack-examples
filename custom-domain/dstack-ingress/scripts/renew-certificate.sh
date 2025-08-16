@@ -4,7 +4,11 @@ source /opt/app-venv/bin/activate
 echo "Renewing certificate for $DOMAIN"
 
 # Perform the actual renewal with explicit credentials and capture the output
-RENEW_OUTPUT=$(certbot renew --dns-cloudflare --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini --dns-cloudflare-propagation-seconds 120 --non-interactive 2>&1)
+if [ "$DNS_PROVIDER" = "namecheap" ]; then
+    RENEW_OUTPUT=$(certbot renew --dns-namecheap --dns-namecheap-credentials ~/.namecheap/namecheap.ini --non-interactive 2>&1)
+else
+    RENEW_OUTPUT=$(certbot renew --dns-cloudflare --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini --dns-cloudflare-propagation-seconds 120 --non-interactive 2>&1)
+fi
 RENEW_STATUS=$?
 
 # Check if renewal failed

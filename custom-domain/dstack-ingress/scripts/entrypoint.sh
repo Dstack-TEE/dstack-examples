@@ -9,7 +9,13 @@ setup_py_env() {
         python3 -m venv --system-site-packages /opt/app-venv
     fi
     source /opt/app-venv/bin/activate
-    pip install certbot-dns-cloudflare==4.0.0
+    
+    if [ "$DNS_PROVIDER" = "namecheap" ]; then
+        pip install certbot-dns-namecheap
+    else
+        # Default to Cloudflare
+        pip install certbot-dns-cloudflare==4.0.0
+    fi
 }
 
 PROXY_CMD="proxy"
@@ -76,22 +82,37 @@ EOF
 }
 
 obtain_certificate() {
-    # Request certificate using the virtual environment
-    certbot certonly --dns-cloudflare \
-        --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini \
-        --dns-cloudflare-propagation-seconds 120 \
-        --email $CERTBOT_EMAIL \
-        --agree-tos --no-eff-email --non-interactive \
-        -d $DOMAIN
+    if [ "$DNS_PROVIDER" = "namecheap" ]; then
+        # Request certificate using Namecheap DNS
+        certbot certonly --dns-namecheap \
+            --dns-namecheap-credentials ~/.namecheap/namecheap.ini \
+            --email $CERTBOT_EMAIL \
+            --agree-tos --no-eff-email --non-interactive \
+            -d $DOMAIN
+    else
+        # Default to Cloudflare
+        certbot certonly --dns-cloudflare \
+            --dns-cloudflare-credentials ~/.cloudflare/cloudflare.ini \
+            --dns-cloudflare-propagation-seconds 120 \
+            --email $CERTBOT_EMAIL \
+            --agree-tos --no-eff-email --non-interactive \
+            -d $DOMAIN
+    fi
 }
 
 set_cname_record() {
-    # Use the Python client to set the CNAME record
-    # This will automatically check for and delete existing records
-    cloudflare_dns.py set_cname \
-        --zone-id "$CLOUDFLARE_ZONE_ID" \
-        --domain "$DOMAIN" \
-        --content "$GATEWAY_DOMAIN"
+    if [ "$DNS_PROVIDER" = "namecheap" ]; then
+        # Use Namecheap DNS client to set the CNAME record
+        namecheap_dns.py set_cname \
+            --domain "$DOMAIN" \
+            --content "$GATEWAY_DOMAIN"
+    else
+        # Use Cloudflare DNS client to set the CNAME record
+        cloudflare_dns.py set_cname \
+            --zone-id "$CLOUDFLARE_ZONE_ID" \
+            --domain "$DOMAIN" \
+            --content "$GATEWAY_DOMAIN"
+    fi
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to set CNAME record for $DOMAIN"
@@ -105,11 +126,18 @@ set_txt_record() {
     # Generate a unique app ID if not provided
     APP_ID=${APP_ID:-$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info | jq -j '.app_id')}
 
-    # Use the Python client to set the TXT record
-    cloudflare_dns.py set_txt \
-        --zone-id "$CLOUDFLARE_ZONE_ID" \
-        --domain "${TXT_PREFIX}.${DOMAIN}" \
-        --content "$APP_ID:$PORT"
+    if [ "$DNS_PROVIDER" = "namecheap" ]; then
+        # Use Namecheap DNS client to set the TXT record
+        namecheap_dns.py set_txt \
+            --domain "${TXT_PREFIX}.${DOMAIN}" \
+            --content "$APP_ID:$PORT"
+    else
+        # Use Cloudflare DNS client to set the TXT record
+        cloudflare_dns.py set_txt \
+            --zone-id "$CLOUDFLARE_ZONE_ID" \
+            --domain "${TXT_PREFIX}.${DOMAIN}" \
+            --content "$APP_ID:$PORT"
+    fi
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to set TXT record for $DOMAIN"
@@ -126,11 +154,21 @@ set_caa_record() {
     local ACCOUNT_URI
     ACCOUNT_URI=$(jq -j '.uri' /evidences/acme-account.json)
     echo "Adding CAA record for $DOMAIN, accounturi=$ACCOUNT_URI"
-    cloudflare_dns.py set_caa \
-        --zone-id "$CLOUDFLARE_ZONE_ID" \
-        --domain "$DOMAIN" \
-        --caa-tag "issue" \
-        --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
+    
+    if [ "$DNS_PROVIDER" = "namecheap" ]; then
+        # Use Namecheap DNS client to set the CAA record
+        namecheap_dns.py set_caa \
+            --domain "$DOMAIN" \
+            --caa-tag "issue" \
+            --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
+    else
+        # Use Cloudflare DNS client to set the CAA record
+        cloudflare_dns.py set_caa \
+            --zone-id "$CLOUDFLARE_ZONE_ID" \
+            --domain "$DOMAIN" \
+            --caa-tag "issue" \
+            --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
+    fi
     
     if [ $? -ne 0 ]; then
         echo "Error: Failed to set CAA record for $DOMAIN"
@@ -149,10 +187,21 @@ bootstrap() {
     touch /.bootstrapped
 }
 
-# Create Cloudflare credentials file
-mkdir -p ~/.cloudflare
-echo "dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN" > ~/.cloudflare/cloudflare.ini
-chmod 600 ~/.cloudflare/cloudflare.ini
+# Create DNS provider credentials file
+if [ "$DNS_PROVIDER" = "namecheap" ]; then
+    # Create Namecheap credentials file
+    mkdir -p ~/.namecheap
+    cat > ~/.namecheap/namecheap.ini << EOF
+dns_namecheap_username = $NAMECHEAP_USERNAME
+dns_namecheap_api_key = $NAMECHEAP_API_KEY
+EOF
+    chmod 600 ~/.namecheap/namecheap.ini
+else
+    # Create Cloudflare credentials file (default)
+    mkdir -p ~/.cloudflare
+    echo "dns_cloudflare_api_token = $CLOUDFLARE_API_TOKEN" > ~/.cloudflare/cloudflare.ini
+    chmod 600 ~/.cloudflare/cloudflare.ini
+fi
 
 # Check if it's the first time the container is started
 if [ ! -f "/.bootstrapped" ]; then
