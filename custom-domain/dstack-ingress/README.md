@@ -71,7 +71,7 @@ The fastest way to get started is to use our pre-built image. Simply use the fol
 ```yaml
 services:
   dstack-ingress:
-    image: kvin/dstack-ingress@sha256:b61d50360c7a4e5ab7d22f5ce87677714f3f64a65db34ee5eebcc54683950c89
+    image: kvin/dstack-ingress@sha256:<the latest image hash>
     ports:
       - "443:443"
     environment:
@@ -103,7 +103,7 @@ volumes:
 ```yaml
 services:
   ingress:
-    image: kvin/dstack-ingress:latest
+    image: kvin/dstack-ingress@sha256:776d26616584d487d94d94df9be026e98b109af41797483c172fc4991f7e9968
     ports:
       - "443:443"
     environment:
@@ -221,7 +221,7 @@ example:
 ```yaml
 services:
   dstack-ingress:
-    image: kvin/dstack-ingress@sha256:b61d50360c7a4e5ab7d22f5ce87677714f3f64a65db34ee5eebcc54683950c89
+    image: kvin/dstack-ingress@sha256:<the latest image hash>
     ports:
       - "443:443"
     environment:
