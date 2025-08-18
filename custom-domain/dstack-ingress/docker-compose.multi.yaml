@@ -1,0 +1,67 @@
+services:
+  ingress:
+    image: kvin/dstack-ingress@sha256:b61d50360c7a4e5ab7d22f5ce87677714f3f64a65db34ee5eebcc54683950c89
+    ports:
+      - "443:443"
+    environment:
+      DNS_PROVIDER: cloudflare
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL}
+      GATEWAY_DOMAIN: _.dstack-prod5.phala.network
+      SET_CAA: true
+      DOMAINS: |
+        ${APP_DOMAIN}
+        ${API_DOMAIN}
+
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - letsencrypt:/etc/letsencrypt
+
+    configs:
+      - source: app_conf
+        target: /etc/nginx/conf.d/app.conf
+        mode: 0444
+      - source: api_conf
+        target: /etc/nginx/conf.d/api.conf
+        mode: 0444
+
+    restart: unless-stopped
+
+  app-main:
+    image: nginx
+    restart: unless-stopped
+
+  app-api:
+    image: nginx
+    restart: unless-stopped
+
+volumes:
+  letsencrypt:
+
+configs:
+  app_conf:
+    content: |
+      server {
+          listen 443 ssl;
+          server_name ${APP_DOMAIN};
+
+          ssl_certificate /etc/letsencrypt/live/${APP_DOMAIN}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/${APP_DOMAIN}/privkey.pem;
+
+          location / {
+              proxy_pass http://app-main:80;
+          }
+      }
+  api_conf:
+    content: |
+      server {
+          listen 443 ssl;
+          server_name ${API_DOMAIN};
+
+          ssl_certificate /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
+
+          location / {
+              proxy_pass http://app-api:80;
+          }
+      }

@@ -4,6 +4,10 @@ set -e
 
 PORT=${PORT:-443}
 TXT_PREFIX=${TXT_PREFIX:-"_tapp-address"}
+PROXY_CMD="proxy"
+if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
+    PROXY_CMD="grpc"
+fi
 
 echo "Setting up Python environment"
 
@@ -24,10 +28,7 @@ setup_py_env() {
     fi
 }
 
-PROXY_CMD="proxy"
-if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
-    PROXY_CMD="grpc"
-fi
+setup_py_env
 
 setup_nginx_conf() {
     cat <<EOF >/etc/nginx/conf.d/default.conf
@@ -84,82 +85,97 @@ server {
     }
 }
 EOF
-    mkdir -p /var/log/nginx
 }
 
-
 set_alias_record() {
-    # Use the unified DNS manager to set the alias record
-    source /opt/app-venv/bin/activate
-    echo "Setting alias record for $DOMAIN"
-    dns_manager.py set_alias \
-        --domain "$DOMAIN" \
+    local domain="$1"
+    echo "Setting alias record for $domain"
+    dnsman.py set_alias \
+        --domain "$domain" \
         --content "$GATEWAY_DOMAIN"
 
     if [ $? -ne 0 ]; then
-        echo "Error: Failed to set alias record for $DOMAIN"
+        echo "Error: Failed to set alias record for $domain"
         exit 1
     fi
-    echo "Alias record set for $DOMAIN"
+    echo "Alias record set for $domain"
 }
 
 set_txt_record() {
+    local domain="$1"
     local APP_ID
 
-    # Generate a unique app ID if not provided
     APP_ID=${APP_ID:-$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info | jq -j '.app_id')}
 
-    # Use the unified DNS manager to set the TXT record
-    source /opt/app-venv/bin/activate
-    dns_manager.py set_txt \
-        --domain "${TXT_PREFIX}.${DOMAIN}" \
+    dnsman.py set_txt \
+        --domain "${TXT_PREFIX}.${domain}" \
         --content "$APP_ID:$PORT"
 
     if [ $? -ne 0 ]; then
-        echo "Error: Failed to set TXT record for $DOMAIN"
+        echo "Error: Failed to set TXT record for $domain"
         exit 1
     fi
 }
 
 set_caa_record() {
+    local domain="$1"
     if [ "$SET_CAA" != "true" ]; then
         echo "Skipping CAA record setup"
         return
     fi
-    # Add CAA record for the domain
     local ACCOUNT_URI
-    ACCOUNT_URI=$(jq -j '.uri' /evidences/acme-account.json)
-    echo "Adding CAA record for $DOMAIN, accounturi=$ACCOUNT_URI"
-    source /opt/app-venv/bin/activate
-    dns_manager.py set_caa \
-        --domain "$DOMAIN" \
+    ACCOUNT_URI=$(jq -j '.uri' /etc/letsencrypt/accounts/acme-v02.api.letsencrypt.org/directory/*/regr.json)
+    echo "Adding CAA record for $domain, accounturi=$ACCOUNT_URI"
+    dnsman.py set_caa \
+        --domain "$domain" \
         --caa-tag "issue" \
         --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
 
     if [ $? -ne 0 ]; then
-        echo "Warning: Failed to set CAA record for $DOMAIN"
+        echo "Warning: Failed to set CAA record for $domain"
         echo "This is not critical - certificates can still be issued without CAA records"
         echo "Consider disabling CAA records by setting SET_CAA=false if this continues to fail"
         # Don't exit - CAA records are optional for certificate generation
     fi
 }
 
+process_domain() {
+    local domain="$1"
+    echo "Processing domain: $domain"
+
+    set_alias_record "$domain"
+    set_txt_record "$domain"
+    renew-certificate.sh "$domain" || echo "First certificate renewal failed for $domain, will retry after set CAA record"
+    set_caa_record "$domain"
+    renew-certificate.sh "$domain"
+}
+
 bootstrap() {
-    echo "Bootstrap: Setting up $DOMAIN"
-    source /opt/app-venv/bin/activate
-    renew-certificate.sh -n
-    set_alias_record
-    set_txt_record
-    set_caa_record
+    echo "Bootstrap: Setting up domains"
+
+    local all_domains
+    all_domains=$(get-all-domains.sh)
+
+    if [ -z "$all_domains" ]; then
+        echo "Error: No domains found. Set either DOMAIN or DOMAINS environment variable"
+        exit 1
+    fi
+
+    echo "Found domains:"
+    echo "$all_domains"
+
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] || continue
+        process_domain "$domain"
+    done <<<"$all_domains"
+
+    # Generate evidences after all certificates are obtained
+    echo "Generating evidence files for all domains..."
+    generate-evidences.sh
+
     touch /.bootstrapped
 }
 
-# Credentials are now handled by certman.py setup
-
-# Setup Python environment and install dependencies first
-setup_py_env
-
-# Check if it's the first time the container is started
 if [ ! -f "/.bootstrapped" ]; then
     bootstrap
 else
@@ -168,6 +184,10 @@ fi
 
 renewal-daemon.sh &
 
-setup_nginx_conf
+mkdir -p /var/log/nginx
+
+if [ -n "$DOMAIN" ] && [ -n "$TARGET_ENDPOINT" ]; then
+    setup_nginx_conf
+fi
 
 exec "$@"
