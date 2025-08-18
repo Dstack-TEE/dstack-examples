@@ -33,13 +33,25 @@ The dstack-ingress system provides a seamless way to set up custom domains for d
 3. **Certificate Management**:
 
    - SSL certificates are automatically obtained during initial setup
-   - A scheduled task runs twice daily to check for certificate renewal
+   - A simple background daemon checks for certificate renewal every 12 hours
    - When certificates are renewed, Nginx is automatically reloaded to use the new certificates
+   - Uses a simple sleep loop instead of cron for reliability and easier debugging in containers
 
 4. **Evidence Generation**:
    - The system generates evidence files for verification purposes
    - These include the ACME account information and certificate data
    - Evidence files are accessible through a dedicated endpoint
+
+## Features
+
+### Multi-Domain Support (New!)
+
+The dstack-ingress now supports multiple domains in a single container:
+
+- **Single Domain Mode** (backward compatible): Use `DOMAIN` and `TARGET_ENDPOINT` environment variables
+- **Multi-Domain Mode**: Use `DOMAINS` environment variable with custom nginx configurations in `/etc/nginx/conf.d/`
+- Each domain gets its own SSL certificate
+- Flexible nginx configuration per domain
 
 ## Usage
 
@@ -59,7 +71,7 @@ The fastest way to get started is to use our pre-built image. Simply use the fol
 ```yaml
 services:
   dstack-ingress:
-    image: kvin/dstack-ingress@sha256:b61d50360c7a4e5ab7d22f5ce87677714f3f64a65db34ee5eebcc54683950c89
+    image: kvin/dstack-ingress@sha256:<the latest image hash>
     ports:
       - "443:443"
     environment:
@@ -86,14 +98,89 @@ volumes:
   cert-data: # Persistent volume for certificates
 ```
 
+### Multi-Domain Configuration
+
+```yaml
+services:
+  ingress:
+    image: kvin/dstack-ingress@sha256:776d26616584d487d94d94df9be026e98b109af41797483c172fc4991f7e9968
+    ports:
+      - "443:443"
+    environment:
+      DNS_PROVIDER: cloudflare
+      CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL}
+      GATEWAY_DOMAIN: _.dstack-prod5.phala.network
+      SET_CAA: true
+      DOMAINS: |
+        ${APP_DOMAIN}
+        ${API_DOMAIN}
+
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - letsencrypt:/etc/letsencrypt
+
+    configs:
+      - source: app_conf
+        target: /etc/nginx/conf.d/app.conf
+        mode: 0444
+      - source: api_conf
+        target: /etc/nginx/conf.d/api.conf
+        mode: 0444
+
+    restart: unless-stopped
+
+  app-main:
+    image: nginx
+    restart: unless-stopped
+
+  app-api:
+    image: nginx
+    restart: unless-stopped
+
+volumes:
+  letsencrypt:
+
+configs:
+  app_conf:
+    content: |
+      server {
+          listen 443 ssl;
+          server_name ${APP_DOMAIN};
+          ssl_certificate /etc/letsencrypt/live/${APP_DOMAIN}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/${APP_DOMAIN}/privkey.pem;
+          location / {
+              proxy_pass http://app-main:80;
+          }
+      }
+  api_conf:
+    content: |
+      server {
+          listen 443 ssl;
+          server_name ${API_DOMAIN};
+          ssl_certificate /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
+          ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
+          location / {
+              proxy_pass http://app-api:80;
+          }
+      }
+```
+
 **Core Environment Variables:**
 
 - `DNS_PROVIDER`: DNS provider to use (cloudflare, linode)
-- `DOMAIN`: Your custom domain
+- `DOMAIN`: Your custom domain (for single domain mode)
+- `DOMAINS`: Multiple domains, one per line (supports environment variable substitution like `${APP_DOMAIN}`)
 - `GATEWAY_DOMAIN`: The dstack gateway domain (e.g. `_.dstack-prod5.phala.network` for Phala Cloud)
 - `CERTBOT_EMAIL`: Your email address used in Let's Encrypt certificate requests
-- `TARGET_ENDPOINT`: The plain HTTP endpoint of your dstack application
+- `TARGET_ENDPOINT`: The plain HTTP endpoint of your dstack application (for single domain mode)
 - `SET_CAA`: Set to `true` to enable CAA record setup
+
+**Backward Compatibility:**
+
+- If both `DOMAIN` and `TARGET_ENDPOINT` are set, the system operates in single-domain mode with auto-generated nginx config
+- If `DOMAINS` is set, the system operates in multi-domain mode and expects custom nginx configs in `/etc/nginx/conf.d/`
+- You can use both modes simultaneously
 
 For provider-specific configuration details, see [DNS Provider Configuration](DNS_PROVIDERS.md).
 
@@ -125,7 +212,6 @@ docker push yourusername/dstack-ingress:tag
 
 4. Update the docker-compose.yaml file with your image name and deploy
 
-
 #### gRPC Support
 
 If your dstack application uses gRPC, you can set `TARGET_ENDPOINT` to `grpc://app:50051`.
@@ -135,7 +221,7 @@ example:
 ```yaml
 services:
   dstack-ingress:
-    image: kvin/dstack-ingress@sha256:b61d50360c7a4e5ab7d22f5ce87677714f3f64a65db34ee5eebcc54683950c89
+    image: kvin/dstack-ingress@sha256:<the latest image hash>
     ports:
       - "443:443"
     environment:
