@@ -1,0 +1,24 @@
+services:
+  mc:
+    image: itzg/minecraft-server
+    tty: true
+    stdin_open: true
+    ports:
+      - "25565:25565"
+    environment:
+      EULA: "TRUE"
+    restart: unless-stopped
+    volumes:
+      # attach the relative directory 'data' to the container's /data path
+      - ./data:/data
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    command:
+      - "tcp"
+      - "mc:25565"
+    environment:
+      NGROK_AUTHTOKEN: <YourAuthTokenHere>
+    ports:
+      - 4551:4551
+
