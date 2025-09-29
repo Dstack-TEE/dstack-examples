@@ -71,7 +71,7 @@ The fastest way to get started is to use our pre-built image. Simply use the fol
 ```yaml
 services:
   dstack-ingress:
-    image: dstacktee/dstack-ingress:20250924@sha256:40429d78060ef3066b5f93676bf3ba7c2e9ac47d4648440febfdda558aed4b32
+    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
     ports:
       - "443:443"
     environment:
@@ -104,7 +104,7 @@ volumes:
 ```yaml
 services:
   ingress:
-    image: dstacktee/dstack-ingress:20250924@sha256:40429d78060ef3066b5f93676bf3ba7c2e9ac47d4648440febfdda558aed4b32
+    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
     ports:
       - "443:443"
     environment:
@@ -222,7 +222,7 @@ example:
 ```yaml
 services:
   dstack-ingress:
-    image: dstacktee/dstack-ingress:20250924@sha256:40429d78060ef3066b5f93676bf3ba7c2e9ac47d4648440febfdda558aed4b32
+    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
     ports:
       - "443:443"
     environment:

@@ -3,11 +3,7 @@
 set -e
 
 PORT=${PORT:-443}
-if [[ -e /var/run/dstack.sock ]]; then
-  TXT_PREFIX=${TXT_PREFIX:-"_dstack-app-address"}
-else
-  TXT_PREFIX=${TXT_PREFIX:-"_tapp-address"}
-fi
+TXT_PREFIX=${TXT_PREFIX:-"_dstack-app-address"}
 PROXY_CMD="proxy"
 if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
     PROXY_CMD="grpc"
@@ -127,7 +123,7 @@ set_txt_record() {
     local domain="$1"
     local APP_ID
 
-    if [[ -e /var/run/dstack.sock ]]; then
+    if [[ -S /var/run/dstack.sock ]]; then
         DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://localhost/Info | jq -j .app_id)
         export DSTACK_APP_ID
     else

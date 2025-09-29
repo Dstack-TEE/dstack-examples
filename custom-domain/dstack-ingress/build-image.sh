@@ -56,6 +56,9 @@ else
     echo "Or use skopeo directly:"
     echo ""
     echo " skopeo copy --insecure-policy oci-archive:./oci.tar docker://<repo>[:<tag>]"
+    echo ""
+    echo " Pushing image to dstacktee org:"
+    echo " skopeo copy --insecure-policy oci-archive:./oci.tar docker://dstacktee/dstack-ingress:$(date +%Y%m%d) --authfile ~/.docker/config.json"
 fi
 echo ""
 
