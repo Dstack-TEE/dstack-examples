@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.7"
+echo "Running Phala Cloud Pre-Launch Script v0.0.8"
 echo "----------------------------------------------"
 set -e
 
@@ -73,7 +73,7 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     echo "AWS ECR credentials found"
     
     # Check if AWS CLI is installed
-    if ! command -v aws &> /dev/null; then
+    if [ ! -f "./aws/dist/aws" ]; then
         notify_host_hoot_info "awscli not installed, installing..."
         echo "AWS CLI not installed, installing..."
         curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.24.14.zip" -o "awscliv2.zip"
@@ -84,12 +84,8 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
             exit 1
         fi
         unzip awscliv2.zip &> /dev/null
-        ./aws/install
-        
-        # Clean up installation files
-        rm -rf awscliv2.zip aws
     else
-        echo "AWS CLI is already installed: $(which aws)"
+        echo "AWS CLI is already installed: ./aws/dist/aws"
     fi
 
     # Set AWS credentials as environment variables
@@ -105,21 +101,35 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     
     # Test AWS credentials before attempting ECR login
     echo "Testing AWS credentials..."
-    if ! aws sts get-caller-identity &> /dev/null; then
+    if ! ./aws/dist/aws sts get-caller-identity &> /dev/null; then
         echo "AWS credentials test failed"
-        notify_host_hoot_error "Invalid AWS credentials"
-        exit 1
-    fi
-
-    echo "Logging in to AWS ECR..."
-    aws ecr get-login-password --region "$DSTACK_AWS_REGION" | docker login --username AWS --password-stdin "$DSTACK_AWS_ECR_REGISTRY"
-    if [ $? -eq 0 ]; then
-        echo "AWS ECR login successful"
-        notify_host_hoot_info "AWS ECR login successful"
+        # For session token credentials, this might be expected if they're expired
+        # Log warning but don't fail startup
+        if [[ -n "$DSTACK_AWS_SESSION_TOKEN" ]]; then
+            echo "Warning: AWS temporary credentials may have expired, continuing startup"
+            notify_host_hoot_info "AWS temporary credentials may have expired"
+        else
+            echo "AWS credentials test failed"
+            notify_host_hoot_error "Invalid AWS credentials"
+            exit 1
+        fi
     else
-        echo "AWS ECR login failed"
-        notify_host_hoot_error "AWS ECR login failed"
-        exit 1
+        echo "Logging in to AWS ECR..."
+        ./aws/dist/aws ecr get-login-password --region $DSTACK_AWS_REGION | docker login --username AWS --password-stdin "$DSTACK_AWS_ECR_REGISTRY"
+        if [ $? -eq 0 ]; then
+            echo "AWS ECR login successful"
+            notify_host_hoot_info "AWS ECR login successful"
+        else
+            echo "AWS ECR login failed"
+            # For session token credentials, don't fail startup if login fails
+            if [[ -n "$DSTACK_AWS_SESSION_TOKEN" ]]; then
+                echo "Warning: AWS ECR login failed with temporary credentials, continuing startup"
+                notify_host_hoot_info "AWS ECR login failed with temporary credentials"
+            else
+                notify_host_hoot_error "AWS ECR login failed"
+                exit 1
+            fi
+        fi
     fi
 fi
 
@@ -129,7 +139,7 @@ perform_cleanup
 # Set root password if DSTACK_ROOT_PASSWORD is set.
 #
 if [[ -n "$DSTACK_ROOT_PASSWORD" ]]; then
-    echo "root:$DSTACK_ROOT_PASSWORD" | chpasswd
+    echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null || echo -e "$DSTACK_ROOT_PASSWORD\n$DSTACK_ROOT_PASSWORD" | passwd root
     unset $DSTACK_ROOT_PASSWORD
     echo "Root password set"
 fi
@@ -139,24 +149,26 @@ if [[ -n "$DSTACK_ROOT_PUBLIC_KEY" ]]; then
     unset $DSTACK_ROOT_PUBLIC_KEY
     echo "Root public key set"
 fi
+if [[ -n "$DSTACK_AUTHORIZED_KEYS" ]]; then
+    mkdir -p /root/.ssh
+    echo "$DSTACK_AUTHORIZED_KEYS" > /root/.ssh/authorized_keys
+    unset $DSTACK_AUTHORIZED_KEYS
+    echo "Root authorized_keys set"
+fi
 
 
-if [[ -e /var/run/dstack.sock ]]; then
-    DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://dstack/Info | jq -j .app_id)
-    export DSTACK_APP_ID
-else
-    DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://dstack/prpc/Tappd.Info | jq -j .app_id)
-    export DSTACK_APP_ID
+if [[ -S /var/run/dstack.sock ]]; then
+    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://dstack/Info | jq -j .app_id)
+elif [[ -S /var/run/tappd.sock ]]; then
+    export DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://dstack/prpc/Tappd.Info | jq -j .app_id)
 fi
 # Check if app-compose.json has default_gateway_domain field and DSTACK_GATEWAY_DOMAIN is not set
 # If true, set DSTACK_GATEWAY_DOMAIN from app-compose.json
 if [[ $(jq 'has("default_gateway_domain")' app-compose.json) == "true" && -z "$DSTACK_GATEWAY_DOMAIN" ]]; then
-    DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)
-    export DSTACK_GATEWAY_DOMAIN
+    export DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)
 fi
 if [[ -n "$DSTACK_GATEWAY_DOMAIN" ]]; then
-    DSTACK_APP_DOMAIN=$DSTACK_APP_ID"."$DSTACK_GATEWAY_DOMAIN
-    export DSTACK_APP_DOMAIN
+    export DSTACK_APP_DOMAIN=$DSTACK_APP_ID"."$DSTACK_GATEWAY_DOMAIN
 fi
 
 echo "----------------------------------------------"
