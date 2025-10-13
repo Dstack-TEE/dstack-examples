@@ -2,8 +2,27 @@
 
 set -e
 
+source "/scripts/functions.sh"
+
 PORT=${PORT:-443}
 TXT_PREFIX=${TXT_PREFIX:-"_dstack-app-address"}
+
+if ! PORT=$(sanitize_port "$PORT"); then
+    exit 1
+fi
+if ! DOMAIN=$(sanitize_domain "$DOMAIN"); then
+    exit 1
+fi
+if ! TARGET_ENDPOINT=$(sanitize_target_endpoint "$TARGET_ENDPOINT"); then
+    exit 1
+fi
+if ! CLIENT_MAX_BODY_SIZE=$(sanitize_client_max_body_size "$CLIENT_MAX_BODY_SIZE"); then
+    exit 1
+fi
+if ! TXT_PREFIX=$(sanitize_dns_label "$TXT_PREFIX"); then
+    exit 1
+fi
+
 PROXY_CMD="proxy"
 if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
     PROXY_CMD="grpc"

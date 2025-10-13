@@ -176,7 +176,7 @@ configs:
 - `CERTBOT_EMAIL`: Your email address used in Let's Encrypt certificate requests
 - `TARGET_ENDPOINT`: The plain HTTP endpoint of your dstack application (for single domain mode)
 - `SET_CAA`: Set to `true` to enable CAA record setup
-- `CLIENT_MAX_BODY_SIZE`: Optional value for nginx `client_max_body_size` (e.g. `50m`) in single-domain mode
+- `CLIENT_MAX_BODY_SIZE`: Optional value for nginx `client_max_body_size` (numeric with optional `k|m|g` suffix, e.g. `50m`) in single-domain mode
 
 **Backward Compatibility:**
 
