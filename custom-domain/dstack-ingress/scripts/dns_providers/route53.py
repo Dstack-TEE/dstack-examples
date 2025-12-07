@@ -222,6 +222,7 @@ class Route53DNSProvider(DNSProvider):
         """
         Create a DNS record.
         Injects Weighted Routing if ROUTE53_INITIAL_WEIGHT env var is numeric.
+        **SKIPS automatic injection for TXT records.**
         """
         hosted_zone_id = self._ensure_hosted_zone_id(record.name)
         if not hosted_zone_id:
@@ -258,9 +259,12 @@ class Route53DNSProvider(DNSProvider):
             weight_to_set = record.data["weight"]
         else:
             # Check Env Var
-            env_weight = os.getenv("ROUTE53_INITIAL_WEIGHT")
-            if env_weight is not None and env_weight.isdigit():
-                 weight_to_set = int(env_weight)
+            # IMPORTANT: Do NOT apply automatic weighting to TXT records
+            # TXT is used for Certbot challenges/SPF and should not be weighted unless explicitly requested
+            if record.type != RecordType.TXT:
+                env_weight = os.getenv("ROUTE53_INITIAL_WEIGHT")
+                if env_weight is not None and env_weight.isdigit():
+                     weight_to_set = int(env_weight)
 
         # 2. Determine Identifier (Required if Weight is set)
         set_identifier = None
@@ -361,12 +365,6 @@ class Route53DNSProvider(DNSProvider):
                         if record_set.get("SetIdentifier") != set_identifier:
                             id_match = False
                     
-                    # If we have a set_identifier in the record but none in record_id,
-                    # we must be careful. However, standard deletion usually implies 
-                    # non-weighted. If the user passes a simple ID for a weighted record,
-                    # this logic might need to be stricter, but for now strict match on
-                    # requested ID is safest.
-
                     if name_match and type_match and id_match:
                         record_set_to_delete = record_set
                         break
