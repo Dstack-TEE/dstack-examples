@@ -91,7 +91,7 @@ class NamecheapDNSProvider(DNSProvider):
             root = ET.fromstring(response.content)
             
             # Check for API errors
-            errors = root.find('.//{https://api.namecheap.com/xml.response}Errors')
+            errors = root.find('.//{http://api.namecheap.com/xml.response}Errors')
             if errors is not None and len(errors) > 0:
                 error_messages = []
                 for error in errors:
@@ -154,7 +154,7 @@ class NamecheapDNSProvider(DNSProvider):
         
         # Parse the host records from XML response
         records = []
-        host_elements = result["result"].findall('.//{https://api.namecheap.com/xml.response}host')
+        host_elements = result["result"].findall('.//{http://api.namecheap.com/xml.response}host')
         
         for host in host_elements:
             record_name = host.get("Name")
@@ -215,43 +215,46 @@ class NamecheapDNSProvider(DNSProvider):
         else:
             hostname = record.name.replace("." + sld + "." + tld, "")
         
-        # Remove existing records of the same type and name
-        filtered_records = [
-            r for r in existing_records 
-            if not (r.name == record.name and r.type == record.type)
-        ]
-        
+        # Remove existing records of the same type and name, convert to dicts
+        all_records = []
+        for r in existing_records:
+            if r.name == record.name and r.type == record.type:
+                continue
+            r_hostname = "@" if r.name == sld + "." + tld else r.name.replace("." + sld + "." + tld, "")
+            d = {"HostName": r_hostname, "RecordType": r.type.value, "Address": r.content, "TTL": str(r.ttl)}
+            if r.type == RecordType.MX and r.priority:
+                d["MXPref"] = str(r.priority)
+            all_records.append(d)
+
         # Add new record
-        new_record = {
-            "HostName": hostname,
-            "RecordType": record.type.value,
-            "Address": record.content,
-            "TTL": str(record.ttl)
-        }
-        
+        new_record = {"HostName": hostname, "RecordType": record.type.value, "Address": record.content, "TTL": str(record.ttl)}
         if record.type == RecordType.MX and record.priority:
             new_record["MXPref"] = str(record.priority)
-        
-        filtered_records.append(new_record)
-        
-        # Set all records
-        return self._set_dns_records(sld, tld, filtered_records)
+        all_records.append(new_record)
+
+        return self._set_dns_records(sld, tld, all_records)
 
     def delete_dns_record(self, record_id: str, domain: str) -> bool:
         """Delete a DNS record."""
-        # Namecheap doesn't support individual record deletion
-        # We need to get all records, remove the one with the matching ID, and set them all
         domain_info = self._get_domain_info(domain)
         if not domain_info:
             return False
-        
+
         sld, tld = domain_info
         existing_records = self.get_dns_records(domain)
-        
-        # Remove the record with the matching ID
-        filtered_records = [r for r in existing_records if r.id != record_id]
-        
-        return self._set_dns_records(sld, tld, filtered_records)
+
+        # Remove record with matching ID, convert rest to dicts
+        all_records = []
+        for r in existing_records:
+            if r.id == record_id:
+                continue
+            r_hostname = "@" if r.name == sld + "." + tld else r.name.replace("." + sld + "." + tld, "")
+            d = {"HostName": r_hostname, "RecordType": r.type.value, "Address": r.content, "TTL": str(r.ttl)}
+            if r.type == RecordType.MX and r.priority:
+                d["MXPref"] = str(r.priority)
+            all_records.append(d)
+
+        return self._set_dns_records(sld, tld, all_records)
 
     def create_caa_record(self, caa_record: CAARecord) -> bool:
         """Create a CAA record."""
