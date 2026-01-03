@@ -1,0 +1,26 @@
+# Confidential Fine-tuning with Jupyter
+#
+# Run JupyterLab inside a TEE for interactive training.
+# Upload data via browser, run training cells, download results.
+#
+# Deploy: phala deploy -n my-training -c docker-compose.yaml \
+#   --instance-type h200.small -e HF_TOKEN=hf_xxx -e JUPYTER_PASSWORD=your-secret
+
+services:
+  jupyter:
+    image: unsloth/unsloth:latest
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_TOKEN
+      - JUPYTER_PASSWORD
+    ports:
+      - "8888:8888"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
