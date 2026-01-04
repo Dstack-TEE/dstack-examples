@@ -179,10 +179,27 @@ EOF
 
 set_alias_record() {
     local domain="$1"
+    local cname_target="$GATEWAY_DOMAIN"
+
+    # Namecheap DNS servers don't serve CNAME records pointing to underscore-prefixed domains.
+    # The record appears in the Namecheap API but isn't visible in public DNS.
+    # Workaround: use the full app-specific domain instead (resolves to the same IP).
+    if [[ "$DNS_PROVIDER" == "namecheap" && "$cname_target" == _* ]]; then
+        local app_id
+        if [[ -S /var/run/dstack.sock ]]; then
+            app_id=$(curl -s --unix-socket /var/run/dstack.sock http://localhost/Info | jq -j .app_id)
+        else
+            app_id=$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info | jq -j .app_id)
+        fi
+        # Replace _.domain with appid-port.domain
+        cname_target="${app_id}-${PORT}.${cname_target#_.}"
+        echo "Namecheap workaround: using $cname_target instead of $GATEWAY_DOMAIN"
+    fi
+
     echo "Setting alias record for $domain"
     dnsman.py set_alias \
         --domain "$domain" \
-        --content "$GATEWAY_DOMAIN"
+        --content "$cname_target"
 
     if [ $? -ne 0 ]; then
         echo "Error: Failed to set alias record for $domain"
