@@ -154,6 +154,11 @@ server {
     # SSL buffer size (optimized for TLS 1.3)
     ssl_buffer_size 4k;
 
+    # Boost allowed header size
+    proxy_buffer_size 128k;
+    proxy_buffers 4 256k;
+    proxy_busy_buffers_size 256k;
+
     # Disable SSL renegotiation
     ssl_early_data off;
 ${client_max_body_size_conf}
