@@ -83,6 +83,35 @@ sanitize_proxy_timeout() {
     fi
 }
 
+sanitize_proxy_buffer_size() {
+    local candidate="$1"
+    if [ -z "$candidate" ]; then
+        echo ""
+        return 0
+    fi
+    if [[ "$candidate" =~ ^[0-9]+[kKmM]?$ ]]; then
+        echo "$candidate"
+    else
+        echo "Warning: Ignoring invalid proxy buffer size value: $candidate" >&2
+        echo ""
+    fi
+}
+
+sanitize_proxy_buffers() {
+    local candidate="$1"
+    if [ -z "$candidate" ]; then
+        echo ""
+        return 0
+    fi
+    # Format: number size (e.g., "4 256k")
+    if [[ "$candidate" =~ ^[0-9]+[[:space:]]+[0-9]+[kKmM]?$ ]]; then
+        echo "$candidate"
+    else
+        echo "Warning: Ignoring invalid proxy buffers value: $candidate (expected format: 'number size', e.g., '4 256k')" >&2
+        echo ""
+    fi
+}
+
 get_letsencrypt_account_path() {
     local base_path="/etc/letsencrypt/accounts"
     local api_endpoint="acme-v02.api.letsencrypt.org"

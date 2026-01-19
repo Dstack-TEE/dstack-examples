@@ -28,6 +28,15 @@ fi
 if ! PROXY_CONNECT_TIMEOUT=$(sanitize_proxy_timeout "$PROXY_CONNECT_TIMEOUT"); then
     exit 1
 fi
+if ! PROXY_BUFFER_SIZE=$(sanitize_proxy_buffer_size "$PROXY_BUFFER_SIZE"); then
+    exit 1
+fi
+if ! PROXY_BUFFERS=$(sanitize_proxy_buffers "$PROXY_BUFFERS"); then
+    exit 1
+fi
+if ! PROXY_BUSY_BUFFERS_SIZE=$(sanitize_proxy_buffer_size "$PROXY_BUSY_BUFFERS_SIZE"); then
+    exit 1
+fi
 if ! TXT_PREFIX=$(sanitize_dns_label "$TXT_PREFIX"); then
     exit 1
 fi
@@ -117,6 +126,21 @@ setup_nginx_conf() {
         proxy_connect_timeout_conf="        ${PROXY_CMD}_connect_timeout ${PROXY_CONNECT_TIMEOUT};"
     fi
 
+    local proxy_buffer_size_conf=""
+    if [ -n "$PROXY_BUFFER_SIZE" ]; then
+        proxy_buffer_size_conf="    proxy_buffer_size ${PROXY_BUFFER_SIZE};"
+    fi
+
+    local proxy_buffers_conf=""
+    if [ -n "$PROXY_BUFFERS" ]; then
+        proxy_buffers_conf="    proxy_buffers ${PROXY_BUFFERS};"
+    fi
+
+    local proxy_busy_buffers_size_conf=""
+    if [ -n "$PROXY_BUSY_BUFFERS_SIZE" ]; then
+        proxy_busy_buffers_size_conf="    proxy_busy_buffers_size ${PROXY_BUSY_BUFFERS_SIZE};"
+    fi
+
     cat <<EOF >/etc/nginx/conf.d/default.conf
 server {
     listen ${PORT} ssl;
@@ -153,11 +177,9 @@ server {
 
     # SSL buffer size (optimized for TLS 1.3)
     ssl_buffer_size 4k;
-
-    # Boost allowed header size
-    proxy_buffer_size 128k;
-    proxy_buffers 4 256k;
-    proxy_busy_buffers_size 256k;
+${proxy_buffer_size_conf}
+${proxy_buffers_conf}
+${proxy_busy_buffers_size_conf}
 
     # Disable SSL renegotiation
     ssl_early_data off;
