@@ -180,6 +180,9 @@ configs:
 - `PROXY_READ_TIMEOUT`: Optional value for nginx `proxy_read_timeout` (numeric with optional `s|m|h` suffix, e.g. `30s`) in single-domain mode
 - `PROXY_SEND_TIMEOUT`: Optional value for nginx `proxy_send_timeout` (numeric with optional `s|m|h` suffix, e.g. `30s`) in single-domain mode
 - `PROXY_CONNECT_TIMEOUT`: Optional value for nginx `proxy_connect_timeout` (numeric with optional `s|m|h` suffix, e.g. `10s`) in single-domain mode
+- `PROXY_BUFFER_SIZE`: Optional value for nginx `proxy_buffer_size` (numeric with optional `k|m` suffix, e.g. `128k`) in single-domain mode
+- `PROXY_BUFFERS`: Optional value for nginx `proxy_buffers` (format: `number size`, e.g. `4 256k`) in single-domain mode
+- `PROXY_BUSY_BUFFERS_SIZE`: Optional value for nginx `proxy_busy_buffers_size` (numeric with optional `k|m` suffix, e.g. `256k`) in single-domain mode
 - `CERTBOT_STAGING`: Optional; set this value to the string `true` to set the `--staging` server option on the [`certbot` cli](https://eff-certbot.readthedocs.io/en/stable/using.html#certbot-command-line-options)
 
 **Backward Compatibility:**
