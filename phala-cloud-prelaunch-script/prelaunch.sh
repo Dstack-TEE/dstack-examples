@@ -1,6 +1,5 @@
-#!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.12"
+echo "Running Phala Cloud Pre-Launch Script v0.0.13"
 echo "----------------------------------------------"
 set -e
 
@@ -33,7 +32,19 @@ perform_cleanup() {
 
 # Function: Check Docker login status without exposing credentials
 check_docker_login() {
-    # Try to verify login status without exposing credentials
+    local registry="$1"
+
+    # When registry is specified, check auth entry for that registry in Docker config
+    if [[ -n "$registry" ]]; then
+        local docker_config_path="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+        if [[ -f "$docker_config_path" ]] && grep -q "$registry" "$docker_config_path"; then
+            return 0
+        else
+            return 1
+        fi
+    fi
+
+    # Fallback check when no explicit registry is provided
     if docker info 2>/dev/null | grep -q "Username"; then
         return 0
     else
@@ -47,23 +58,25 @@ echo "Starting login process..."
 # Check if Docker credentials exist
 if [[ -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
     echo "Docker credentials found"
-    
+    DOCKER_REGISTRY_TARGET="${DSTACK_DOCKER_REGISTRY:-docker.io}"
+    echo "Target Docker registry: $DOCKER_REGISTRY_TARGET"
+
     # Check if already logged in
-    if check_docker_login; then
-        echo "Already logged in to Docker registry"
+    if check_docker_login "$DSTACK_DOCKER_REGISTRY"; then
+        echo "Already logged in to Docker registry: $DOCKER_REGISTRY_TARGET"
     else
-        echo "Logging in to Docker registry..."
+        echo "Logging in to Docker registry: $DOCKER_REGISTRY_TARGET"
         # Login without exposing password in process list
         if [[ -n "$DSTACK_DOCKER_REGISTRY" ]]; then
             echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin "$DSTACK_DOCKER_REGISTRY"
         else
             echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin
         fi
-        
+
         if [ $? -eq 0 ]; then
-            echo "Docker login successful"
+            echo "Docker login successful: $DOCKER_REGISTRY_TARGET"
         else
-            echo "Docker login failed"
+            echo "Docker login failed: $DOCKER_REGISTRY_TARGET"
             notify_host_hoot_error "docker login failed"
             exit 1
         fi
@@ -71,7 +84,7 @@ if [[ -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
 # Check if AWS ECR credentials exist
 elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && -n "$DSTACK_AWS_REGION" && -n "$DSTACK_AWS_ECR_REGISTRY" ]]; then
     echo "AWS ECR credentials found"
-    
+
     # Check if AWS CLI is installed
     if [ ! -f "./aws/dist/aws" ]; then
         notify_host_hoot_info "awscli not installed, installing..."
@@ -92,13 +105,13 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     export AWS_ACCESS_KEY_ID="$DSTACK_AWS_ACCESS_KEY_ID"
     export AWS_SECRET_ACCESS_KEY="$DSTACK_AWS_SECRET_ACCESS_KEY"
     export AWS_DEFAULT_REGION="$DSTACK_AWS_REGION"
-    
+
     # Set session token if provided (for temporary credentials)
     if [[ -n "$DSTACK_AWS_SESSION_TOKEN" ]]; then
         echo "AWS session token found, using temporary credentials"
         export AWS_SESSION_TOKEN="$DSTACK_AWS_SESSION_TOKEN"
     fi
-    
+
     # Test AWS credentials before attempting ECR login
     echo "Testing AWS credentials..."
     if ! ./aws/dist/aws sts get-caller-identity &> /dev/null; then
@@ -134,6 +147,34 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
 fi
 
 perform_cleanup
+
+#
+# GHCR image pull access verification (pure HTTP, no docker daemon)
+#
+if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
+    COMPOSE_IMAGES=$(grep 'image:' /dstack/docker-compose.yaml 2>/dev/null | awk '{print $2}' | tr -d '"'"'" || true)
+    for img in $COMPOSE_IMAGES; do
+        [[ "$img" != ghcr.io/* ]] && continue
+        repo="${img#ghcr.io/}"; repo="${repo%%:*}"
+        tag="${img##*:}"; [[ "$tag" == "$img" || "$tag" == "$repo" ]] && tag="latest"
+        echo "Verifying GHCR pull access: $img"
+        token=$(curl -sf -u "$DSTACK_DOCKER_USERNAME:$DSTACK_DOCKER_PASSWORD" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" | jq -r '.token // empty' || true)
+        if [[ -z "$token" ]]; then
+            echo "ERROR: GHCR token exchange failed for $img"
+            notify_host_hoot_error "GHCR token exchange failed: $img"
+            exit 1
+        fi
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" \
+            "https://ghcr.io/v2/${repo}/manifests/${tag}")
+        if [[ "$http_code" != "200" ]]; then
+            echo "ERROR: GHCR pull access denied for $img (HTTP $http_code)"
+            notify_host_hoot_error "GHCR pull access denied: $img (HTTP $http_code)"
+            exit 1
+        fi
+        echo "GHCR pull access OK: $img"
+    done
+fi
 
 #
 # Set root password.
