@@ -1,0 +1,24 @@
+services:
+  neko:
+    image: m1k1o/neko:firefox
+    restart: "unless-stopped"
+    shm_size: "2gb"
+    networks:
+        proxy:
+          ipv4_address: 17.100.0.3
+    ports:
+      - 52000:8080
+      - 52001:52001
+    environment:
+      NEKO_SCREEN: 1920x1080@30
+      NEKO_PASSWORD: neko
+      NEKO_PASSWORD_ADMIN: admin
+      NEKO_UDPMUX: 52001
+      NEKO_ICELITE: 0
+      NEKO_NAT1TO1: 17.100.0.3
+networks:
+  proxy:
+    ipam:
+      driver: default
+      config:
+        - subnet: 17.100.0.0/16
