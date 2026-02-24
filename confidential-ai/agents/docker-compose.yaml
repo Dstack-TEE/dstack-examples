@@ -1,0 +1,19 @@
+# Secure AI Agent with TEE Key Derivation
+#
+# Runs an AI agent with:
+# - TEE-derived wallet keys (deterministic, never leave TEE)
+# - Encrypted API credentials
+# - Confidential LLM calls via redpill.ai
+#
+# Deploy: phala deploy -n my-agent -c docker-compose.yaml -e LLM_API_KEY=your-key
+
+services:
+  agent:
+    image: h4x3rotab/tee-agent:v0.4
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    environment:
+      - LLM_BASE_URL=https://api.redpill.ai/v1
+      - LLM_API_KEY  # Encrypted at deploy time
+    ports:
+      - "8080:8080"
