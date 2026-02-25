@@ -1,5 +1,5 @@
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.13"
+echo "Running Phala Cloud Pre-Launch Script v0.0.14"
 echo "----------------------------------------------"
 set -e
 
@@ -166,6 +166,7 @@ if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && 
             exit 1
         fi
         http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" \
+            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
             "https://ghcr.io/v2/${repo}/manifests/${tag}")
         if [[ "$http_code" != "200" ]]; then
             echo "ERROR: GHCR pull access denied for $img (HTTP $http_code)"
