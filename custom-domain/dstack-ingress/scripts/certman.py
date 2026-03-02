@@ -383,13 +383,17 @@ class CertManager:
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300)
 
+            stdout_output = result.stdout.strip() if result.stdout else ""
+            error_output = result.stderr.strip() if result.stderr else ""
+
             if result.returncode == 0:
+                # Check if certbot actually renewed anything
+                if "No renewals were attempted" in stdout_output:
+                    print("No certificates need renewal")
+                    return True, False
                 print(f"✓ Certificate renewal completed")
                 return True, True
             else:
-                error_output = result.stderr.strip() if result.stderr else ""
-                stdout_output = result.stdout.strip() if result.stdout else ""
-
                 print(
                     f"✗ Certificate renewal failed (exit code: {result.returncode})")
 
@@ -409,14 +413,6 @@ class CertManager:
 
                 return False, False
 
-            # Check if no renewals were needed
-            if "No renewals were attempted" in result.stdout:
-                print("No certificates need renewal")
-                return True, False
-
-            print("Certificate renewed successfully")
-            return True, True
-
         except Exception as e:
             print(f"Error running certbot: {e}", file=sys.stderr)
             return False, False
@@ -425,6 +421,23 @@ class CertManager:
         """Check if certificate already exists for domain."""
         cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
         return os.path.isfile(cert_path)
+
+    def acme_account_exists(self) -> bool:
+        """Check if an ACME account exists for the current server (staging or production).
+
+        The account directory differs between staging and production:
+        - production: /etc/letsencrypt/accounts/acme-v02.api.letsencrypt.org/directory/
+        - staging:    /etc/letsencrypt/accounts/acme-staging-v02.api.letsencrypt.org/directory/
+
+        When switching between staging and production, the cert file persists
+        on the volume but the account only exists for the previous server.
+        """
+        import glob
+        api_endpoint = "acme-v02.api.letsencrypt.org"
+        if os.environ.get("CERTBOT_STAGING", "false") == "true":
+            api_endpoint = "acme-staging-v02.api.letsencrypt.org"
+        pattern = f"/etc/letsencrypt/accounts/{api_endpoint}/directory/*/regr.json"
+        return len(glob.glob(pattern)) > 0
 
     def run_action(
         self, domain: str, email: str, action: str = "auto"
@@ -435,10 +448,13 @@ class CertManager:
             (success, needs_evidence): success status and whether evidence should be generated
         """
         if action == "auto":
-            if self.certificate_exists(domain):
+            if self.certificate_exists(domain) and self.acme_account_exists():
                 success, renewed = self.renew_certificate(domain)
                 return success, renewed  # Only generate evidence if actually renewed
             else:
+                if self.certificate_exists(domain) and not self.acme_account_exists():
+                    print(f"Certificate exists for {domain} but ACME account is missing "
+                          f"(staging/production switch?), re-obtaining")
                 success = self.obtain_certificate(domain, email)
                 return success, success  # Always generate evidence for new certificates
         elif action == "obtain":
