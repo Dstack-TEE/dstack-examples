@@ -58,6 +58,7 @@ RUN --mount=type=bind,source=scripts,target=/tmp/scripts,ro \
 
 ENV PATH="/scripts:$PATH"
 ENV PYTHONPATH="/scripts"
+ENV PYTHONUNBUFFERED=1
 COPY --chmod=666 .GIT_REV /etc/
 
 ENTRYPOINT ["/scripts/entrypoint.sh"]
