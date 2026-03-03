@@ -224,6 +224,7 @@ class Route53DNSProvider(DNSProvider):
         want_weight = int(env_weight) if env_weight and env_weight.isdigit() else None
 
         existing_records = self.get_dns_records(name, RecordType.CNAME)
+        record_to_replace = None
         for record in existing_records:
             if record.content == content:
                 has_weight = record.data and "weight" in record.data
@@ -234,15 +235,17 @@ class Route53DNSProvider(DNSProvider):
                     print("Weighted CNAME record with the same content and weight already exists")
                     return True
                 # Weight config mismatch — delete existing record before upserting,
-        # because Route53 forbids mixing weighted and non-weighted RRSets
-        # with the same name and type.
-        has_weight = record.data and "weight" in record.data
-        if (want_weight is not None and not has_weight) or (want_weight is None and has_weight):
+                # because Route53 forbids mixing weighted and non-weighted RRSets
+                # with the same name and type.
+                record_to_replace = record
+                break
+        if record_to_replace is not None:
+            has_weight = record_to_replace.data and "weight" in record_to_replace.data
             print(
                 f"Deleting existing {'non-weighted' if not has_weight else 'weighted'} "
                 f"CNAME before creating {'weighted' if want_weight is not None else 'non-weighted'} one"
             )
-            if not self.delete_dns_record(record.id, name):
+            if not self.delete_dns_record(record_to_replace.id, name):
                 print(f"Error: Failed to delete existing CNAME record", file=sys.stderr)
                 return False
 
@@ -253,6 +256,52 @@ class Route53DNSProvider(DNSProvider):
             content=content,
             ttl=ttl,
             proxied=proxied,
+        )
+        return self.create_dns_record(new_record)
+
+    def set_weighted_cname_record(
+        self,
+        name: str,
+        content: str,
+        weight: int,
+        set_identifier: str,
+        ttl: int = 60,
+    ) -> bool:
+        """Create or update a weighted CNAME record with an explicit weight.
+
+        Unlike set_alias_record, this bypasses ROUTE53_INITIAL_WEIGHT and uses
+        the provided weight directly. set_identifier should be the primary node
+        domain so each node occupies a unique slot in the weighted pool.
+        """
+        existing_records = self.get_dns_records(name, RecordType.CNAME)
+        for record in existing_records:
+            if record.data and record.data.get("set_identifier") == set_identifier:
+                if record.content == content and record.data.get("weight") == weight:
+                    print(
+                        f"Weighted CNAME for {name} "
+                        f"(id={set_identifier}, weight={weight}) already exists"
+                    )
+                    return True
+                # Same identifier, different weight or content — delete and recreate
+                print(
+                    f"Updating weighted CNAME for {name} "
+                    f"(id={set_identifier}) to weight={weight}"
+                )
+                if record.id and not self.delete_dns_record(record.id, name):
+                    print(
+                        f"Error: Failed to delete existing weighted CNAME",
+                        file=sys.stderr,
+                    )
+                    return False
+                break
+
+        new_record = DNSRecord(
+            id=None,
+            name=name,
+            type=RecordType.CNAME,
+            content=content,
+            ttl=ttl,
+            data={"weight": weight, "set_identifier": set_identifier},
         )
         return self.create_dns_record(new_record)
 

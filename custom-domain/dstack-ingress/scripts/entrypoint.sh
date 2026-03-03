@@ -40,6 +40,9 @@ fi
 if ! TXT_PREFIX=$(sanitize_dns_label "$TXT_PREFIX"); then
     exit 1
 fi
+if ! ALIAS_DOMAIN=$(sanitize_domain "$ALIAS_DOMAIN"); then
+    exit 1
+fi
 
 PROXY_CMD="proxy"
 if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
@@ -141,11 +144,16 @@ setup_nginx_conf() {
         proxy_busy_buffers_size_conf="    proxy_busy_buffers_size ${PROXY_BUSY_BUFFERS_SIZE};"
     fi
 
+    local server_name_value="${DOMAIN}"
+    if [ -n "$ALIAS_DOMAIN" ]; then
+        server_name_value="${DOMAIN} ${ALIAS_DOMAIN}"
+    fi
+
     cat <<EOF >/etc/nginx/conf.d/default.conf
 server {
     listen ${PORT} ssl;
     http2 on;
-    server_name ${DOMAIN};
+    server_name ${server_name_value};
 
     # SSL certificate configuration
     ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
@@ -241,6 +249,26 @@ set_txt_record() {
     fi
 }
 
+set_alias_domain_cname() {
+    local node_domain="$1"
+
+    if [ -z "$ALIAS_DOMAIN" ] || [ -z "$ROUTE53_INITIAL_WEIGHT" ]; then
+        return
+    fi
+
+    echo "Setting weight-0 weighted CNAME: $ALIAS_DOMAIN -> $node_domain"
+    dnsman.py set_weighted_cname \
+        --domain "$ALIAS_DOMAIN" \
+        --content "$node_domain" \
+        --weight 0 \
+        --set-identifier "$node_domain"
+
+    if [ $? -ne 0 ]; then
+        echo "Warning: Failed to set weighted CNAME for $ALIAS_DOMAIN -> $node_domain"
+        echo "You may need to create this record manually"
+    fi
+}
+
 set_caa_record() {
     local domain="$1"
     if [ "$SET_CAA" != "true" ]; then
@@ -277,6 +305,7 @@ process_domain() {
 
     set_alias_record "$domain"
     set_txt_record "$domain"
+    set_alias_domain_cname "$domain"
     renew-certificate.sh "$domain" || echo "First certificate renewal failed for $domain, will retry after set CAA record"
     set_caa_record "$domain"
     renew-certificate.sh "$domain"

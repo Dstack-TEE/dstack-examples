@@ -247,6 +247,36 @@ class DNSProvider(ABC):
         )
         return self.create_dns_record(new_record)
 
+    def set_weighted_cname_record(
+        self,
+        name: str,
+        content: str,
+        weight: int,
+        set_identifier: str,
+        ttl: int = 60,
+    ) -> bool:
+        """Set a weighted CNAME record.
+
+        Default implementation ignores weight/set_identifier and creates a plain
+        CNAME. Providers that support weighted routing (e.g. Route53) should
+        override this method.
+
+        Args:
+            name: The record name (ALIAS_DOMAIN)
+            content: The CNAME target (primary DOMAIN)
+            weight: Routing weight (0 = registered but receives no traffic)
+            set_identifier: Unique identifier for this node in the weighted pool
+            ttl: Time to live
+
+        Returns:
+            True if successful, False otherwise
+        """
+        print(
+            f"Note: provider does not support weighted CNAMEs; "
+            f"creating plain CNAME for {name}"
+        )
+        return self.set_cname_record(name, content, ttl)
+
     def set_caa_record(
         self,
         name: str,
