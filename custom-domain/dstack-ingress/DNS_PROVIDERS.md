@@ -103,6 +103,9 @@ PolicyDocument:
         - route53:ListResourceRecordSets
 ```
 
+**Optional Variables for Route53:**
+- `ROUTE53_INITIAL_WEIGHT` - Enables [Weighted Routing](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy-weighted.html) on the CNAME record created for your domain. Set to an integer (e.g., `100`) to assign that weight to the record. A unique `SetIdentifier` is generated automatically. TXT records (used for Certbot DNS challenges) are never weighted. Omit this variable to create a standard non-weighted CNAME record.
+
 **Important Notes for Route53:**
 - The certbot plugin uses the format `certbot-dns-route53` package
 - CAA will merge AWS & Let's Encrypt CA domains to existing records if they exist

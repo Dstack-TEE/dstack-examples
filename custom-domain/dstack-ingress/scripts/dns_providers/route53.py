@@ -218,6 +218,44 @@ class Route53DNSProvider(DNSProvider):
             print(f"Error getting DNS records: {e}", file=sys.stderr)
             return []
 
+    def set_alias_record(self, name: str, content: str, ttl: int = 60, proxied: bool = False) -> bool:
+        """Override to handle weighted routing: re-create if weight config changed."""
+        env_weight = os.getenv("ROUTE53_INITIAL_WEIGHT")
+        want_weight = int(env_weight) if env_weight and env_weight.isdigit() else None
+
+        existing_records = self.get_dns_records(name, RecordType.CNAME)
+        for record in existing_records:
+            if record.content == content:
+                has_weight = record.data and "weight" in record.data
+                if want_weight is None and not has_weight:
+                    print("CNAME record with the same content already exists")
+                    return True
+                if want_weight is not None and has_weight and record.data["weight"] == want_weight:
+                    print("Weighted CNAME record with the same content and weight already exists")
+                    return True
+                # Weight config mismatch — delete existing record before upserting,
+        # because Route53 forbids mixing weighted and non-weighted RRSets
+        # with the same name and type.
+        has_weight = record.data and "weight" in record.data
+        if (want_weight is not None and not has_weight) or (want_weight is None and has_weight):
+            print(
+                f"Deleting existing {'non-weighted' if not has_weight else 'weighted'} "
+                f"CNAME before creating {'weighted' if want_weight is not None else 'non-weighted'} one"
+            )
+            if not self.delete_dns_record(record.id, name):
+                print(f"Error: Failed to delete existing CNAME record", file=sys.stderr)
+                return False
+
+        new_record = DNSRecord(
+            id=None,
+            name=name,
+            type=RecordType.CNAME,
+            content=content,
+            ttl=ttl,
+            proxied=proxied,
+        )
+        return self.create_dns_record(new_record)
+
     def create_dns_record(self, record: DNSRecord) -> bool:
         """
         Create a DNS record.
