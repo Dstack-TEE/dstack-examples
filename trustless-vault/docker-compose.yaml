@@ -1,0 +1,169 @@
+services:
+  vault:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.12-slim@sha256:d51616d5860ba60aa1786987d93b6aaebc05dd70f59f4cc36b008e9768cb88f1
+        WORKDIR /app
+        RUN pip install --no-cache-dir requests>=2.31.0 eth-account>=0.10.0
+        RUN cat > vault.py <<'PYEOF'
+        import os, time, json, logging, threading, hashlib
+        from pathlib import Path
+        from decimal import Decimal
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        from urllib.parse import urlparse
+        try:
+            import requests
+        except ImportError:
+            import subprocess, sys
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
+            import requests
+
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+        logger = logging.getLogger(__name__)
+
+        # === RULES: hardcoded, covered by attestation, immutable ===
+        MAX_LOSS_PER_TRADE = Decimal("0.02")
+        MAX_POSITION_RATIO = Decimal("0.20")
+        STOP_LOSS = Decimal("0.05")
+        FUNDING_THRESHOLD = 50.0
+        ALLOWED_ASSETS = ["BTC", "ETH", "SOL"]
+        COOLDOWN_AFTER_LOSS = 3600
+
+        STATE = {
+            "vault_address": None,
+            "total_deposited": "0",
+            "depositors": {},
+            "positions": [],
+            "signals": [],
+            "prices": {},
+            "pnl": "0",
+            "last_scan": None,
+            "scans": 0,
+            "status": "initializing",
+            "rules": {
+                "max_loss_per_trade": str(MAX_LOSS_PER_TRADE),
+                "max_position_ratio": str(MAX_POSITION_RATIO),
+                "stop_loss": str(STOP_LOSS),
+                "allowed_assets": ALLOWED_ASSETS,
+                "funding_threshold": FUNDING_THRESHOLD,
+                "cooldown_after_loss_seconds": COOLDOWN_AFTER_LOSS,
+            },
+        }
+
+        def init_vault_wallet():
+            from eth_account import Account
+            key_path = Path("/app/data/.vault_key")
+            key_path.parent.mkdir(parents=True, exist_ok=True)
+            if key_path.exists():
+                wallet = Account.from_key(key_path.read_text().strip())
+                logger.info("Loaded vault wallet: %s", wallet.address)
+            else:
+                wallet = Account.create()
+                key_path.write_text(wallet.key.hex())
+                logger.info("Created vault wallet in TEE: %s", wallet.address)
+            return wallet
+
+        HL_API = "https://api.hyperliquid.xyz/info"
+
+        def scan_funding():
+            try:
+                resp = requests.post(HL_API, json={"type": "metaAndAssetCtxs"}, headers={"Content-Type": "application/json"}, timeout=10)
+                data = resp.json()
+                meta, ctxs = data[0]["universe"], data[1]
+                signals = []
+                for i, asset in enumerate(meta):
+                    sym = asset["name"]
+                    if sym not in ALLOWED_ASSETS:
+                        continue
+                    funding = float(ctxs[i].get("funding", 0))
+                    annual = funding * 3 * 365 * 100
+                    if abs(annual) > FUNDING_THRESHOLD:
+                        signals.append({"symbol": sym, "funding_annual_pct": round(annual, 1), "direction": "SHORT" if annual > 0 else "LONG", "timestamp": time.strftime("%Y-%m-%d %H:%M:%S")})
+                return sorted(signals, key=lambda s: abs(s["funding_annual_pct"]), reverse=True)
+            except Exception as e:
+                logger.error("Funding scan failed: %s", e)
+                return []
+
+        def get_prices():
+            try:
+                resp = requests.post(HL_API, json={"type": "allMids"}, headers={"Content-Type": "application/json"}, timeout=10)
+                mids = resp.json()
+                return {k: round(float(v), 2) for k, v in mids.items() if k in ALLOWED_ASSETS}
+            except Exception as e:
+                logger.error("Price fetch failed: %s", e)
+                return {}
+
+        def check_trade_allowed(signal, balance):
+            if balance <= 0:
+                return False, "no funds"
+            pos_size = float(balance) * float(MAX_POSITION_RATIO)
+            max_loss = pos_size * float(STOP_LOSS)
+            if max_loss > float(balance) * float(MAX_LOSS_PER_TRADE):
+                return False, "position too large for risk limits"
+            return True, "ok"
+
+        class VaultHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                path = urlparse(self.path).path
+                if path == "/rules":
+                    data = STATE["rules"]
+                elif path == "/verify":
+                    data = {"message": "Verify this vault by checking the attestation", "steps": ["1. Run: phala cvms attestation <vault-name>", "2. Note the compose_hash", "3. Compare with docker-compose.yaml in this repo", "4. If they match, the vault runs exactly this code", "5. The rules are hardcoded and immutable"], "vault_address": STATE["vault_address"], "rules": STATE["rules"]}
+                else:
+                    data = STATE
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                self.wfile.write(json.dumps(data, indent=2, default=str).encode())
+            def log_message(self, *a):
+                pass
+
+        def main():
+            logger.info("=" * 60)
+            logger.info("  TRUSTLESS VAULT")
+            logger.info("  Secured by TEE | Verified by Attestation")
+            logger.info("=" * 60)
+            logger.info("Rules: max_loss=%s, max_pos=%s, stop=%s, assets=%s", MAX_LOSS_PER_TRADE, MAX_POSITION_RATIO, STOP_LOSS, ALLOWED_ASSETS)
+            wallet = init_vault_wallet()
+            STATE["vault_address"] = wallet.address
+            STATE["status"] = "running"
+            logger.info("Vault address: %s", wallet.address)
+            threading.Thread(target=lambda: HTTPServer(("0.0.0.0", 8080), VaultHandler).serve_forever(), daemon=True).start()
+            logger.info("API on :8080 — GET / | /rules | /verify")
+            interval = int(os.environ.get("SCAN_INTERVAL", "60"))
+            while True:
+                STATE["signals"] = scan_funding()
+                STATE["prices"] = get_prices()
+                STATE["last_scan"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                STATE["scans"] += 1
+                for s in STATE["signals"]:
+                    ok, reason = check_trade_allowed(s, 0)
+                    logger.info("Signal: %s %s (%s%%) — %s", s["direction"], s["symbol"], s["funding_annual_pct"], "WOULD TRADE" if ok else "BLOCKED: " + reason)
+                if STATE["prices"]:
+                    logger.info("Prices: %s", " | ".join("%s=$%s" % (k, "{:,.0f}".format(v)) for k, v in STATE["prices"].items()))
+                logger.info("Scan #%d done. Next in %ds.", STATE["scans"], interval)
+                time.sleep(interval)
+
+        if __name__ == "__main__":
+            main()
+        PYEOF
+        CMD ["python3", "-u", "vault.py"]
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SCAN_INTERVAL=60
+    ports:
+      - "8080:8080"
+    volumes:
+      - vault-data:/app/data
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  vault-data:
