@@ -247,6 +247,16 @@ class DNSProvider(ABC):
         )
         return self.create_dns_record(new_record)
 
+    def append_txt_record(self, name: str, content: str, ttl: int = 60) -> bool:
+        """Append a TXT value to an existing RRset without removing other values.
+
+        Used for shared alias domains where multiple instances each need their
+        APP_ID registered. Default falls back to replace behavior for providers
+        that don't support multi-value RRsets.
+        """
+        print("Note: provider does not support multi-value TXT; replacing")
+        return self.set_txt_record(name, content, ttl)
+
     def set_weighted_cname_record(
         self,
         name: str,

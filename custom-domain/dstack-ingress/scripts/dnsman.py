@@ -14,7 +14,7 @@ def main():
     )
     parser.add_argument(
         "action",
-        choices=["set_cname", "set_alias", "set_txt", "set_caa", "set_weighted_cname"],
+        choices=["set_cname", "set_alias", "set_txt", "set_txt_append", "set_caa", "set_weighted_cname"],
         help="Action to perform",
     )
     parser.add_argument("--domain", required=True, help="Domain name")
@@ -73,6 +73,17 @@ def main():
                 print(f"Failed to set TXT record for {args.domain}", file=sys.stderr)
                 sys.exit(1)
             print(f"Successfully set TXT record for {args.domain}")
+
+        elif args.action == "set_txt_append":
+            if not args.content:
+                print("Error: --content is required for TXT records", file=sys.stderr)
+                sys.exit(1)
+
+            success = provider.append_txt_record(args.domain, args.content)
+            if not success:
+                print(f"Failed to append TXT record for {args.domain}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Successfully appended TXT record for {args.domain}")
 
         elif args.action == "set_weighted_cname":
             if not args.content:

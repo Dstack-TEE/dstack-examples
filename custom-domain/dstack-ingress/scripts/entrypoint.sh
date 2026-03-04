@@ -247,6 +247,17 @@ set_txt_record() {
         echo "Error: Failed to set TXT record for $domain"
         exit 1
     fi
+
+    # Also register APP_ID for alias domain (append-mode to support multiple instances)
+    if [ -n "$ALIAS_DOMAIN" ]; then
+        dnsman.py set_txt_append \
+            --domain "${TXT_PREFIX}.${ALIAS_DOMAIN}" \
+            --content "$APP_ID:$PORT"
+        if [ $? -ne 0 ]; then
+            echo "Warning: Failed to append TXT record for alias domain $ALIAS_DOMAIN"
+            # Non-fatal: node routing still works; alias routing may be degraded
+        fi
+    fi
 }
 
 set_alias_domain_cname() {

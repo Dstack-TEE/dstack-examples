@@ -305,6 +305,65 @@ class Route53DNSProvider(DNSProvider):
         )
         return self.create_dns_record(new_record)
 
+    def append_txt_record(self, name: str, content: str, ttl: int = 60) -> bool:
+        """Append to a TXT RRset — fetches all existing values and UPSERTs the full set."""
+        hosted_zone_id = self._ensure_hosted_zone_id(name)
+        if not hosted_zone_id:
+            return False
+
+        normalized_name = self._normalize_record_name(name)
+        quoted_content = f'"{content}"'
+
+        # Fetch existing TXT RRset directly — get_dns_records only returns the first value
+        paginator = self.client.get_paginator("list_resource_record_sets")
+        existing_rrset = None
+        try:
+            for page in paginator.paginate(HostedZoneId=hosted_zone_id):
+                for record_set in page["ResourceRecordSets"]:
+                    if record_set["Name"] == normalized_name and record_set["Type"] == "TXT":
+                        existing_rrset = record_set
+                        break
+                if existing_rrset:
+                    break
+        except Exception as e:
+            print(f"Error fetching existing TXT records: {e}", file=sys.stderr)
+            return False
+
+        existing_values = []
+        if existing_rrset:
+            existing_values = [rr["Value"] for rr in existing_rrset.get("ResourceRecords", [])]
+            ttl = existing_rrset.get("TTL", ttl)
+
+        if quoted_content in existing_values:
+            print(f"TXT record already contains {content}")
+            return True
+
+        all_values = existing_values + [quoted_content]
+        print(f"Appending TXT value for {name}: {len(all_values)} total entries")
+
+        change_batch = {
+            "Changes": [
+                {
+                    "Action": "UPSERT",
+                    "ResourceRecordSet": {
+                        "Name": normalized_name,
+                        "Type": "TXT",
+                        "TTL": ttl,
+                        "ResourceRecords": [{"Value": v} for v in all_values],
+                    },
+                }
+            ]
+        }
+
+        try:
+            response = self.client.change_resource_record_sets(
+                HostedZoneId=hosted_zone_id, ChangeBatch=change_batch
+            )
+            return response.get("ChangeInfo", {}).get("Status") in ["PENDING", "INSYNC"]
+        except Exception as e:
+            print(f"Error appending TXT record: {e}", file=sys.stderr)
+            return False
+
     def create_dns_record(self, record: DNSRecord) -> bool:
         """
         Create a DNS record.
