@@ -184,7 +184,7 @@ configs:
 - `PROXY_BUFFERS`: Optional value for nginx `proxy_buffers` (format: `number size`, e.g. `4 256k`) in single-domain mode
 - `PROXY_BUSY_BUFFERS_SIZE`: Optional value for nginx `proxy_busy_buffers_size` (numeric with optional `k|m` suffix, e.g. `256k`) in single-domain mode
 - `CERTBOT_STAGING`: Optional; set this value to the string `true` to set the `--staging` server option on the [`certbot` cli](https://eff-certbot.readthedocs.io/en/stable/using.html#certbot-command-line-options)
-- `ALIAS_DOMAIN`: Optional; a single public-facing domain shared across multiple nodes (e.g. `app.example.com`). Added as a SAN on the TLS certificate and to nginx `server_name`. When combined with `ROUTE53_INITIAL_WEIGHT` (Route53 only), also registers a weight-0 weighted CNAME `ALIAS_DOMAIN → DOMAIN` so the node is in the pool but dark until promoted. See [Multi-Node Weighted Routing](#multi-node-weighted-routing-with-alias_domain).
+- `ALIAS_DOMAIN`: Optional; a shared domain that acts as a load-balanced entry point across multiple Phala nodes (e.g. `app.example.com`). Each node automatically joins the upstream pool on boot — users hit one address while traffic is distributed across however many nodes are running. See [Multi-Node Weighted Routing](#multi-node-weighted-routing-with-alias_domain).
 
 **Backward Compatibility:**
 
@@ -259,7 +259,7 @@ volumes:
 
 ### How It Works
 
-Each node has a **node domain** (`DOMAIN`, e.g. `node1.app.example.com`) that is the primary identity used for Phala's TXT-based app routing. A single **public domain** (`ALIAS_DOMAIN`, e.g. `app.example.com`) is shared across all nodes and used as the user-facing address.
+Each node has a **node domain** (`DOMAIN`, e.g. `node1.app.example.com`) used for its individual Phala-verified identity. Issuing certificates against per-node domains also avoids Let's Encrypt's duplicate-certificate rate limits that would occur if every node requested a cert for the same shared domain. A single **public domain** (`ALIAS_DOMAIN`, e.g. `app.example.com`) is shared across all nodes as the user-facing address and is added as a SAN on each node's certificate. The Phala gateway validates traffic to the alias domain via a shared TXT record that accumulates an entry for every node in the pool — each node appends its own `APP_ID` on boot rather than replacing the existing values.
 
 ```
                          ┌─────────────────────────────────────────┐
@@ -274,6 +274,9 @@ Users                    │         Route53 Weighted CNAMEs          │
                          │
                          │  _dstack-app-address.node1.app.example.com → <appid1>:443
                          │  _dstack-app-address.node2.app.example.com → <appid2>:443
+                         │
+                         │  _dstack-app-address.app.example.com → <appid1>:443  ← one entry per node
+                         │                                         <appid2>:443  ← appended on each boot
                          │
                          │         TLS Certificate (on each node)
                          │

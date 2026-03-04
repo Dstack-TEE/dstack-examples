@@ -24,7 +24,7 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 - `SET_CAA` - Enable CAA record setup (default: false)
 - `PORT` - HTTPS port (default: 443)
 - `TXT_PREFIX` - Prefix for TXT records (default: "_tapp-address")
-- `ALIAS_DOMAIN` - Public-facing domain shared across multiple nodes (e.g., `app.example.com`). Added as a SAN on the TLS certificate and to nginx `server_name`. When set alongside `ROUTE53_INITIAL_WEIGHT` (Route53 only), also creates a weight-0 weighted CNAME `ALIAS_DOMAIN → DOMAIN` to register this node in the pool without routing traffic to it. See [Weighted Routing with ALIAS_DOMAIN](#weighted-routing-with-alias_domain-route53).
+- `ALIAS_DOMAIN` - A shared domain that acts as a load-balanced entry point across multiple Phala nodes (e.g., `app.example.com`). Each node automatically joins the upstream pool on boot — users hit one address while traffic is distributed across however many nodes are running. See [Weighted Routing with ALIAS_DOMAIN](#weighted-routing-with-alias_domain-route53).
 
 ## Provider-Specific Configuration
 
