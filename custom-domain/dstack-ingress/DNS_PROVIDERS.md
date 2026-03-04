@@ -175,10 +175,10 @@ services:
     image: dstack-ingress:latest
     restart: unless-stopped
     volumes:
-      - /var/run/dstack.sock:/var/run/dstack.sock
-      - cert-data:/etc/letsencrypt
+    - /var/run/dstack.sock:/var/run/dstack.sock
+    - cert-data:/etc/letsencrypt
     ports:
-      - "443:443"
+    - 443:443
     environment:
       DNS_PROVIDER: route53
       DOMAIN: app.example.com
