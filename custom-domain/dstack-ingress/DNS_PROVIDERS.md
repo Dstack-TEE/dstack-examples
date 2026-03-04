@@ -13,7 +13,7 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 
 ### Common Variables (Required for all providers)
 
-- `DOMAIN` - Your node-specific domain (e.g., `node1.app.example.com`)
+- `DOMAIN` - Your custom domain (e.g., `app.example.com`)
 - `GATEWAY_DOMAIN` - dstack gateway domain (e.g., `_.dstack-prod5.phala.network`)
 - `CERTBOT_EMAIL` - Email for Let's Encrypt registration
 - `TARGET_ENDPOINT` - Backend application endpoint to proxy to
@@ -172,17 +172,17 @@ services:
 ```yaml
 services:
   dstack-ingress:
-    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
+    image: dstack-ingress:latest
     restart: unless-stopped
     volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/dstack.sock:/var/run/dstack.sock
       - cert-data:/etc/letsencrypt
     ports:
       - "443:443"
     environment:
       DNS_PROVIDER: route53
       DOMAIN: app.example.com
-      GATEWAY_DOMAIN: _.dstack-prod5.phala.network
+      GATEWAY_DOMAIN: _.${DSTACK_GATEWAY_DOMAIN}
 
       AWS_REGION: ${AWS_REGION}
       AWS_ROLE_ARN: ${AWS_ROLE_ARN}
@@ -252,7 +252,7 @@ Node 1 (`node1.app.example.com`):
 ```yaml
 services:
   dstack-ingress:
-    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
+    image: dstack-ingress:latest
     restart: unless-stopped
     ports:
       - "443:443"
@@ -260,7 +260,7 @@ services:
       DNS_PROVIDER: route53
       DOMAIN: node1.app.example.com
       ALIAS_DOMAIN: app.example.com
-      GATEWAY_DOMAIN: _.dstack-prod5.phala.network
+      GATEWAY_DOMAIN: _.${DSTACK_GATEWAY_DOMAIN}
       CERTBOT_EMAIL: ${CERTBOT_EMAIL}
       TARGET_ENDPOINT: http://app:80
       SET_CAA: 'true'
@@ -271,7 +271,7 @@ services:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/dstack.sock:/var/run/dstack.sock
       - cert-data:/etc/letsencrypt
 volumes:
   cert-data:
