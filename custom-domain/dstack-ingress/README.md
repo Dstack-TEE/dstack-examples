@@ -316,7 +316,7 @@ The node is fully provisioned and verified before receiving any user traffic. Tr
 | `ALIAS_DOMAIN` | No | Public-facing domain shared across nodes (e.g. `app.example.com`) |
 | `ROUTE53_INITIAL_WEIGHT` | No | Weight for this node's primary CNAME. When combined with `ALIAS_DOMAIN`, also triggers creation of the weight-0 CNAME for the public domain. |
 
-See [DNS Provider Configuration](DNS_PROVIDERS.md#weighted-routing-with-alias_domain-route53) for a full example.
+For a complete production-ready reference that includes a dynamic nginx upstream manager (automatically enrolling and unenrolling backend containers as they start and stop), see [`docker-compose.loadbalanced.yaml`](docker-compose.loadbalanced.yaml) in this repository. For full DNS configuration details, see [DNS Provider Configuration](DNS_PROVIDERS.md#weighted-routing-with-alias_domain-route53).
 
 ## Domain Attestation and Verification
 

@@ -200,7 +200,7 @@ For multi-node weighted routing, see [Weighted Routing with ALIAS_DOMAIN](#weigh
 
 ## Weighted Routing with ALIAS_DOMAIN (Route53)
 
-This pattern lets you run multiple independent TEE nodes behind a single public domain using Route53 weighted routing. Each node manages its own Phala identity (TXT record, CNAME to gateway) while also being registered as a weighted target for the shared public domain.
+This pattern lets you run multiple independent TEE nodes behind a single public domain using Route53 weighted routing. Each node manages its own Phala identity (TXT record, CNAME to gateway) while also being registered as a weighted target for the shared public domain. Per-node domains also prevent hitting Let's Encrypt's duplicate-certificate rate limits that would occur if every node requested a cert for the same shared domain.
 
 ### DNS Record Layout
 
@@ -209,6 +209,9 @@ Public domain (shared across nodes)
 ────────────────────────────────────────────────────────────────
   app.example.com  CNAME  node1.app.example.com  weight=100  id=node1.app.example.com
   app.example.com  CNAME  node2.app.example.com  weight=0    id=node2.app.example.com  ← new, dark
+
+  _dstack-app-address.app.example.com  TXT  <appid1>:443   ← one entry per node in pool,
+                                            <appid2>:443      appended on each node boot
 
 Per-node records (managed by each node's dstack-ingress)
 ────────────────────────────────────────────────────────────────
@@ -278,6 +281,8 @@ volumes:
 ```
 
 Node 2 (`node2.app.example.com`) uses identical config with `DOMAIN: node2.app.example.com`. On first boot it registers itself at weight 0. To promote it, update the record weight in Route53.
+
+For a complete production-ready reference that includes a dynamic nginx upstream manager (automatically enrolling and unenrolling backend containers as they start and stop), see [`docker-compose.loadbalanced.yaml`](docker-compose.loadbalanced.yaml) in this repository.
 
 ### Important Notes
 
