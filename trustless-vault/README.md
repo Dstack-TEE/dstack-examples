@@ -61,13 +61,15 @@ There's a gap: **complex trading strategies that manage shared funds**. Until no
 Anyone can verify this vault:
 
 ```bash
-# 1. Get the attestation
+# 1. Get the attestation quote directly from the vault
+curl https://<app-id>-8080.dstack-<region>.phala.network/verify
+# Returns actual TDX quote with RTMR values
+
+# 2. Or use the CLI
 phala cvms attestation <vault-name>
+# Find the compose_hash in the event log
 
-# 2. Find the compose_hash in the event log
-#    Example: compose_hash = 06e91a8969f7...
-
-# 3. Hash the docker-compose.yaml yourself
+# 3. Hash the docker-compose.yaml + vault.py yourself
 #    The hash must match
 
 # 4. Read vault.py — the rules are right there:
@@ -79,7 +81,6 @@ phala cvms attestation <vault-name>
 # 5. Check the vault state
 curl https://<app-id>-8080.dstack-<region>.phala.network/
 curl https://<app-id>-8080.dstack-<region>.phala.network/rules
-curl https://<app-id>-8080.dstack-<region>.phala.network/verify
 ```
 
 ## Deploy
@@ -114,9 +115,9 @@ TEE gives you the **trustlessness of smart contracts** with the **flexibility of
 
 ## Security Considerations
 
-- The vault wallet key is derived deterministically from the app's identity. Redeploying with the same compose file on the same KMS produces the same key.
+- The vault wallet key is derived deterministically from the app's identity via `dstack_sdk.get_key()`. Same app_id = same key. No disk storage needed.
 - Changing ANY code changes the compose hash, which changes the attestation. Depositors should monitor for attestation changes.
-- The vault currently trusts Hyperliquid's API responses. A production vault should verify data from multiple sources.
+- **This vault trusts Hyperliquid's API responses as-is.** A production vault should cross-validate with multiple data sources to mitigate API manipulation risks.
 - This is an example. Do not deposit significant funds without thorough auditing.
 
 ## License
