@@ -1,0 +1,16 @@
+services:
+  vault:
+    build: .
+    environment:
+      - PYTHONUNBUFFERED=1
+      - SCAN_INTERVAL=${SCAN_INTERVAL:-60}
+    ports:
+      - "8080:8080"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
