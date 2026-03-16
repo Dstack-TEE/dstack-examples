@@ -268,11 +268,20 @@ set_caa_record() {
         return
     fi
 
+    local caa_domain caa_tag
+    if [[ "$domain" == \*.* ]]; then
+        caa_domain="${domain#\*.}"
+        caa_tag="issuewild"
+    else
+        caa_domain="$domain"
+        caa_tag="issue"
+    fi
+
     ACCOUNT_URI=$(jq -j '.uri' "$account_file")
-    echo "Adding CAA record for $domain, accounturi=$ACCOUNT_URI"
+    echo "Adding CAA record ($caa_tag) for $caa_domain, accounturi=$ACCOUNT_URI"
     dnsman.py set_caa \
-        --domain "$domain" \
-        --caa-tag "issue" \
+        --domain "$caa_domain" \
+        --caa-tag "$caa_tag" \
         --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
 
     if [ $? -ne 0 ]; then
