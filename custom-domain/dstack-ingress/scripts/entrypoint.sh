@@ -231,8 +231,16 @@ set_txt_record() {
     fi
     APP_ID=${APP_ID:-"$DSTACK_APP_ID"}
 
+    local txt_domain
+    if [[ "$domain" == \*.* ]]; then
+        # Wildcard domain: *.myapp.com → _dstack-app-address-wildcard.myapp.com
+        txt_domain="${TXT_PREFIX}-wildcard.${domain#\*.}"
+    else
+        txt_domain="${TXT_PREFIX}.${domain}"
+    fi
+
     dnsman.py set_txt \
-        --domain "${TXT_PREFIX}.${domain}" \
+        --domain "$txt_domain" \
         --content "$APP_ID:$PORT"
 
     if [ $? -ne 0 ]; then
