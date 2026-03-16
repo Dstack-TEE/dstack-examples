@@ -106,6 +106,9 @@ EOF
 setup_py_env
 
 setup_nginx_conf() {
+    local cert_name
+    cert_name=$(cert_dir_name "$DOMAIN")
+
     local client_max_body_size_conf=""
     if [ -n "$CLIENT_MAX_BODY_SIZE" ]; then
         client_max_body_size_conf="    client_max_body_size ${CLIENT_MAX_BODY_SIZE};"
@@ -148,8 +151,8 @@ server {
     server_name ${DOMAIN};
 
     # SSL certificate configuration
-    ssl_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${DOMAIN}/privkey.pem;
+    ssl_certificate /etc/letsencrypt/live/${cert_name}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${cert_name}/privkey.pem;
 
     # Modern SSL configuration - TLS 1.2 and 1.3 only
     ssl_protocols TLSv1.2 TLSv1.3;
@@ -166,7 +169,7 @@ server {
     # Enable OCSP stapling
     ssl_stapling on;
     ssl_stapling_verify on;
-    ssl_trusted_certificate /etc/letsencrypt/live/${DOMAIN}/fullchain.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/${cert_name}/fullchain.pem;
     resolver 8.8.8.8 8.8.4.4 valid=300s;
     resolver_timeout 5s;
 
