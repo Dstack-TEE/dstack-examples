@@ -53,6 +53,39 @@ The dstack-ingress now supports multiple domains in a single container:
 - Each domain gets its own SSL certificate
 - Flexible nginx configuration per domain
 
+### Wildcard Domain Support
+
+You can use a wildcard domain (e.g. `*.myapp.com`) to route all subdomains to a single dstack application:
+
+- The TXT record is automatically set as `_dstack-app-address-wildcard.myapp.com` (instead of `_dstack-app-address.*.myapp.com`)
+- CAA records use the `issuewild` tag on the base domain
+- Requires dstack-gateway with wildcard TXT resolution support ([dstack#545](https://github.com/Dstack-TEE/dstack/pull/545))
+
+```yaml
+services:
+  dstack-ingress:
+    image: dstacktee/dstack-ingress:latest
+    ports:
+      - "443:443"
+    environment:
+      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
+      - DOMAIN=*.myapp.com
+      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - CERTBOT_EMAIL=${CERTBOT_EMAIL}
+      - SET_CAA=true
+      - TARGET_ENDPOINT=http://app:80
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - /var/run/tappd.sock:/var/run/tappd.sock
+      - cert-data:/etc/letsencrypt
+    restart: unless-stopped
+  app:
+    image: nginx
+    restart: unless-stopped
+volumes:
+  cert-data:
+```
+
 ## Usage
 
 ### Prerequisites
