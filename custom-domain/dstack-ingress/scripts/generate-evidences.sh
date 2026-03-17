@@ -23,7 +23,7 @@ fi
 # Copy all certificate files
 while IFS= read -r domain; do
     [[ -n "$domain" ]] || continue
-    cert_file="/etc/letsencrypt/live/${domain}/fullchain.pem"
+    cert_file="/etc/letsencrypt/live/$(cert_dir_name "$domain")/fullchain.pem"
     if [ -f "$cert_file" ]; then
         cp "$cert_file" "cert-${domain}.pem"
     else

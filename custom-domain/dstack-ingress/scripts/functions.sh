@@ -112,6 +112,14 @@ sanitize_proxy_buffers() {
     fi
 }
 
+# Get the certbot certificate directory name for a domain.
+# Certbot stores wildcard certs without the "*." prefix:
+#   *.example.com → /etc/letsencrypt/live/example.com/
+cert_dir_name() {
+    local domain="$1"
+    echo "${domain#\*.}"
+}
+
 get_letsencrypt_account_path() {
     local base_path="/etc/letsencrypt/accounts"
     local api_endpoint="acme-v02.api.letsencrypt.org"
