@@ -1,0 +1,226 @@
+volumes:
+  cert-data:
+  shared_conf:
+
+services:
+  dstack-ingress:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM dstack-ingress:latest
+        RUN apt-get update && \
+            apt-get install -y --no-install-recommends inotify-tools && \
+            rm -rf /var/lib/apt/lists/*
+    restart: unless-stopped
+    volumes:
+    - /var/run/dstack.sock:/var/run/dstack.sock
+    - cert-data:/etc/letsencrypt
+    - shared_conf:/shared/conf.d
+    ports:
+    - 443:443
+    environment:
+      DNS_PROVIDER: route53
+      AWS_REGION: ${ROUTE53_AWS_REGION}
+      AWS_ROLE_ARN: ${ROUTE53_AWS_ROLE_ARN}
+      AWS_ACCESS_KEY_ID: ${ROUTE53_AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${ROUTE53_AWS_SECRET_ACCESS_KEY}
+      GATEWAY_DOMAIN: npw.${DSTACK_GATEWAY_DOMAIN}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL}
+      CERTBOT_STAGING: 'false'
+      SET_CAA: 'true'
+      PROXY_BUFFER_SIZE: 128k
+      PROXY_BUFFERS: 4 256k
+      PROXY_BUSY_BUFFERS_SIZE: 256k
+      DOMAIN: ${MACHINE_NAME}.example.com
+      ALIAS_DOMAIN: app.example.com
+      TARGET_ENDPOINT: http://dynamic_backends
+      ROUTE53_INITIAL_WEIGHT: 0
+    configs:
+      - source: nginx_master_config
+        target: /etc/nginx/nginx.conf
+      - source: nginx_fallback
+        target: /etc/nginx/conf.d/fallback.conf
+      - source: nginx_entrypoint
+        target: /nginx_entrypoint.sh
+        mode: 0755
+      - source: nginx_mainloop
+        target: /nginx_mainloop.sh
+        mode: 0755
+    networks:
+      - default
+      - my-tasks
+    entrypoint: ["/nginx_entrypoint.sh"]
+    command: []
+
+  watcher:
+    build:
+      context: .
+      dockerfile_inline: |
+        FROM python:3.11-alpine
+        RUN pip install --no-cache-dir docker
+        CMD ["python", "-u", "/watcher.py"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - shared_conf:/shared/conf.d
+    configs:
+      - source: watcher_py
+        target: /watcher.py
+
+configs:
+
+  nginx_master_config:
+    content: |
+      # /etc/nginx/nginx.conf
+      worker_processes auto;
+
+      events {
+          worker_connections 1024;
+      }
+
+      http {
+          include /etc/nginx/mime.types;
+          default_type application/octet-stream;
+
+          # Pull in upstream definitions
+          include /shared/conf.d/upstreams.conf;
+      
+          # Pull in server blocks
+          include /etc/nginx/conf.d/*.conf;
+      }
+
+
+  nginx_fallback:
+    content: |
+      # Internal Maintenance Fallback Server
+      server {
+          listen 127.0.0.1:9998;
+          location / {
+              add_header Content-Type text/plain;
+              return 503 "System is scaling or deploying. Please refresh in a few seconds.\n";
+          }
+      }
+      
+  nginx_entrypoint:
+    content: |
+      #!/bin/sh
+      echo "setting up upstreams.conf" >&2
+      /bin/ls -lah /shared/conf.d
+
+      # starting - so clear out any old upstreams
+      echo 'upstream dynamic_backends { server 127.0.0.1:9998; }' > /shared/conf.d/upstreams.conf
+      cat /shared/conf.d/upstreams.conf >&2
+
+      echo "execute phalas container setup" >&2
+      exec /scripts/entrypoint.sh /nginx_mainloop.sh
+
+  nginx_mainloop:
+    content: |
+      #!/bin/sh
+
+      echo "phalas container setup COMPLETE!" >&2
+      echo "start Nginx in background with server config: " >&2
+      cat /shared/conf.d/upstreams.conf >&2
+      nginx -c /etc/nginx/nginx.conf -g "daemon off; error_log /dev/stderr info;" &
+      NGINX_PID=$$!
+
+      echo "TEE Ingress started. Watching for upstream changes..."
+      # Block and watch file for atomic modifications
+      while inotifywait -q -e close_write,moved_to /shared/conf.d; do
+          echo "[$(date)] Upstream configuration updated. Reloading Nginx..."
+          nginx -s reload
+      done
+      wait $$NGINX_PID
+
+
+  # --- PYTHON WATCHER SCRIPT ---
+  watcher_py:
+    content: |
+      import docker
+      import os
+      import time
+
+      client = docker.from_env()
+      SHARED_FILE = "/shared/conf.d/upstreams.conf"
+      LABEL_KEY = "phala.ingress.target"
+      LABEL_VAL = "true"
+      TASK_NETWORK = "my-tasks"
+
+      def ensure_on_task_network(c):
+          """Attach container to the shared my-tasks network if not already on it."""
+          networks = c.attrs.get("NetworkSettings", {}).get("Networks", {})
+          # Find the network by suffix in case compose prefixes the project name
+          matched = next((k for k in networks if k.endswith(TASK_NETWORK)), None)
+          if matched:
+              print(f"  [net] {c.name} already on {matched}")
+              return matched
+          try:
+              net = client.networks.list(filters={"name": TASK_NETWORK})
+              if not net:
+                  print(f"  [net] ERROR: network '{TASK_NETWORK}' not found")
+                  return None
+              net[0].connect(c)
+              c.reload()
+              print(f"  [net] attached {c.name} to {net[0].name}")
+              # Return actual network name after attachment
+              networks = c.attrs.get("NetworkSettings", {}).get("Networks", {})
+              return next((k for k in networks if k.endswith(TASK_NETWORK)), None)
+          except Exception as e:
+              print(f"  [net] failed to attach {c.name}: {e}")
+              return None
+
+      def get_task_network_ip(c):
+          """Get the container's IP on the my-tasks network."""
+          networks = c.attrs.get("NetworkSettings", {}).get("Networks", {})
+          net_name = next((k for k in networks if k.endswith(TASK_NETWORK)), None)
+          if net_name:
+              return networks[net_name].get("IPAddress")
+          return None
+
+      def update_upstreams():
+          print("Reconciling Nginx upstream state...")
+          containers = client.containers.list(
+              filters={"label": f"{LABEL_KEY}={LABEL_VAL}", "status": "running"}
+          )
+          print(f"found {len(containers)} containers")
+
+          config = "upstream dynamic_backends {\n"
+          for c in containers:
+              net_name = ensure_on_task_network(c)
+              ip = get_task_network_ip(c) if net_name else None
+              if not ip:
+                  print(f"  [warn] skipping {c.name} — no IP on {TASK_NETWORK}")
+                  continue
+              port = c.labels.get("phala.ingress.port", "8080")
+              print(f" -> Enrolled: {c.name.lstrip('/')} on {net_name} ({ip}:{port})")
+              # Add passive health checks (fails 3 times in 15s = temporarily dead)
+              config += f"    server {ip}:{port} max_fails=3 fail_timeout=15s;\n"
+          
+          if containers:
+              config += "    server 127.0.0.1:9998 backup;\n}\n"
+          else:
+              config += "    server 127.0.0.1:9998;\n}\n"
+          
+          # Atomic write to trigger inotify cleanly
+          temp_file = f"{SHARED_FILE}.tmp"
+          with open(temp_file, "w") as f:
+              f.write(config)
+          os.replace(temp_file, SHARED_FILE)
+          print("Nginx state successfully written.\n")
+          print(f"{config}\n")
+
+      def main():
+          print("Starting Phala Python Docker Watcher...")
+          update_upstreams()
+
+          events = client.events(decode=True, filters={"type": "container", "event": ["start", "die"]})
+          for event in events:
+              attrs = event.get("Actor", {}).get("Attributes", {})
+              if attrs.get(LABEL_KEY) == LABEL_VAL:
+                  action = event.get("status")
+                  print(f"App container {action} detected!")
+                  # Slight delay ensures Docker DNS has fully registered the new container IP
+                  time.sleep(1)
+                  update_upstreams()
+
+      if __name__ == "__main__":
+          main()

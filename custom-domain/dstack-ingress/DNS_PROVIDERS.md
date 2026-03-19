@@ -17,13 +17,14 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 - `GATEWAY_DOMAIN` - dstack gateway domain (e.g., `_.dstack-prod5.phala.network`)
 - `CERTBOT_EMAIL` - Email for Let's Encrypt registration
 - `TARGET_ENDPOINT` - Backend application endpoint to proxy to
-- `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`)
+- `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`, `route53`)
 
 ### Optional Variables
 
 - `SET_CAA` - Enable CAA record setup (default: false)
 - `PORT` - HTTPS port (default: 443)
 - `TXT_PREFIX` - Prefix for TXT records (default: "_tapp-address")
+- `ALIAS_DOMAIN` - A shared domain that acts as a load-balanced entry point across multiple Phala nodes (e.g., `app.example.com`). Each node automatically joins the upstream pool on boot — users hit one address while traffic is distributed across however many nodes are running. See [Weighted Routing with ALIAS_DOMAIN](#weighted-routing-with-alias_domain-route53).
 
 ## Provider-Specific Configuration
 
@@ -103,9 +104,13 @@ PolicyDocument:
         - route53:ListResourceRecordSets
 ```
 
+**Optional Variables for Route53:**
+- `ROUTE53_INITIAL_WEIGHT` - Enables [Weighted Routing](https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/routing-policy-weighted.html) on the CNAME record created for `DOMAIN` (e.g. `node1.app.example.com → phala gateway`). Set to an integer (e.g., `100`) to assign that weight to the record. A unique `SetIdentifier` is generated automatically. TXT records are never weighted. Omit to create a standard non-weighted CNAME. When `ALIAS_DOMAIN` is also set, this variable additionally triggers creation of a weight-0 weighted CNAME `ALIAS_DOMAIN → DOMAIN` — see below.
+- `ALIAS_DOMAIN` - See [Weighted Routing with ALIAS_DOMAIN](#weighted-routing-with-alias_domain-route53).
+
 **Important Notes for Route53:**
-- The certbot plugin uses the format `certbot-dns-route53` package
-- CAA will merge AWS & Let's Encrypt CA domains to existing records if they exist
+- The certbot plugin uses the `certbot-dns-route53` package
+- CAA will merge AWS & Let's Encrypt CA domains into existing records if they exist
 - It is essential that the AWS service account used can only assume the limited role. See cloudformation example.
 
 ## Docker Compose Examples
@@ -162,7 +167,7 @@ services:
       - ./evidences:/evidences
 ```
 
-### Route53 Example
+### Route53 Example (single node, no weighted routing)
 
 ```yaml
 services:
@@ -187,8 +192,103 @@ services:
       CERTBOT_EMAIL: ${CERTBOT_EMAIL}
       TARGET_ENDPOINT: http://backend:8080
       SET_CAA: 'true'
+volumes:
+  cert-data:
+```
+
+For multi-node weighted routing, see [Weighted Routing with ALIAS_DOMAIN](#weighted-routing-with-alias_domain-route53).
+
+## Weighted Routing with ALIAS_DOMAIN (Route53)
+
+This pattern lets you run multiple independent TEE nodes behind a single public domain using Route53 weighted routing. Each node manages its own Phala identity (TXT record, CNAME to gateway) while also being registered as a weighted target for the shared public domain. Per-node domains also prevent hitting Let's Encrypt's duplicate-certificate rate limits that would occur if every node requested a cert for the same shared domain.
+
+### DNS Record Layout
 
 ```
+Public domain (shared across nodes)
+────────────────────────────────────────────────────────────────
+  app.example.com  CNAME  node1.app.example.com  weight=100  id=node1.app.example.com
+  app.example.com  CNAME  node2.app.example.com  weight=0    id=node2.app.example.com  ← new, dark
+
+  _dstack-app-address.app.example.com  TXT  <appid1>:443   ← one entry per node in pool,
+                                            <appid2>:443      appended on each node boot
+
+Per-node records (managed by each node's dstack-ingress)
+────────────────────────────────────────────────────────────────
+  node1.app.example.com   CNAME  <appid1>.dstack-prod5.phala.network  weight=100
+  node2.app.example.com   CNAME  <appid2>.dstack-prod5.phala.network  weight=100
+
+  _dstack-app-address.node1.app.example.com  TXT  <appid1>:443
+  _dstack-app-address.node2.app.example.com  TXT  <appid2>:443
+
+TLS certificate (on each node)
+────────────────────────────────────────────────────────────────
+  Subject:  node1.app.example.com
+  SAN:      app.example.com
+```
+
+### Variable Interactions
+
+| `ALIAS_DOMAIN` | `ROUTE53_INITIAL_WEIGHT` | Cert SAN | Nginx server_name | Weight-0 CNAME for ALIAS_DOMAIN |
+|---|---|---|---|---|
+| not set | any | no | no | no |
+| set | not set | yes | yes | no |
+| set | set | yes | yes | yes |
+
+### Node Startup Sequence
+
+When a new node starts with both variables set, dstack-ingress performs these steps automatically:
+
+```
+1. CNAME  node2.app.example.com → <appid2>.dstack.phala.network  (weighted, ROUTE53_INITIAL_WEIGHT)
+2. TXT    _dstack-app-address.node2.app.example.com → <appid2>:443
+3. CNAME  app.example.com → node2.app.example.com                (weight=0, SetIdentifier=node2.app.example.com)
+4. Obtain TLS cert for node2.app.example.com + app.example.com (SAN)
+```
+
+The node is fully verified and ready before step 3 introduces it to the pool. Traffic only starts flowing after an operator explicitly sets the weight above 0 in Route53.
+
+### Docker Compose Example (weighted, two-node setup)
+
+Node 1 (`node1.app.example.com`):
+
+```yaml
+services:
+  dstack-ingress:
+    image: dstack-ingress:latest
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    environment:
+      DNS_PROVIDER: route53
+      DOMAIN: node1.app.example.com
+      ALIAS_DOMAIN: app.example.com
+      GATEWAY_DOMAIN: _.${DSTACK_GATEWAY_DOMAIN}
+      CERTBOT_EMAIL: ${CERTBOT_EMAIL}
+      TARGET_ENDPOINT: http://app:80
+      SET_CAA: 'true'
+      ROUTE53_INITIAL_WEIGHT: '100'
+
+      AWS_REGION: ${AWS_REGION}
+      AWS_ROLE_ARN: ${AWS_ROLE_ARN}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - cert-data:/etc/letsencrypt
+volumes:
+  cert-data:
+```
+
+Node 2 (`node2.app.example.com`) uses identical config with `DOMAIN: node2.app.example.com`. On first boot it registers itself at weight 0. To promote it, update the record weight in Route53.
+
+For a complete production-ready reference that includes a dynamic nginx upstream manager (automatically enrolling and unenrolling backend containers as they start and stop), see [`docker-compose.loadbalanced.yaml`](docker-compose.loadbalanced.yaml) in this repository.
+
+### Important Notes
+
+- The weight-0 CNAME for `ALIAS_DOMAIN` uses `DOMAIN` as the `SetIdentifier`, so each node has a stable, unique slot in the weighted record set that survives restarts without creating duplicates.
+- For non-Route53 providers (Cloudflare, Linode, Namecheap), `ALIAS_DOMAIN` still adds the SAN and updates nginx, but those providers do not support weighted CNAME records at the DNS level. You would need to manage traffic distribution through the provider's own load balancing features.
+- `ALIAS_DOMAIN` must be in the same Route53 hosted zone as `DOMAIN`, or at least a zone your credentials can write to.
 
 ## Migration from Cloudflare-only Setup
 
