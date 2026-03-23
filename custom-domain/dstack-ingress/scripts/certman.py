@@ -288,6 +288,9 @@ class CertManager:
         if action == "certonly":
             base_cmd.extend(["--agree-tos", "--no-eff-email",
                             "--email", email, "-d", domain])
+        alias_domain = os.environ.get("ALIAS_DOMAIN", "").strip()
+        if alias_domain:
+            base_cmd.extend(["--cert-name", domain, "--expand", "-d", alias_domain])
         if os.environ.get("CERTBOT_STAGING", "false") == "true":
             base_cmd.extend(["--staging"])
 
