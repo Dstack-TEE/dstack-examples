@@ -217,7 +217,7 @@ configs:
 - `PROXY_BUFFERS`: Optional value for nginx `proxy_buffers` (format: `number size`, e.g. `4 256k`) in single-domain mode
 - `PROXY_BUSY_BUFFERS_SIZE`: Optional value for nginx `proxy_busy_buffers_size` (numeric with optional `k|m` suffix, e.g. `256k`) in single-domain mode
 - `CERTBOT_STAGING`: Optional; set this value to the string `true` to set the `--staging` server option on the [`certbot` cli](https://eff-certbot.readthedocs.io/en/stable/using.html#certbot-command-line-options)
-- `ALIAS_DOMAIN` - An additional domain to include as a Subject Alternative Name (SAN) on the TLS certificate and in nginx `server_name`. When set, the node's certificate covers both `DOMAIN` and `ALIAS_DOMAIN`, and nginx will accept requests for either hostname.
+- `ALIAS_DOMAIN`: An additional domain to include as a Subject Alternative Name (SAN) on the TLS certificate and in nginx `server_name`. When set, the node's certificate covers both `DOMAIN` and `ALIAS_DOMAIN`, and nginx will accept requests for either hostname.
 
 **Backward Compatibility:**
 
