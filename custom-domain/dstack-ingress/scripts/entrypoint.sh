@@ -40,6 +40,9 @@ fi
 if ! TXT_PREFIX=$(sanitize_dns_label "$TXT_PREFIX"); then
     exit 1
 fi
+if ! ALIAS_DOMAIN=$(sanitize_domain "$ALIAS_DOMAIN"); then
+    exit 1
+fi
 
 PROXY_CMD="proxy"
 if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
@@ -144,11 +147,16 @@ setup_nginx_conf() {
         proxy_busy_buffers_size_conf="    proxy_busy_buffers_size ${PROXY_BUSY_BUFFERS_SIZE};"
     fi
 
+    local server_name_value="${DOMAIN}"
+    if [ -n "$ALIAS_DOMAIN" ]; then
+        server_name_value="${DOMAIN} ${ALIAS_DOMAIN}"
+    fi
+
     cat <<EOF >/etc/nginx/conf.d/default.conf
 server {
     listen ${PORT} ssl;
     http2 on;
-    server_name ${DOMAIN};
+    server_name ${server_name_value};
 
     # SSL certificate configuration
     ssl_certificate /etc/letsencrypt/live/${cert_name}/fullchain.pem;

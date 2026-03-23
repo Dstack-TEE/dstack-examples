@@ -24,6 +24,7 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 - `SET_CAA` - Enable CAA record setup (default: false)
 - `PORT` - HTTPS port (default: 443)
 - `TXT_PREFIX` - Prefix for TXT records (default: "_tapp-address")
+- `ALIAS_DOMAIN` - An additional domain to include as a Subject Alternative Name (SAN) on the TLS certificate and in nginx `server_name`. When set, the node's certificate covers both `DOMAIN` and `ALIAS_DOMAIN`, and nginx will accept requests for either hostname.
 
 ## Provider-Specific Configuration
 
