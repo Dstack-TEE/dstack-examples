@@ -25,11 +25,10 @@ while true; do
             build-combined-pems.sh || echo "Combined PEM build failed"
 
             # Graceful reload: send SIGUSR2 to haproxy master process
-            local pidfile="/var/run/haproxy/haproxy.pid"
-            if [ ! -f "$pidfile" ]; then
-                echo "HAProxy reload failed: PID file $pidfile not found" >&2
-            elif ! kill -USR2 "$(cat "$pidfile")"; then
-                echo "HAProxy reload failed: SIGUSR2 to PID $(cat "$pidfile") failed" >&2
+            if [ ! -f /var/run/haproxy/haproxy.pid ]; then
+                echo "HAProxy reload failed: PID file /var/run/haproxy/haproxy.pid not found" >&2
+            elif ! kill -USR2 "$(cat /var/run/haproxy/haproxy.pid)"; then
+                echo "HAProxy reload failed: SIGUSR2 to PID $(cat /var/run/haproxy/haproxy.pid) failed" >&2
             else
                 echo "Certificate renewed and HAProxy reloaded successfully"
             fi

@@ -85,10 +85,28 @@ sanitize_positive_integer() {
 sanitize_haproxy_timeout() {
     local candidate="$1"
     local name="${2:-timeout}"
-    if [[ "$candidate" =~ ^[0-9]+(us|ms|s|m|h|d)?$ ]]; then
+    # Require a time suffix — bare numbers are milliseconds in HAProxy,
+    # which is almost never what users intend.
+    if [[ "$candidate" =~ ^[0-9]+(us|ms|s|m|h|d)$ ]]; then
         echo "$candidate"
     else
-        echo "Error: Invalid ${name}: $candidate (e.g. 10s, 5m, 86400s)" >&2
+        echo "Error: Invalid ${name}: $candidate (must include suffix, e.g. 10s, 5m, 86400s)" >&2
+        return 1
+    fi
+}
+
+sanitize_alpn() {
+    local candidate="$1"
+    if [ -z "$candidate" ]; then
+        echo ""
+        return 0
+    fi
+    # ALPN value is comma-separated protocol names (e.g. "h2,http/1.1")
+    # Only allow alphanumeric, dots, slashes, hyphens, and commas.
+    if [[ "$candidate" =~ ^[A-Za-z0-9./-]+(,[A-Za-z0-9./-]+)*$ ]]; then
+        echo "$candidate"
+    else
+        echo "Error: Invalid ALPN value: $candidate (e.g. h2,http/1.1)" >&2
         return 1
     fi
 }

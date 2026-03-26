@@ -63,6 +63,10 @@ assert_equal "$(sanitize_haproxy_timeout 5m TIMEOUT)" "5m" "sanitize_haproxy_tim
 assert_equal "$(sanitize_haproxy_timeout 500ms TIMEOUT)" "500ms" "sanitize_haproxy_timeout accepts 500ms"
 assert_equal "$(sanitize_haproxy_timeout 100us TIMEOUT)" "100us" "sanitize_haproxy_timeout accepts 100us"
 assert_equal "$(sanitize_haproxy_timeout 1d TIMEOUT)" "1d" "sanitize_haproxy_timeout accepts 1d"
+assert_equal "$(sanitize_alpn 'h2,http/1.1')" "h2,http/1.1" "sanitize_alpn accepts h2,http/1.1"
+assert_equal "$(sanitize_alpn 'h2')" "h2" "sanitize_alpn accepts h2"
+assert_equal "$(sanitize_alpn 'http/1.1')" "http/1.1" "sanitize_alpn accepts http/1.1"
+assert_equal "$(sanitize_alpn '')" "" "sanitize_alpn accepts empty"
 
 # Failing cases
 assert_fails "sanitize_port rejects non-numeric" sanitize_port abc
@@ -100,6 +104,10 @@ assert_fails "sanitize_dns_label rejects invalid characters" sanitize_dns_label 
 assert_fails "sanitize_positive_integer rejects zero" sanitize_positive_integer 0 MAXCONN
 assert_fails "sanitize_positive_integer rejects non-numeric" sanitize_positive_integer abc MAXCONN
 assert_fails "sanitize_haproxy_timeout rejects bare text" sanitize_haproxy_timeout abc TIMEOUT
+assert_fails "sanitize_haproxy_timeout rejects bare number" sanitize_haproxy_timeout 10 TIMEOUT
+assert_fails "sanitize_alpn rejects semicolons" sanitize_alpn "h2;drop"
+assert_fails "sanitize_alpn rejects newlines" sanitize_alpn $'h2\nhttp/1.1'
+assert_fails "sanitize_alpn rejects spaces" sanitize_alpn "h2, http/1.1"
 
 if [[ $failures -eq 0 ]]; then
     echo "All sanitizer tests passed"

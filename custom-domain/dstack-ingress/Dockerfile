@@ -1,5 +1,7 @@
-FROM haproxy:3.1-bookworm
+FROM haproxy@sha256:49a0a0d6f0b8b7e59c233b06eefab1564f2c8d64f673554d368fd7d2ab4b2c2d
 
+# haproxy image runs as non-root (uid 99) by default; we need root for
+# certbot, DNS management, and writing to /etc/haproxy/certs.
 USER root
 
 RUN --mount=type=bind,source=pinned-packages.txt,target=/tmp/pinned-packages.txt,ro \

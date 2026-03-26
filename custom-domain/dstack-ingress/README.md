@@ -178,6 +178,7 @@ environment:
 | `TIMEOUT_SERVER` | `86400s` | Server-side timeout |
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
+| `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
