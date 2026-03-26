@@ -71,6 +71,28 @@ sanitize_dns_label() {
     fi
 }
 
+sanitize_positive_integer() {
+    local candidate="$1"
+    local name="${2:-value}"
+    if [[ "$candidate" =~ ^[0-9]+$ ]] && (( candidate >= 1 )); then
+        echo "$candidate"
+    else
+        echo "Error: Invalid ${name}: $candidate (must be a positive integer)" >&2
+        return 1
+    fi
+}
+
+sanitize_haproxy_timeout() {
+    local candidate="$1"
+    local name="${2:-timeout}"
+    if [[ "$candidate" =~ ^[0-9]+(us|ms|s|m|h|d)?$ ]]; then
+        echo "$candidate"
+    else
+        echo "Error: Invalid ${name}: $candidate (e.g. 10s, 5m, 86400s)" >&2
+        return 1
+    fi
+}
+
 sanitize_proxy_timeout() {
     local candidate="$1"
     if [ -z "$candidate" ]; then

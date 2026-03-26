@@ -36,6 +36,10 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-300}"
 READY_TIMEOUT="${READY_TIMEOUT:-600}"
 
 # Derived domains for multi-protocol testing
+if [[ "$DOMAIN" == \** ]]; then
+    echo "Error: DOMAIN must not be a wildcard for e2e testing (got $DOMAIN)" >&2
+    exit 1
+fi
 GRPC_DOMAIN="grpc-${DOMAIN}"
 
 CVM_NAME="ingress-e2e-$(date +%s)"
@@ -147,7 +151,7 @@ DOMAINS_VAL="${DOMAIN},${GRPC_DOMAIN}"
 ROUTING_MAP_VAL="${DOMAIN}=whoami:80,${GRPC_DOMAIN}=grpcbin:9000"
 
 log "Deploying CVM: $CVM_NAME"
-phala deploy \
+if ! phala deploy \
     -c "$COMPOSE_FILE" \
     -n "$CVM_NAME" \
     -t "$INSTANCE_TYPE" \
@@ -157,7 +161,10 @@ phala deploy \
     -e "GATEWAY_DOMAIN=${GATEWAY_DOMAIN}" \
     -e "DOMAINS=${DOMAINS_VAL}" \
     -e "ROUTING_MAP=${ROUTING_MAP_VAL}" \
-    --wait
+    --wait; then
+    fail "CVM deployment failed"
+    exit 1
+fi
 
 log "CVM deployed, waiting for boot..."
 
