@@ -1,6 +1,6 @@
 services:
   ingress:
-    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
+    image: dstacktee/dstack-ingress:latest
     ports:
       - "443:443"
     environment:
@@ -12,56 +12,29 @@ services:
       DOMAINS: |
         ${APP_DOMAIN}
         ${API_DOMAIN}
+      ROUTING_MAP: |
+        ${APP_DOMAIN}=app-main:80
+        ${API_DOMAIN}=app-api:80
 
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
       - letsencrypt:/etc/letsencrypt
-
-    configs:
-      - source: app_conf
-        target: /etc/nginx/conf.d/app.conf
-        mode: 0444
-      - source: api_conf
-        target: /etc/nginx/conf.d/api.conf
-        mode: 0444
+      - evidences:/evidences
 
     restart: unless-stopped
 
   app-main:
     image: nginx
+    volumes:
+      - evidences:/evidences:ro
     restart: unless-stopped
 
   app-api:
     image: nginx
+    volumes:
+      - evidences:/evidences:ro
     restart: unless-stopped
 
 volumes:
   letsencrypt:
-
-configs:
-  app_conf:
-    content: |
-      server {
-          listen 443 ssl;
-          server_name ${APP_DOMAIN};
-
-          ssl_certificate /etc/letsencrypt/live/${APP_DOMAIN}/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/${APP_DOMAIN}/privkey.pem;
-
-          location / {
-              proxy_pass http://app-main:80;
-          }
-      }
-  api_conf:
-    content: |
-      server {
-          listen 443 ssl;
-          server_name ${API_DOMAIN};
-
-          ssl_certificate /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
-
-          location / {
-              proxy_pass http://app-api:80;
-          }
-      }
+  evidences:

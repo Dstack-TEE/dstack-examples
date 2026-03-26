@@ -6,6 +6,13 @@ source "/scripts/functions.sh"
 
 PORT=${PORT:-443}
 TXT_PREFIX=${TXT_PREFIX:-"_dstack-app-address"}
+MAXCONN=${MAXCONN:-4096}
+TIMEOUT_CONNECT=${TIMEOUT_CONNECT:-10s}
+TIMEOUT_CLIENT=${TIMEOUT_CLIENT:-86400s}
+TIMEOUT_SERVER=${TIMEOUT_SERVER:-86400s}
+EVIDENCE_SERVER=${EVIDENCE_SERVER:-true}
+EVIDENCE_PORT=${EVIDENCE_PORT:-80}
+ALPN=${ALPN:-}
 
 if ! PORT=$(sanitize_port "$PORT"); then
     exit 1
@@ -16,35 +23,48 @@ fi
 if ! TARGET_ENDPOINT=$(sanitize_target_endpoint "$TARGET_ENDPOINT"); then
     exit 1
 fi
-if ! CLIENT_MAX_BODY_SIZE=$(sanitize_client_max_body_size "$CLIENT_MAX_BODY_SIZE"); then
-    exit 1
-fi
-if ! PROXY_READ_TIMEOUT=$(sanitize_proxy_timeout "$PROXY_READ_TIMEOUT"); then
-    exit 1
-fi
-if ! PROXY_SEND_TIMEOUT=$(sanitize_proxy_timeout "$PROXY_SEND_TIMEOUT"); then
-    exit 1
-fi
-if ! PROXY_CONNECT_TIMEOUT=$(sanitize_proxy_timeout "$PROXY_CONNECT_TIMEOUT"); then
-    exit 1
-fi
-if ! PROXY_BUFFER_SIZE=$(sanitize_proxy_buffer_size "$PROXY_BUFFER_SIZE"); then
-    exit 1
-fi
-if ! PROXY_BUFFERS=$(sanitize_proxy_buffers "$PROXY_BUFFERS"); then
-    exit 1
-fi
-if ! PROXY_BUSY_BUFFERS_SIZE=$(sanitize_proxy_buffer_size "$PROXY_BUSY_BUFFERS_SIZE"); then
-    exit 1
-fi
 if ! TXT_PREFIX=$(sanitize_dns_label "$TXT_PREFIX"); then
     exit 1
 fi
-
-PROXY_CMD="proxy"
-if [[ "${TARGET_ENDPOINT}" == grpc://* ]]; then
-    PROXY_CMD="grpc"
+if ! MAXCONN=$(sanitize_positive_integer "$MAXCONN" "MAXCONN"); then
+    exit 1
 fi
+if ! TIMEOUT_CONNECT=$(sanitize_haproxy_timeout "$TIMEOUT_CONNECT" "TIMEOUT_CONNECT"); then
+    exit 1
+fi
+if ! TIMEOUT_CLIENT=$(sanitize_haproxy_timeout "$TIMEOUT_CLIENT" "TIMEOUT_CLIENT"); then
+    exit 1
+fi
+if ! TIMEOUT_SERVER=$(sanitize_haproxy_timeout "$TIMEOUT_SERVER" "TIMEOUT_SERVER"); then
+    exit 1
+fi
+if ! EVIDENCE_PORT=$(sanitize_positive_integer "$EVIDENCE_PORT" "EVIDENCE_PORT"); then
+    exit 1
+fi
+if ! ALPN=$(sanitize_alpn "$ALPN"); then
+    exit 1
+fi
+
+# Warn about deprecated L7 env vars
+for var in CLIENT_MAX_BODY_SIZE PROXY_READ_TIMEOUT PROXY_SEND_TIMEOUT PROXY_CONNECT_TIMEOUT PROXY_BUFFER_SIZE PROXY_BUFFERS PROXY_BUSY_BUFFERS_SIZE; do
+    if [ -n "${!var}" ]; then
+        echo "Warning: $var is ignored in TCP proxy mode"
+    fi
+done
+
+# Parse TARGET_ENDPOINT into host:port for haproxy backend
+parse_target_endpoint() {
+    local endpoint="$1"
+    # Strip protocol prefix if present (http://, https://, grpc://)
+    local hostport="${endpoint#*://}"
+    # If no protocol was stripped, use as-is
+    if [ "$hostport" = "$endpoint" ]; then
+        hostport="$endpoint"
+    fi
+    # Strip any trailing path
+    hostport="${hostport%%/*}"
+    echo "$hostport"
+}
 
 echo "Setting up certbot environment"
 
@@ -105,106 +125,129 @@ EOF
 
 setup_py_env
 
-setup_nginx_conf() {
-    local cert_name
-    cert_name=$(cert_dir_name "$DOMAIN")
+# Emit common haproxy global/defaults/frontend preamble.
+# Both single-domain and multi-domain modes share this identical config.
+emit_haproxy_preamble() {
+    # "crt <dir>" loads all PEM files from the directory.
+    # ALPN is appended conditionally via ${ALPN:+ alpn ${ALPN}}.
+    cat <<EOF >/etc/haproxy/haproxy.cfg
+global
+    log stdout format raw local0
+    maxconn ${MAXCONN}
+    pidfile /var/run/haproxy/haproxy.pid
+    ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305
+    ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
+    ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
+    ssl-default-bind-curves secp384r1
 
-    local client_max_body_size_conf=""
-    if [ -n "$CLIENT_MAX_BODY_SIZE" ]; then
-        client_max_body_size_conf="    client_max_body_size ${CLIENT_MAX_BODY_SIZE};"
-    fi
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    timeout connect ${TIMEOUT_CONNECT}
+    timeout client  ${TIMEOUT_CLIENT}
+    timeout server  ${TIMEOUT_SERVER}
 
-    local proxy_read_timeout_conf=""
-    if [ -n "$PROXY_READ_TIMEOUT" ]; then
-        proxy_read_timeout_conf="        ${PROXY_CMD}_read_timeout ${PROXY_READ_TIMEOUT};"
-    fi
-
-    local proxy_send_timeout_conf=""
-    if [ -n "$PROXY_SEND_TIMEOUT" ]; then
-        proxy_send_timeout_conf="        ${PROXY_CMD}_send_timeout ${PROXY_SEND_TIMEOUT};"
-    fi
-
-    local proxy_connect_timeout_conf=""
-    if [ -n "$PROXY_CONNECT_TIMEOUT" ]; then
-        proxy_connect_timeout_conf="        ${PROXY_CMD}_connect_timeout ${PROXY_CONNECT_TIMEOUT};"
-    fi
-
-    local proxy_buffer_size_conf=""
-    if [ -n "$PROXY_BUFFER_SIZE" ]; then
-        proxy_buffer_size_conf="    proxy_buffer_size ${PROXY_BUFFER_SIZE};"
-    fi
-
-    local proxy_buffers_conf=""
-    if [ -n "$PROXY_BUFFERS" ]; then
-        proxy_buffers_conf="    proxy_buffers ${PROXY_BUFFERS};"
-    fi
-
-    local proxy_busy_buffers_size_conf=""
-    if [ -n "$PROXY_BUSY_BUFFERS_SIZE" ]; then
-        proxy_busy_buffers_size_conf="    proxy_busy_buffers_size ${PROXY_BUSY_BUFFERS_SIZE};"
-    fi
-
-    cat <<EOF >/etc/nginx/conf.d/default.conf
-server {
-    listen ${PORT} ssl;
-    http2 on;
-    server_name ${DOMAIN};
-
-    # SSL certificate configuration
-    ssl_certificate /etc/letsencrypt/live/${cert_name}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${cert_name}/privkey.pem;
-
-    # Modern SSL configuration - TLS 1.2 and 1.3 only
-    ssl_protocols TLSv1.2 TLSv1.3;
-
-    # Strong cipher suites - Only AES-GCM and ChaCha20-Poly1305
-    ssl_ciphers 'TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305';
-
-    # Prefer server cipher suites
-    ssl_prefer_server_ciphers on;
-
-    # ECDH curve for ECDHE ciphers
-    ssl_ecdh_curve secp384r1;
-
-    # Enable OCSP stapling
-    ssl_stapling on;
-    ssl_stapling_verify on;
-    ssl_trusted_certificate /etc/letsencrypt/live/${cert_name}/fullchain.pem;
-    resolver 8.8.8.8 8.8.4.4 valid=300s;
-    resolver_timeout 5s;
-
-    # SSL session configuration
-    ssl_session_timeout 1d;
-    ssl_session_cache shared:SSL:50m;
-    ssl_session_tickets off;
-
-    # SSL buffer size (optimized for TLS 1.3)
-    ssl_buffer_size 4k;
-${proxy_buffer_size_conf}
-${proxy_buffers_conf}
-${proxy_busy_buffers_size_conf}
-
-    # Disable SSL renegotiation
-    ssl_early_data off;
-${client_max_body_size_conf}
-
-    location / {
-        ${PROXY_CMD}_pass ${TARGET_ENDPOINT};
-        ${PROXY_CMD}_set_header Host \$host;
-        ${PROXY_CMD}_set_header X-Real-IP \$remote_addr;
-        ${PROXY_CMD}_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        ${PROXY_CMD}_set_header X-Forwarded-Proto \$scheme;
-${proxy_read_timeout_conf}
-${proxy_send_timeout_conf}
-${proxy_connect_timeout_conf}
-    }
-
-    location /evidences/ {
-        alias /evidences/;
-        autoindex on;
-    }
-}
+frontend tls_in
+    bind :${PORT} ssl crt /etc/haproxy/certs/${ALPN:+ alpn ${ALPN}}
 EOF
+
+    if [ "$EVIDENCE_SERVER" = "true" ]; then
+        cat <<'EVIDENCE_BLOCK' >>/etc/haproxy/haproxy.cfg
+
+    # Route /evidences requests to local evidence HTTP server
+    tcp-request inspect-delay 5s
+    tcp-request content accept if WAIT_END
+    acl is_evidence payload(0,0) -m beg "GET /evidences"
+    acl is_evidence payload(0,0) -m beg "HEAD /evidences"
+    use_backend be_evidence if is_evidence
+EVIDENCE_BLOCK
+    fi
+}
+
+# Append the evidence backend block to haproxy.cfg
+emit_evidence_backend() {
+    if [ "$EVIDENCE_SERVER" = "true" ]; then
+        cat <<EOF >>/etc/haproxy/haproxy.cfg
+
+backend be_evidence
+    mode http
+    http-request replace-path /evidences(.*) \1
+    server evidence 127.0.0.1:${EVIDENCE_PORT}
+EOF
+    fi
+}
+
+# Generate haproxy.cfg for single-domain mode (DOMAIN + TARGET_ENDPOINT)
+setup_haproxy_cfg() {
+    local target_hostport
+    target_hostport=$(parse_target_endpoint "$TARGET_ENDPOINT")
+
+    emit_haproxy_preamble
+
+    cat <<EOF >>/etc/haproxy/haproxy.cfg
+
+    default_backend be_upstream
+
+backend be_upstream
+    server app1 ${target_hostport}
+EOF
+
+    emit_evidence_backend
+}
+
+# Generate haproxy.cfg for multi-domain mode (ROUTING_MAP)
+setup_haproxy_cfg_multi() {
+    emit_haproxy_preamble
+
+    # Parse ROUTING_MAP and generate use_backend rules + backend sections
+    # Support both newline-separated and comma-separated formats
+    local routing_map_normalized
+    routing_map_normalized=$(echo "$ROUTING_MAP" | tr ',' '\n')
+
+    local backend_rules=""
+    local backend_sections=""
+    local first_be_name=""
+    local domain target be_name
+
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        [[ "$line" == \#* ]] && continue
+        domain="${line%%=*}"
+        target="${line#*=}"
+        domain=$(echo "$domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        target=$(echo "$target" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        [[ -n "$domain" && -n "$target" ]] || continue
+
+        # Strip protocol prefix from target if present
+        target=$(parse_target_endpoint "$target")
+
+        # Generate safe backend name from domain
+        be_name="be_$(echo "$domain" | sed 's/[^A-Za-z0-9]/_/g')"
+
+        if [ -z "$first_be_name" ]; then
+            first_be_name="$be_name"
+        fi
+
+        backend_rules="${backend_rules}
+    use_backend ${be_name} if { ssl_fc_sni -i ${domain} }"
+        backend_sections="${backend_sections}
+
+backend ${be_name}
+    server s1 ${target}"
+    done <<< "$routing_map_normalized"
+
+    echo "$backend_rules" >> /etc/haproxy/haproxy.cfg
+
+    # Default to first backend in ROUTING_MAP
+    if [ -n "$first_be_name" ]; then
+        echo "" >> /etc/haproxy/haproxy.cfg
+        echo "    default_backend ${first_be_name}" >> /etc/haproxy/haproxy.cfg
+    fi
+
+    echo "$backend_sections" >> /etc/haproxy/haproxy.cfg
+
+    emit_evidence_backend
 }
 
 set_alias_record() {
@@ -341,12 +384,22 @@ else
     generate-evidences.sh
 fi
 
-renewal-daemon.sh &
+# Build combined PEM files for haproxy
+build-combined-pems.sh
 
-mkdir -p /var/log/nginx
-
-if [ -n "$DOMAIN" ] && [ -n "$TARGET_ENDPOINT" ]; then
-    setup_nginx_conf
+# Generate haproxy config
+if [ -n "$ROUTING_MAP" ]; then
+    setup_haproxy_cfg_multi
+elif [ -n "$DOMAIN" ] && [ -n "$TARGET_ENDPOINT" ]; then
+    setup_haproxy_cfg
 fi
+
+# Start evidence HTTP server if enabled
+if [ "$EVIDENCE_SERVER" = "true" ]; then
+    python3 -m http.server "$EVIDENCE_PORT" --directory /evidences &
+    echo "Evidence server started on port ${EVIDENCE_PORT}"
+fi
+
+renewal-daemon.sh &
 
 exec "$@"

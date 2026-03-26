@@ -33,7 +33,9 @@ sanitize_target_endpoint() {
         echo ""
         return 0
     fi
-    if [[ "$candidate" =~ ^(grpc|https?)://[A-Za-z0-9._-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?&=%-]*)?$ ]]; then
+    # Accept protocol://host:port/path or bare host:port
+    if [[ "$candidate" =~ ^(grpc|https?)://[A-Za-z0-9._-]+(:[0-9]{1,5})?(/[A-Za-z0-9._~:/?&=%-]*)?$ ]] ||
+       [[ "$candidate" =~ ^[A-Za-z0-9._-]+(:[0-9]{1,5})?$ ]]; then
         echo "$candidate"
     else
         echo "Error: Invalid TARGET_ENDPOINT value: $candidate" >&2

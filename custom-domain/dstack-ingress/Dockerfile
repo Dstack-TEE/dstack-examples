@@ -1,4 +1,6 @@
-FROM nginx@sha256:b6653fca400812e81569f9be762ae315db685bc30b12ddcdc8616c63a227d3ca
+FROM haproxy:3.1-bookworm
+
+USER root
 
 RUN --mount=type=bind,source=pinned-packages.txt,target=/tmp/pinned-packages.txt,ro \
     set -e; \
@@ -32,9 +34,10 @@ RUN --mount=type=bind,source=pinned-packages.txt,target=/tmp/pinned-packages.txt
 RUN mkdir -p \
     /etc/letsencrypt \
     /var/www/certbot \
-    /usr/share/nginx/html \
-    /etc/nginx/conf.d \
-    /var/log/nginx
+    /etc/haproxy/certs \
+    /var/run/haproxy \
+    /var/lib/haproxy \
+    /evidences
 
 # Install scripts with deterministic permissions via bind mount
 RUN --mount=type=bind,source=scripts,target=/tmp/scripts,ro \
@@ -62,4 +65,4 @@ ENV PYTHONUNBUFFERED=1
 COPY --chmod=666 .GIT_REV /etc/
 
 ENTRYPOINT ["/scripts/entrypoint.sh"]
-CMD ["nginx", "-g", "daemon off;"]
+CMD ["haproxy", "-W", "-f", "/etc/haproxy/haproxy.cfg"]

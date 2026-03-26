@@ -20,10 +20,15 @@ while true; do
         if [ "$renewal_occurred" = true ]; then
             echo "[$(date)] Generating evidence files after renewals..."
             generate-evidences.sh || echo "Evidence generation failed"
-            if ! nginx -s reload; then
-                echo "Nginx reload failed" >&2
+
+            # Rebuild combined PEM files for haproxy
+            build-combined-pems.sh || echo "Combined PEM build failed"
+
+            # Graceful reload: send SIGUSR2 to haproxy master process
+            if ! kill -USR2 "$(cat /var/run/haproxy/haproxy.pid 2>/dev/null)" 2>/dev/null; then
+                echo "HAProxy reload failed" >&2
             else
-                echo "Certificate renewed and Nginx reloaded successfully"
+                echo "Certificate renewed and HAProxy reloaded successfully"
             fi
         fi
     else
