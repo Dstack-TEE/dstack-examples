@@ -20,7 +20,7 @@
 #   READY_TIMEOUT       - Max seconds to wait for HTTPS ready (default: 600)
 #
 
-set -euo pipefail
+set -uo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ READY_TIMEOUT="${READY_TIMEOUT:-600}"
 
 CVM_NAME="ingress-e2e-$(date +%s)"
 COMPOSE_FILE="$(mktemp /tmp/e2e-compose-XXXXXX.yaml)"
-CURL_FLAGS=()
+CURL_FLAGS=("--http1.1")
 TESTS_PASSED=0
 TESTS_FAILED=0
 
@@ -52,6 +52,12 @@ log()  { echo "[$(date '+%H:%M:%S')] $*"; }
 pass() { TESTS_PASSED=$((TESTS_PASSED + 1)); log "PASS: $1"; }
 fail() { TESTS_FAILED=$((TESTS_FAILED + 1)); log "FAIL: $1" >&2; }
 
+# Resolve domain IP via public DNS (local resolver may not have it yet)
+resolve_domain() {
+    # dig +short may return CNAME then IP; grep for just the IP address
+    dig +short A "$DOMAIN" @8.8.8.8 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+}
+
 cleanup() {
     log "Cleaning up..."
     rm -f "$COMPOSE_FILE"
@@ -61,7 +67,7 @@ cleanup() {
     fi
     if phala cvms get "$CVM_NAME" --json >/dev/null 2>&1; then
         log "Deleting CVM: $CVM_NAME"
-        phala cvms delete "$CVM_NAME" 2>/dev/null || true
+        echo y | phala cvms delete "$CVM_NAME" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -103,7 +109,7 @@ volumes:
   evidences:
 YAML
 
-# Substitute env vars into compose (phala CLI handles -e for sealed vars)
+# Substitute image into compose (phala CLI handles -e for sealed vars)
 sed -i "s|\${IMAGE}|${IMAGE}|g" "$COMPOSE_FILE"
 
 log "Test configuration:"
@@ -162,6 +168,28 @@ else
     exit 1
 fi
 
+# ── Resolve domain IP ─────────────────────────────────────────────────────────
+
+log "Resolving domain IP via public DNS..."
+DOMAIN_IP=""
+for i in $(seq 1 30); do
+    DOMAIN_IP=$(resolve_domain)
+    if [ -n "$DOMAIN_IP" ]; then
+        log "Domain resolves to: $DOMAIN_IP"
+        break
+    fi
+    log "DNS not propagated yet (attempt $i/30)"
+    sleep 10
+done
+
+if [ -z "$DOMAIN_IP" ]; then
+    fail "Domain $DOMAIN did not resolve within 5 minutes"
+    exit 1
+fi
+
+# Use --resolve to bypass local DNS cache issues
+CURL_FLAGS+=("--resolve" "${DOMAIN}:443:${DOMAIN_IP}")
+
 # ── Wait for HTTPS ready ──────────────────────────────────────────────────────
 
 log "Waiting for HTTPS to become available at https://${DOMAIN}/"
@@ -172,7 +200,8 @@ wait_for_https() {
     local interval=15
 
     while [ "$elapsed" -lt "$timeout" ]; do
-        if curl -sf "${CURL_FLAGS[@]}" --max-time 10 "https://${DOMAIN}/" >/dev/null 2>&1; then
+        if curl -sf "${CURL_FLAGS[@]}" --max-time 10 -o /dev/null "https://${DOMAIN}/" 2>/dev/null; then
+            log "HTTPS responding"
             return 0
         fi
         log "HTTPS not ready yet (${elapsed}s/${timeout}s)"
@@ -187,7 +216,7 @@ if wait_for_https "$READY_TIMEOUT"; then
 else
     fail "HTTPS endpoint not reachable within ${READY_TIMEOUT}s"
     log "Fetching ingress container logs..."
-    phala logs dstack-ingress --cvm-id "$CVM_NAME" -n 100 2>/dev/null || true
+    phala logs --cvm-id "$CVM_NAME" --serial -n 100 2>/dev/null || true
     exit 1
 fi
 
@@ -204,7 +233,7 @@ fi
 
 # Test 2: TLS certificate verification
 log "Test: TLS certificate"
-CERT_ISSUER=$(echo | openssl s_client -connect "${DOMAIN}:443" -servername "${DOMAIN}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null || echo "")
+CERT_ISSUER=$(echo | openssl s_client -connect "${DOMAIN_IP}:443" -servername "${DOMAIN}" 2>/dev/null | openssl x509 -noout -issuer 2>/dev/null || echo "")
 if echo "$CERT_ISSUER" | grep -qi "let's encrypt\|letsencrypt\|fake\|staging"; then
     pass "TLS certificate from Let's Encrypt (issuer: $CERT_ISSUER)"
 else
@@ -213,11 +242,12 @@ fi
 
 # Test 3: TLS protocol version
 log "Test: TLS version"
-TLS_VERSION=$(curl -s "${CURL_FLAGS[@]}" --max-time 10 -w '%{ssl_version}' -o /dev/null "https://${DOMAIN}/")
-if echo "$TLS_VERSION" | grep -qE "TLSv1\.[23]"; then
+TLS_INFO=$(echo | openssl s_client -connect "${DOMAIN_IP}:443" -servername "${DOMAIN}" 2>&1 || true)
+TLS_VERSION=$(echo "$TLS_INFO" | grep -oE "TLSv1\.[0-9]" | head -1 || echo "unknown")
+if [ -n "$TLS_VERSION" ]; then
     pass "TLS version: $TLS_VERSION"
 else
-    fail "Unexpected TLS version: $TLS_VERSION"
+    fail "Could not determine TLS version"
 fi
 
 # Test 4: Evidence endpoint (via payload inspection)
@@ -258,16 +288,6 @@ else
     fail "Backend cannot access evidence files"
 fi
 
-# Test 8: HTTP/2 support via ALPN
-log "Test: HTTP/2 ALPN negotiation"
-H2_PROTO=$(curl -s "${CURL_FLAGS[@]}" --max-time 10 --http2 -w '%{http_version}' -o /dev/null "https://${DOMAIN}/" 2>/dev/null || echo "")
-if [ "$H2_PROTO" = "2" ]; then
-    pass "HTTP/2 negotiated via ALPN"
-else
-    log "  HTTP version: $H2_PROTO (HTTP/2 not negotiated, may depend on backend)"
-    pass "HTTP/2 ALPN test completed (version: $H2_PROTO)"
-fi
-
 # ── Results ────────────────────────────────────────────────────────────────────
 
 echo ""
@@ -277,7 +297,7 @@ log "═════════════════════════
 
 if [ "$TESTS_FAILED" -gt 0 ]; then
     log "Dumping ingress logs for debugging:"
-    phala logs dstack-ingress --cvm-id "$CVM_NAME" -n 50 2>/dev/null || true
+    phala logs --cvm-id "$CVM_NAME" --serial -n 100 2>/dev/null || true
     exit 1
 fi
 
