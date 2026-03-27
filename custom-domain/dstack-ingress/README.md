@@ -1,57 +1,28 @@
-# Custom Domain Setup for dstack Applications
+# dstack-ingress
 
-This repository provides a solution for setting up custom domains with automatic SSL certificate management for dstack applications using various DNS providers and Let's Encrypt.
+TCP proxy with automatic TLS termination for dstack applications.
 
 ## Overview
 
-This project enables you to run dstack applications with your own custom domain, complete with:
+dstack-ingress is a HAProxy-based L4 (TCP) proxy that provides:
 
 - Automatic SSL certificate provisioning and renewal via Let's Encrypt
-- Multi-provider DNS support (Cloudflare, Linode DNS, more to come)
-- Automatic DNS configuration for CNAME, TXT, and CAA records
-- Nginx reverse proxy to route traffic to your application
-- Certificate evidence generation for verification
-- Strong SSL/TLS configuration with modern cipher suites (AES-GCM and ChaCha20-Poly1305)
+- Multi-provider DNS support (Cloudflare, Linode DNS, Namecheap)
+- Pure TCP proxying — all protocols (HTTP, WebSocket, gRPC, arbitrary TCP) work transparently
+- Wildcard domain support
+- SNI-based multi-domain routing
+- Certificate evidence generation for TEE attestation verification
+- Strong TLS configuration (TLS 1.2+, AES-GCM, ChaCha20-Poly1305)
 
 ## How It Works
 
-The dstack-ingress system provides a seamless way to set up custom domains for dstack applications with automatic SSL certificate management. Here's how it works:
+1. **Bootstrap**: On first start, obtains SSL certificates from Let's Encrypt using DNS-01 validation and configures DNS records (CNAME, TXT, optional CAA).
 
-1. **Initial Setup**:
+2. **TLS Termination**: HAProxy terminates TLS and forwards the decrypted TCP stream to your backend. No HTTP inspection — the proxy operates entirely at L4.
 
-   - When first deployed, the container automatically obtains SSL certificates from Let's Encrypt using DNS validation
-   - It configures your DNS provider by creating necessary CNAME, TXT, and optional CAA records
-   - Nginx is configured to use the obtained certificates and proxy requests to your application
+3. **Certificate Renewal**: A background daemon checks for renewal every 12 hours. On renewal, HAProxy is gracefully reloaded with zero downtime.
 
-2. **DNS Configuration**:
-
-   - A CNAME record is created to point your custom domain to the dstack gateway domain
-   - A TXT record is added with application identification information to help dstack-gateway to route traffic to your application
-   - If enabled, CAA records are set to restrict which Certificate Authorities can issue certificates for your domain
-   - The system automatically detects your DNS provider based on environment variables
-
-3. **Certificate Management**:
-
-   - SSL certificates are automatically obtained during initial setup
-   - A simple background daemon checks for certificate renewal every 12 hours
-   - When certificates are renewed, Nginx is automatically reloaded to use the new certificates
-   - Uses a simple sleep loop instead of cron for reliability and easier debugging in containers
-
-4. **Evidence Generation**:
-   - The system generates evidence files for verification purposes
-   - These include the ACME account information and certificate data
-   - Evidence files are accessible through a dedicated endpoint
-
-## Features
-
-### Multi-Domain Support (New!)
-
-The dstack-ingress now supports multiple domains in a single container:
-
-- **Single Domain Mode** (backward compatible): Use `DOMAIN` and `TARGET_ENDPOINT` environment variables
-- **Multi-Domain Mode**: Use `DOMAINS` environment variable with custom nginx configurations in `/etc/nginx/conf.d/`
-- Each domain gets its own SSL certificate
-- Flexible nginx configuration per domain
+4. **Evidence Generation**: Generates cryptographically linked attestation evidence (ACME account, certificates, TDX quote) for TEE verification.
 
 ### Wildcard Domain Support
 
@@ -88,56 +59,50 @@ volumes:
 
 ## Usage
 
-### Prerequisites
-
-- Host your domain on one of the supported DNS providers
-- Have appropriate API credentials for your DNS provider (see [DNS Provider Configuration](DNS_PROVIDERS.md) for details)
-
-### Deployment
-
-You can either build the ingress container and push it to docker hub, or use the prebuilt image at `dstacktee/dstack-ingress:20250924`.
-
-#### Option 1: Use the Pre-built Image
-
-The fastest way to get started is to use our pre-built image. Simply use the following docker-compose configuration:
+### Single Domain
 
 ```yaml
 services:
   dstack-ingress:
-    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
+    image: dstacktee/dstack-ingress:latest
     ports:
       - "443:443"
     environment:
-      # DNS Provider
       - DNS_PROVIDER=cloudflare
-
-      # Cloudflare example
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
-
-      # Common configuration
       - DOMAIN=${DOMAIN}
       - GATEWAY_DOMAIN=${GATEWAY_DOMAIN}
       - CERTBOT_EMAIL=${CERTBOT_EMAIL}
       - SET_CAA=true
-      - TARGET_ENDPOINT=http://app:80
+      - TARGET_ENDPOINT=app:80
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
       - /var/run/tappd.sock:/var/run/tappd.sock
       - cert-data:/etc/letsencrypt
+      - evidences:/evidences
     restart: unless-stopped
+
   app:
-    image: nginx # Replace with your application image
+    image: your-app
+    volumes:
+      - evidences:/evidences:ro
     restart: unless-stopped
+
 volumes:
-  cert-data: # Persistent volume for certificates
+  cert-data:
+  evidences:
 ```
 
-### Multi-Domain Configuration
+`TARGET_ENDPOINT` accepts bare `host:port` (preferred) or with protocol prefix (`http://app:80`, `grpc://app:50051`). The protocol prefix is stripped — HAProxy forwards raw TCP regardless of protocol.
+
+### Multi-Domain with Routing
+
+Use `ROUTING_MAP` to route different domains to different backends via SNI:
 
 ```yaml
 services:
   ingress:
-    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
+    image: dstacktee/dstack-ingress:latest
     ports:
       - "443:443"
     environment:
@@ -147,187 +112,107 @@ services:
       GATEWAY_DOMAIN: _.dstack-prod5.phala.network
       SET_CAA: true
       DOMAINS: |
-        ${APP_DOMAIN}
-        ${API_DOMAIN}
-
+        app.example.com
+        api.example.com
+      ROUTING_MAP: |
+        app.example.com=app-main:80
+        api.example.com=app-api:8080
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
       - letsencrypt:/etc/letsencrypt
-
-    configs:
-      - source: app_conf
-        target: /etc/nginx/conf.d/app.conf
-        mode: 0444
-      - source: api_conf
-        target: /etc/nginx/conf.d/api.conf
-        mode: 0444
-
+      - evidences:/evidences
     restart: unless-stopped
 
   app-main:
     image: nginx
+    volumes:
+      - evidences:/evidences:ro
     restart: unless-stopped
 
   app-api:
-    image: nginx
+    image: your-api
+    volumes:
+      - evidences:/evidences:ro
     restart: unless-stopped
 
 volumes:
   letsencrypt:
-
-configs:
-  app_conf:
-    content: |
-      server {
-          listen 443 ssl;
-          server_name ${APP_DOMAIN};
-          ssl_certificate /etc/letsencrypt/live/${APP_DOMAIN}/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/${APP_DOMAIN}/privkey.pem;
-          location / {
-              proxy_pass http://app-main:80;
-          }
-      }
-  api_conf:
-    content: |
-      server {
-          listen 443 ssl;
-          server_name ${API_DOMAIN};
-          ssl_certificate /etc/letsencrypt/live/${API_DOMAIN}/fullchain.pem;
-          ssl_certificate_key /etc/letsencrypt/live/${API_DOMAIN}/privkey.pem;
-          location / {
-              proxy_pass http://app-api:80;
-          }
-      }
+  evidences:
 ```
 
-**Core Environment Variables:**
+### Wildcard Domains
 
-- `DNS_PROVIDER`: DNS provider to use (cloudflare, linode)
-- `DOMAIN`: Your custom domain (for single domain mode)
-- `DOMAINS`: Multiple domains, one per line (supports environment variable substitution like `${APP_DOMAIN}`)
-- `GATEWAY_DOMAIN`: The dstack gateway domain (e.g. `_.dstack-prod5.phala.network` for Phala Cloud)
-- `CERTBOT_EMAIL`: Your email address used in Let's Encrypt certificate requests
-- `TARGET_ENDPOINT`: The plain HTTP endpoint of your dstack application (for single domain mode)
-- `SET_CAA`: Set to `true` to enable CAA record setup
-- `CLIENT_MAX_BODY_SIZE`: Optional value for nginx `client_max_body_size` (numeric with optional `k|m|g` suffix, e.g. `50m`) in single-domain mode
-- `PROXY_READ_TIMEOUT`: Optional value for nginx `proxy_read_timeout` (numeric with optional `s|m|h` suffix, e.g. `30s`) in single-domain mode
-- `PROXY_SEND_TIMEOUT`: Optional value for nginx `proxy_send_timeout` (numeric with optional `s|m|h` suffix, e.g. `30s`) in single-domain mode
-- `PROXY_CONNECT_TIMEOUT`: Optional value for nginx `proxy_connect_timeout` (numeric with optional `s|m|h` suffix, e.g. `10s`) in single-domain mode
-- `PROXY_BUFFER_SIZE`: Optional value for nginx `proxy_buffer_size` (numeric with optional `k|m` suffix, e.g. `128k`) in single-domain mode
-- `PROXY_BUFFERS`: Optional value for nginx `proxy_buffers` (format: `number size`, e.g. `4 256k`) in single-domain mode
-- `PROXY_BUSY_BUFFERS_SIZE`: Optional value for nginx `proxy_busy_buffers_size` (numeric with optional `k|m` suffix, e.g. `256k`) in single-domain mode
-- `CERTBOT_STAGING`: Optional; set this value to the string `true` to set the `--staging` server option on the [`certbot` cli](https://eff-certbot.readthedocs.io/en/stable/using.html#certbot-command-line-options)
-
-**Backward Compatibility:**
-
-- If both `DOMAIN` and `TARGET_ENDPOINT` are set, the system operates in single-domain mode with auto-generated nginx config
-- If `DOMAINS` is set, the system operates in multi-domain mode and expects custom nginx configs in `/etc/nginx/conf.d/`
-- You can use both modes simultaneously
-
-For provider-specific configuration details, see [DNS Provider Configuration](DNS_PROVIDERS.md).
-
-#### Option 2: Build Your Own Image
-
-If you prefer to build the image yourself:
-
-1. Clone this repository
-2. Build the Docker image using the provided build script:
-
-```bash
-./build-image.sh yourusername/dstack-ingress:tag
-```
-
-**Important**: You must use the `build-image.sh` script to build the image. This script ensures reproducible builds with:
-
-- Specific buildkit version (v0.20.2)
-- Deterministic timestamps (`SOURCE_DATE_EPOCH=0`)
-- Package pinning for consistency
-- Git revision tracking
-
-Direct `docker build` commands will not work properly due to the specialized build requirements.
-
-3. Push to your registry (optional):
-
-```bash
-docker push yourusername/dstack-ingress:tag
-```
-
-4. Update the docker-compose.yaml file with your image name and deploy
-
-#### gRPC Support
-
-If your dstack application uses gRPC, you can set `TARGET_ENDPOINT` to `grpc://app:50051`.
-
-example:
+Wildcard certificates work out of the box with DNS-01 validation:
 
 ```yaml
-services:
-  dstack-ingress:
-    image: dstacktee/dstack-ingress:20250929@sha256:2b47b3e538df0b3e7724255b89369194c8c83a7cfba64d2faf0115ad0a586458
-    ports:
-      - "443:443"
-    environment:
-      - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
-      - DOMAIN=${DOMAIN}
-      - GATEWAY_DOMAIN=${GATEWAY_DOMAIN}
-      - CERTBOT_EMAIL=${CERTBOT_EMAIL}
-      - SET_CAA=true
-      - TARGET_ENDPOINT=grpc://app:50051
-    volumes:
-      - /var/run/dstack.sock:/var/run/dstack.sock
-      - /var/run/tappd.sock:/var/run/tappd.sock
-      - cert-data:/etc/letsencrypt
-    restart: unless-stopped
-  app:
-    image: your-grpc-app
-    restart: unless-stopped
-volumes:
-  cert-data:
+environment:
+  - DOMAIN=*.example.com
+  - TARGET_ENDPOINT=app:80
 ```
 
-## Domain Attestation and Verification
+## Environment Variables
 
-The dstack-ingress system provides mechanisms to verify and attest that your custom domain endpoint is secure and properly configured. This comprehensive verification approach ensures the integrity and authenticity of your application.
+### Required
 
-### Evidence Collection
+| Variable | Description |
+|----------|-------------|
+| `DOMAIN` | Your domain (single-domain mode). Supports wildcards (`*.example.com`) |
+| `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80` |
+| `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `_.dstack-prod5.phala.network`) |
+| `CERTBOT_EMAIL` | Email for Let's Encrypt registration |
+| `DNS_PROVIDER` | DNS provider (`cloudflare`, `linode`, `namecheap`) |
 
-When certificates are issued or renewed, the system automatically generates a set of cryptographically linked evidence files:
+### Optional
 
-1. **Access Evidence Files**:
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | `443` | HAProxy listen port |
+| `DOMAINS` | | Multiple domains, one per line |
+| `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line |
+| `SET_CAA` | `false` | Enable CAA DNS record |
+| `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
+| `CERTBOT_STAGING` | `false` | Use Let's Encrypt staging server |
+| `MAXCONN` | `4096` | HAProxy max connections |
+| `TIMEOUT_CONNECT` | `10s` | Backend connect timeout |
+| `TIMEOUT_CLIENT` | `86400s` | Client-side timeout (24h for long-lived connections) |
+| `TIMEOUT_SERVER` | `86400s` | Server-side timeout |
+| `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
+| `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
+| `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
 
-   - Evidence files are accessible at `https://your-domain.com/evidences/`
-   - Key files include `acme-account.json`, `cert.pem`, `sha256sum.txt`, and `quote.json`
+For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
-2. **Verification Chain**:
+## Evidence & Attestation
 
-   - `quote.json` contains a TDX quote with the SHA-256 digest of `sha256sum.txt` embedded in the report_data field
-   - `sha256sum.txt` contains cryptographic checksums of both `acme-account.json` and `cert.pem`
-   - When the TDX quote is verified, it cryptographically proves the integrity of the entire evidence chain
+Evidence files are served at `https://your-domain.com/evidences/` by default (via payload inspection in HAProxy's TCP mode). They can also be accessed by the backend application through the shared `/evidences` volume.
 
-3. **Certificate Authentication**:
-   - `acme-account.json` contains the ACME account credentials used to request certificates
-   - When combined with the CAA DNS record, this provides evidence that certificates can only be requested from within this specific TEE application
-   - `cert.pem` is the Let's Encrypt certificate currently serving your custom domain
+To disable the built-in evidence endpoint and serve evidence files only through your backend, set `EVIDENCE_SERVER=false`.
 
-### CAA Record Verification
+### Evidence Files
 
-If you've enabled CAA records (`SET_CAA=true`), you can verify that only authorized Certificate Authorities can issue certificates for your domain:
+| File | Description |
+|------|-------------|
+| `acme-account.json` | ACME account used to request certificates |
+| `cert-{domain}.pem` | Let's Encrypt certificate for each domain |
+| `sha256sum.txt` | SHA-256 checksums of all evidence files |
+| `quote.json` | TDX quote with `sha256sum.txt` digest in report_data |
+
+### Verification Chain
+
+1. Verify the TDX quote in `quote.json`
+2. Extract `report_data` — it contains the SHA-256 of `sha256sum.txt`
+3. Verify checksums in `sha256sum.txt` against `acme-account.json` and `cert-*.pem`
+4. This proves the certificates were obtained within the TEE
+
+## Building
 
 ```bash
-dig CAA your-domain.com
+./build-image.sh
+# Or push directly:
+./build-image.sh --push yourusername/dstack-ingress:tag
 ```
 
-The output will display CAA records that restrict certificate issuance exclusively to Let's Encrypt with your specific account URI, providing an additional layer of security.
-
-### TLS Certificate Transparency
-
-All Let's Encrypt certificates are logged in public Certificate Transparency (CT) logs, enabling independent verification:
-
-**CT Log Verification**:
-
-- Visit [crt.sh](https://crt.sh/) and search for your domain
-- Confirm that the certificates match those issued by the dstack-ingress system
-- This public logging ensures that all certificates are visible and can be monitored for unauthorized issuance
+The build script ensures reproducibility via pinned packages, deterministic timestamps, and specific buildkit version.
 
 ## License
 
