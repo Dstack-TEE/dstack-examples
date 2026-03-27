@@ -272,25 +272,17 @@ else
     fail "HTTP/1.1 response doesn't look like whoami"
 fi
 
-# ── HTTP/2 tests (against gRPC backend which supports h2c) ───────────────────
-# Note: with L4 proxy + ALPN h2, the backend MUST support h2c (cleartext HTTP/2).
-# whoami only speaks HTTP/1.1, so we test H2 against grpcbin which is a Go
-# gRPC server and natively supports h2c.
+# ── HTTP/2 ALPN test ─────────────────────────────────────────────────────────
+# Verify TLS ALPN negotiation at the protocol level using openssl.
+# curl --http2 is unreliable here because grpcbin doesn't serve HTTP on GET /.
 
-log "Test: HTTP/2 through TCP proxy (via gRPC domain)"
-H2_STATUS=$(do_curl -s -o /dev/null -w '%{http_code}' --http2 "https://${GRPC_DOMAIN}/" 2>/dev/null || echo "000")
-if [ "$H2_STATUS" != "000" ]; then
-    pass "HTTP/2 connection successful (status: $H2_STATUS)"
+log "Test: TLS ALPN negotiates h2 (via gRPC domain)"
+ALPN_PROTO=$(echo | openssl s_client -connect "${DOMAIN_IP}:443" -servername "${GRPC_DOMAIN}" -alpn h2 2>/dev/null \
+    | grep -oP 'ALPN protocol: \K\S+' || echo "")
+if [ "$ALPN_PROTO" = "h2" ]; then
+    pass "TLS ALPN negotiated h2"
 else
-    fail "HTTP/2 connection failed"
-fi
-
-log "Test: HTTP/2 ALPN negotiation"
-H2_VER=$(do_curl -s -o /dev/null -w '%{http_version}' --http2 "https://${GRPC_DOMAIN}/" 2>/dev/null || echo "")
-if [ "$H2_VER" = "2" ]; then
-    pass "HTTP/2 negotiated via ALPN (version: $H2_VER)"
-else
-    fail "HTTP/2 not negotiated (version: $H2_VER)"
+    fail "TLS ALPN expected h2, got: ${ALPN_PROTO:-none}"
 fi
 
 # ── gRPC tests ───────────────────────────────────────────────────────────────
