@@ -219,6 +219,16 @@ setup_haproxy_cfg_multi() {
         target=$(echo "$target" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
         [[ -n "$domain" && -n "$target" ]] || continue
 
+        # Validate domain and target to prevent config injection
+        if ! domain=$(sanitize_domain "$domain"); then
+            echo "Error: Invalid domain in ROUTING_MAP: ${line}" >&2
+            exit 1
+        fi
+        if ! target=$(sanitize_target_endpoint "$target"); then
+            echo "Error: Invalid target in ROUTING_MAP: ${line}" >&2
+            exit 1
+        fi
+
         # Strip protocol prefix from target if present
         target=$(parse_target_endpoint "$target")
 
@@ -394,9 +404,15 @@ elif [ -n "$DOMAIN" ] && [ -n "$TARGET_ENDPOINT" ]; then
     setup_haproxy_cfg
 fi
 
-# Start evidence HTTP server if enabled
+# Start evidence HTTP server if enabled (threaded to avoid blocking on slow clients)
 if [ "$EVIDENCE_SERVER" = "true" ]; then
-    python3 -m http.server "$EVIDENCE_PORT" --directory /evidences &
+    python3 -c "
+import http.server, socketserver, os
+os.chdir('/evidences')
+handler = http.server.SimpleHTTPRequestHandler
+with socketserver.ThreadingTCPServer(('', ${EVIDENCE_PORT}), handler) as s:
+    s.serve_forever()
+" &
     echo "Evidence server started on port ${EVIDENCE_PORT}"
 fi
 

@@ -1,5 +1,6 @@
 services:
   dstack-ingress:
+    # TODO: pin by digest for production (dstacktee/dstack-ingress@sha256:...)
     image: dstacktee/dstack-ingress:latest
     ports:
       - "443:443"

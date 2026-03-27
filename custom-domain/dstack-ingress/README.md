@@ -112,11 +112,11 @@ services:
       GATEWAY_DOMAIN: _.dstack-prod5.phala.network
       SET_CAA: true
       DOMAINS: |
-        ${APP_DOMAIN}
-        ${API_DOMAIN}
+        app.example.com
+        api.example.com
       ROUTING_MAP: |
-        ${APP_DOMAIN}=app-main:80
-        ${API_DOMAIN}=app-api:8080
+        app.example.com=app-main:80
+        api.example.com=app-api:8080
     volumes:
       - /var/run/tappd.sock:/var/run/tappd.sock
       - letsencrypt:/etc/letsencrypt
