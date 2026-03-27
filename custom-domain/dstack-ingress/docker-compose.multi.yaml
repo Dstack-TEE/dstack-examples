@@ -1,7 +1,6 @@
 services:
   ingress:
-    # TODO: pin by digest for production (dstacktee/dstack-ingress@sha256:...)
-    image: dstacktee/dstack-ingress:latest
+    image: dstacktee/dstack-ingress:2.0@sha256:9fb13c42dceaba91d2e2e7de3a06700a2cf507f4335ae70f3f1db4574a5ad552
     ports:
       - "443:443"
     environment:
