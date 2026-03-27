@@ -30,7 +30,8 @@ RUN --mount=type=bind,source=pinned-packages.txt,target=/tmp/pinned-packages.txt
         python3.11-venv \
         curl \
         jq \
-        coreutils && \
+        coreutils \
+        mini-httpd && \
         rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
 RUN mkdir -p \

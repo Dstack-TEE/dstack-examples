@@ -404,16 +404,10 @@ elif [ -n "$DOMAIN" ] && [ -n "$TARGET_ENDPOINT" ]; then
     setup_haproxy_cfg
 fi
 
-# Start evidence HTTP server if enabled (threaded to avoid blocking on slow clients)
+# Start evidence HTTP server if enabled
 if [ "$EVIDENCE_SERVER" = "true" ]; then
-    python3 -c "
-import http.server, socketserver, os
-os.chdir('/evidences')
-handler = http.server.SimpleHTTPRequestHandler
-with socketserver.ThreadingTCPServer(('', ${EVIDENCE_PORT}), handler) as s:
-    s.serve_forever()
-" &
-    echo "Evidence server started on port ${EVIDENCE_PORT}"
+    mini_httpd -d /evidences -p "${EVIDENCE_PORT}" -D -l /dev/stderr &
+    echo "Evidence server started on port ${EVIDENCE_PORT} (mini_httpd)"
 fi
 
 renewal-daemon.sh &
