@@ -1,0 +1,42 @@
+# Private LLM Inference in TEE
+#
+# Runs vLLM with vllm-proxy for response signing and attestation.
+# Uses a small model (Qwen 1.5B) for quick testing.
+#
+# Deploy with encrypted secrets:
+#   phala deploy -n my-inference -c docker-compose.yaml \
+#     --instance-type h200.small \
+#     -e TOKEN=your-secret-token
+
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - HF_TOKEN=${HF_TOKEN:-}
+    command: >
+      --model Qwen/Qwen2.5-1.5B-Instruct
+      --host 0.0.0.0
+      --port 8000
+      --max-model-len 4096
+      --gpu-memory-utilization 0.8
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  proxy:
+    image: phalanetwork/vllm-proxy:v0.2.18
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    environment:
+      - VLLM_BASE_URL=http://vllm:8000
+      - MODEL_NAME=Qwen/Qwen2.5-1.5B-Instruct
+      - TOKEN=${TOKEN}
+    ports:
+      - "8000:8000"
+    depends_on:
+      - vllm

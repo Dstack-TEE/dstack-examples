@@ -9,7 +9,7 @@
 
 **Example applications for [dstack](https://github.com/Dstack-TEE/dstack) - Deploy containerized apps to TEEs with end-to-end security in minutes**
 
-[Getting Started](#getting-started) • [Use Cases](#use-cases) • [Core Patterns](#core-patterns) • [Dev Tools](#dev-scaffolding) • [Starter Packs](#starter-packs) • [Other Use Cases](#other-use-cases)
+[Getting Started](#getting-started) • [Confidential AI](#confidential-ai) • [Tutorials](#tutorials) • [Use Cases](#use-cases) • [Core Patterns](#core-patterns) • [Dev Tools](#dev-scaffolding) • [Starter Packs](#starter-packs)
 
 </div>
 
@@ -44,7 +44,7 @@ phala simulator start
 ### Run an Example Locally
 
 ```bash
-cd tutorial/01-attestation-oracle
+cd tutorial/01-attestation
 docker compose run --rm \
   -v ~/.phala-cloud/simulator/0.5.3/dstack.sock:/var/run/dstack.sock \
   app
@@ -57,7 +57,23 @@ phala auth login
 phala deploy -n my-app -c docker-compose.yaml
 ```
 
-See [Phala Cloud](https://cloud.phala.network) for production TEE deployment.
+See [Phala Cloud](https://cloud.phala.com) for production TEE deployment.
+
+---
+
+## Confidential AI
+
+Run AI workloads where prompts, model weights, and inference stay encrypted in hardware.
+
+| Example | Description |
+|---------|-------------|
+| [confidential-ai/inference](./confidential-ai/inference) | Private LLM inference with vLLM on Confidential GPU |
+| [confidential-ai/training](./confidential-ai/training) | Confidential fine-tuning on sensitive data using Unsloth |
+| [confidential-ai/agents](./confidential-ai/agents) | Secure AI agent with TEE-derived wallet keys using LangChain and Confidential AI models |
+
+GPU deployments require: `--instance-type h200.small --region US-EAST-1 --image dstack-nvidia-dev-0.5.4.1`
+
+See [Confidential AI Guide](https://github.com/Dstack-TEE/dstack/blob/master/docs/confidential-ai.md) for concepts and security model.
 
 ---
 
@@ -67,10 +83,10 @@ Step-by-step guides covering core dstack concepts.
 
 | Tutorial | Description |
 |----------|-------------|
-| [01-attestation-oracle](./tutorial/01-attestation-oracle) | Use the guest SDK to work with attestations directly — build an oracle, bind data to TDX quotes via `report_data`, verify with local scripts |
-| [02-persistence-and-kms](./tutorial/02-persistence-and-kms) | Use `getKey()` for deterministic key derivation from a KMS — persistent wallets, same key across restarts |
-| [03-gateway-and-ingress](./tutorial/03-gateway-and-ingress) | Custom domains with automatic SSL, certificate evidence chain |
-| [04-upgrades](./tutorial/04-upgrades) | Extend `AppAuth.sol` with custom authorization logic — NFT-gated clusters, on-chain governance |
+| [01-attestation](./tutorial/01-attestation) | Build an oracle, bind data to TDX quotes via `report_data`, verify with local scripts |
+| [02-kms-and-signing](./tutorial/02-kms-and-signing) | Deterministic key derivation from KMS — persistent wallets, same key across restarts |
+| [03-gateway-and-tls](./tutorial/03-gateway-and-tls) | Custom domains with automatic SSL, certificate evidence chain |
+| [04-onchain-oracle](./tutorial/04-onchain-oracle) | AppAuth contracts, on-chain signature verification, multi-device deployment |
 
 ---
 
@@ -120,15 +136,6 @@ TLS termination, custom domains, external connectivity.
 | Example | Description |
 |---------|-------------|
 | [dstack-ingress](./custom-domain/dstack-ingress) | **Complete ingress solution** — auto SSL via Let's Encrypt, multi-domain, DNS validation, evidence generation with TDX quote chain |
-| [custom-domain](./custom-domain/custom-domain) | Simpler custom domain setup via zt-https |
-
-### Keys & Persistence
-
-Persistent keys across deployments via KMS.
-
-| Example | Description | Status |
-|---------|-------------|--------|
-| [get-key-basic](./get-key-basic) | `dstack.get_key()` — same key identity across machines | Coming Soon |
 
 ### On-Chain Interaction
 
