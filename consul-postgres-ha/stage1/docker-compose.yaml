@@ -1,0 +1,32 @@
+# stage-1 MVP worker — runs mesh-conn (TUN+ICE overlay) and a netshoot
+# sidecar for poking the tunnel. Two CVMs deployed from this same compose
+# (different PEER_ID / PARTNER_ID / VIRTUAL_IP via --env at deploy time)
+# bring up a flat /24 between them.
+
+services:
+  mesh-conn:
+    image: ${MESH_CONN_IMAGE}
+    restart: on-failure
+    network_mode: host          # avoid the docker-bridge NAT layer; otherwise
+                                # srflx candidates can't be reached back through
+                                # the bridge and ICE falls back to TURN-relay.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      - PEER_ID=${PEER_ID}
+      - PARTNER_ID=${PARTNER_ID}
+      - SIGNALING_URL=${SIGNALING_URL}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
+      - VIRTUAL_IP=${VIRTUAL_IP}
+
+  tester:
+    image: nicolaka/netshoot:latest
+    network_mode: host          # share host netns so the mesh0 TUN is visible
+    cap_add:
+      - NET_ADMIN
+    command: ["sleep", "infinity"]
+    depends_on:
+      - mesh-conn
