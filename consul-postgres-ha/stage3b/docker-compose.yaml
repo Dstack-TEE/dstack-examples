@@ -1,0 +1,119 @@
+# stage-3b — Connect mesh (Envoy sidecars + mTLS) over the mesh-conn overlay.
+#
+# Each peer runs:
+#   - mesh-conn: now forwards 6 ports per peer (serf, RPC, HTTP, gRPC,
+#                webdemo, sidecar)
+#   - consul:    Connect enabled (-hcl 'connect{enabled=true}')
+#   - webdemo:   registers itself with Connect.SidecarService config so
+#                Consul auto-creates a sidecar definition; webdemo's
+#                /all calls 127.0.0.1:19000 which is the local sidecar's
+#                upstream → mTLS to a peer's sidecar → peer's webdemo.
+#   - sidecar:   custom image (consul CLI + Envoy); on startup,
+#                generates an Envoy bootstrap config from local Consul
+#                and exec's Envoy.
+#   - tester:    netshoot for poking the cluster.
+#
+# Per-peer 6-port plan (PEER index i in {0:ctrl, 1:w1, 2:w2, 3:w3}):
+#   serf_lan = 18000 + i, server = 18100 + i, http = 18200 + i,
+#   grpc = 18300 + i, webdemo = 18500 + i, sidecar_public = 18600 + i
+
+services:
+  mesh-conn:
+    image: ${MESH_CONN_IMAGE}
+    restart: on-failure
+    network_mode: host
+    environment:
+      - PEER_ID=${PEER_ID}
+      - PEERS_JSON=${PEERS_JSON}
+      - SIGNALING_URL=${SIGNALING_URL}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
+
+  consul:
+    image: hashicorp/consul:1.19
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ "$$ROLE" = "server" ]; then
+          MODE_FLAGS="-server -bootstrap-expect=1 -ui"
+        else
+          MODE_FLAGS="-retry-join=127.0.0.1:$$CTRL_SERF_LAN_PORT"
+        fi
+        exec consul agent \
+          -node=$$PEER_ID \
+          -datacenter=dstack-mesh \
+          -bind=127.0.0.1 \
+          -advertise=127.0.0.1 \
+          -client=127.0.0.1 \
+          -serf-lan-port=$$SERF_LAN_PORT \
+          -server-port=$$SERVER_PORT \
+          -http-port=$$HTTP_PORT \
+          -grpc-port=$$GRPC_PORT \
+          -dns-port=-1 \
+          -data-dir=/consul/data \
+          -hcl='connect { enabled = true }' \
+          -log-level=INFO \
+          $$MODE_FLAGS
+    environment:
+      - PEER_ID=${PEER_ID}
+      - ROLE=${ROLE}
+      - SERF_LAN_PORT=${SERF_LAN_PORT}
+      - SERVER_PORT=${SERVER_PORT}
+      - HTTP_PORT=${HTTP_PORT}
+      - GRPC_PORT=${GRPC_PORT}
+      - CTRL_SERF_LAN_PORT=${CTRL_SERF_LAN_PORT}
+    volumes:
+      - consul-data:/consul/data
+    depends_on: [mesh-conn]
+
+  webdemo:
+    image: ${WEBDEMO_IMAGE}
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PEER_ID=${PEER_ID}
+      - WEBDEMO_PORT=${WEBDEMO_PORT}
+      - SIDECAR_PORT=${SIDECAR_PORT}
+      - CONSUL_HTTP_ADDR=127.0.0.1:${HTTP_PORT}
+    depends_on: [consul]
+
+  sidecar:
+    image: ${SIDECAR_IMAGE}
+    restart: on-failure
+    network_mode: host
+    command:
+      - |
+        set -e
+        # Wait for the webdemo service (and its sidecar definition) to
+        # be registered in Consul, then have the consul CLI generate
+        # an Envoy bootstrap config and exec Envoy.
+        until consul connect envoy \
+                -sidecar-for=webdemo-$$PEER_ID \
+                -admin-bind=127.0.0.1:$$ADMIN_PORT \
+                -bootstrap \
+                -http-addr=127.0.0.1:$$HTTP_PORT \
+                -grpc-addr=127.0.0.1:$$GRPC_PORT \
+                > /tmp/envoy-bootstrap.json 2>/dev/null; do
+          echo "waiting for sidecar registration in consul..."
+          sleep 3
+        done
+        echo "envoy bootstrap config generated; starting envoy"
+        exec envoy -c /tmp/envoy-bootstrap.json -l info
+    environment:
+      - PEER_ID=${PEER_ID}
+      - HTTP_PORT=${HTTP_PORT}
+      - GRPC_PORT=${GRPC_PORT}
+      - ADMIN_PORT=${ENVOY_ADMIN_PORT}
+    depends_on: [webdemo]
+
+  tester:
+    image: nicolaka/netshoot:latest
+    network_mode: host
+    command: ["sleep", "infinity"]
+    depends_on: [mesh-conn, consul, webdemo, sidecar]
+
+volumes:
+  consul-data:

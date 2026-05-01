@@ -6,3 +6,4 @@ consul-postgres-ha/.local/
 consul-postgres-ha/phase0/icetest/icetest
 consul-postgres-ha/stage1/mesh-conn/mesh-conn
 consul-postgres-ha/stage3a/webdemo/webdemo
+consul-postgres-ha/stage3b/webdemo/webdemo
