@@ -6,16 +6,24 @@
 // send UDP to.
 //
 // Naming convention used by the whole cluster:
-//   each peer has a unique 16-bit "identity port". On every peer's host,
-//   - the local app binds 127.0.0.1:<own_port> (its own identity)
-//   - mesh-conn binds 127.0.0.1:<other_peer_port> for every OTHER peer
-//   - apps reach peer X by sending UDP to 127.0.0.1:<X_port>
-//   - mesh-conn shuffles those packets through one pion/ice connection
-//     per peer-pair (direct-when-possible, TURN-relay-when-not)
+//   each peer declares a list of "identity ports" — one per protocol.
+//   For a Consul deployment that's typically four:
+//     index 0 = serf_lan (UDP+TCP), 1 = server-RPC (TCP),
+//     index 2 = HTTP API (TCP),     3 = gRPC/xDS (TCP)
 //
-// This means apps don't have to know anything about the overlay: they
-// just see a flat localhost address space where each peer (including
-// themselves) is addressable as 127.0.0.1:<peer_port>.
+//   On every peer's host:
+//   - the local app binds 127.0.0.1:<own_port[i]> for protocol i
+//   - mesh-conn binds 127.0.0.1:<peer_port[i]> for every OTHER peer
+//     and every protocol i
+//   - apps reach peer X on protocol i by sending UDP/TCP to
+//     127.0.0.1:<X.ports[i]>
+//
+// All N peer-pair connections multiplex over one pion/ice connection
+// per pair, wrapped in yamux. Each yamux stream's first three bytes
+// are (tag, port-as-uint16-big-endian) where port is the receiver's
+// own identity port — the receiver looks it up in self.ports and
+// dispatches to the matching local UDP socket / dials the matching
+// local TCP service.
 
 package main
 
@@ -48,8 +56,18 @@ import (
 // =============================================================================
 
 type Peer struct {
-	ID   string `json:"id"`
-	Port int    `json:"port"`
+	ID    string `json:"id"`
+	Ports []int  `json:"ports"`
+}
+
+// hasPort returns the index of port in p.Ports, or -1 if absent.
+func (p *Peer) hasPort(port int) int {
+	for i, q := range p.Ports {
+		if q == port {
+			return i
+		}
+	}
+	return -1
 }
 
 type Config struct {
@@ -108,7 +126,7 @@ func main() {
 			others = append(others, p)
 		}
 	}
-	log.Printf("mesh-conn: self=%s(:%d) other=%d", cfg.SelfID, self.Port, len(others))
+	log.Printf("mesh-conn: self=%s ports=%v other=%d", cfg.SelfID, self.Ports, len(others))
 
 	go pollLoop(cfg)
 
@@ -140,31 +158,34 @@ func runPeerLink(cfg *Config, self, peer Peer) {
 	}
 }
 
-// Stream tag byte sent as the first byte of each yamux stream so the
-// remote side knows what to do with it.
+// Stream header layout: 3 bytes per stream open.
+//   byte 0 = tag (streamUDP or streamTCP)
+//   bytes 1-2 = receiver-side port (big-endian uint16) — the port number
+//     the receiver itself binds locally; receiver looks it up in its own
+//     Ports list to find the index/protocol slot
 const (
-	streamUDP byte = 0x55 // long-lived: length-prefixed UDP datagrams
-	streamTCP byte = 0x33 // per-conn:   raw TCP-stream forwarding
+	streamUDP byte = 0x55 // long-lived per-port UDP datagram pipe
+	streamTCP byte = 0x33 // per-conn TCP byte-stream forwarder
 )
 
 func dialAndPump(cfg *Config, self, peer Peer) error {
-	// 1. Establish ICE.
+	if len(self.Ports) != len(peer.Ports) {
+		return fmt.Errorf("port-count mismatch: self has %d ports, peer has %d", len(self.Ports), len(peer.Ports))
+	}
+
+	// 1. Establish ICE + wrap with yamux.
 	conn, err := dialICE(cfg, peer.ID)
 	if err != nil {
 		return fmt.Errorf("ice: %w", err)
 	}
 	defer conn.Close()
 
-	// 2. Multiplex with yamux. Lex-smaller side runs the client (matches
-	//    ICE Dial); the larger side is the server. Either side can open
-	//    streams. We use a long-lived UDP control stream for datagram
-	//    forwarding, plus per-TCP-conn ephemeral streams for byte-stream
-	//    forwarding. Each new stream's first byte tags its purpose.
 	ycfg := yamux.DefaultConfig()
-	ycfg.LogOutput = io.Discard       // yamux is chatty
+	ycfg.LogOutput = io.Discard
 	ycfg.EnableKeepAlive = true
+	isClient := cfg.SelfID < peer.ID
 	var sess *yamux.Session
-	if cfg.SelfID < peer.ID {
+	if isClient {
 		sess, err = yamux.Client(conn, ycfg)
 	} else {
 		sess, err = yamux.Server(conn, ycfg)
@@ -174,108 +195,133 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 	}
 	defer sess.Close()
 
-	// 3. Bind localhost UDP + TCP listeners on peer's identity port.
-	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: peer.Port}
-	udpSock, err := net.ListenUDP("udp", udpAddr)
-	if err != nil {
-		return fmt.Errorf("udp listen %s: %w", udpAddr, err)
-	}
-	defer udpSock.Close()
-
-	tcpAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: peer.Port}
-	tcpLis, err := net.ListenTCP("tcp", tcpAddr)
-	if err != nil {
-		return fmt.Errorf("tcp listen %s: %w", tcpAddr, err)
-	}
-	defer tcpLis.Close()
-
-	// 4. Open the long-lived UDP stream. Both sides need to know which
-	//    yamux stream is "the UDP one" — the client opens it eagerly,
-	//    the server picks up the first stream that arrives with the
-	//    streamUDP tag.
-	udpStream, err := openOrAcceptUDPStream(sess, cfg.SelfID < peer.ID)
-	if err != nil {
-		return fmt.Errorf("udp stream: %w", err)
+	// 2. Bind localhost UDP+TCP listeners for every one of peer's ports.
+	udpSocks := make([]*net.UDPConn, len(peer.Ports))
+	tcpListeners := make([]*net.TCPListener, len(peer.Ports))
+	for i, port := range peer.Ports {
+		udpSocks[i], err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		if err != nil {
+			return fmt.Errorf("udp listen 127.0.0.1:%d: %w", port, err)
+		}
+		defer udpSocks[i].Close()
+		tcpListeners[i], err = net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		if err != nil {
+			return fmt.Errorf("tcp listen 127.0.0.1:%d: %w", port, err)
+		}
+		defer tcpListeners[i].Close()
 	}
 
-	log.Printf("[%s] link up — listening on 127.0.0.1:%d (udp+tcp), peer reachable via ICE",
-		peer.ID, peer.Port)
+	// 3. Establish the per-port long-lived UDP streams. Client opens
+	//    them eagerly, server's accept loop populates them as headers
+	//    arrive. Both sides also run an accept loop to handle ad-hoc
+	//    incoming TCP streams.
+	udpStreams := make([]*yamux.Stream, len(peer.Ports))
+	allUDPReady := make(chan struct{})
+	errCh := make(chan error, 4*len(peer.Ports))
 
-	udpDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: self.Port}
-	tcpDst := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: self.Port}
+	go func() {
+		errCh <- runAcceptLoop(sess, &self, &peer, udpStreams, allUDPReady)
+	}()
 
-	errCh := make(chan error, 4)
-	// UDP pumps over the dedicated stream.
-	go func() { errCh <- pumpUDPSockToStream(udpSock, udpStream) }()
-	go func() { errCh <- pumpUDPStreamToSock(udpStream, udpSock, udpDst) }()
-	// TCP listener: each local Accept opens a new yamux stream tagged TCP.
-	go func() { errCh <- acceptLocalTCP(tcpLis, sess) }()
-	// Yamux accept loop: every incoming stream after the UDP one is a TCP forward.
-	go func() { errCh <- acceptRemoteStreams(sess, tcpDst) }()
+	if isClient {
+		for i, peerPort := range peer.Ports {
+			s, err := sess.OpenStream()
+			if err != nil {
+				return fmt.Errorf("yamux OpenStream: %w", err)
+			}
+			hdr := []byte{streamUDP, byte(peerPort >> 8), byte(peerPort & 0xff)}
+			if _, err := s.Write(hdr); err != nil {
+				return fmt.Errorf("yamux write hdr: %w", err)
+			}
+			udpStreams[i] = s
+		}
+		close(allUDPReady)
+	} else {
+		// Server: wait for all UDP streams to register via accept loop.
+		select {
+		case <-allUDPReady:
+		case <-time.After(60 * time.Second):
+			return fmt.Errorf("timeout waiting for UDP streams")
+		}
+	}
+
+	log.Printf("[%s] link up — %d ports forwarded (udp+tcp), peer reachable via ICE",
+		peer.ID, len(peer.Ports))
+
+	// 4. Start pumps for each port.
+	for i := range peer.Ports {
+		i := i
+		selfPort := self.Ports[i]
+		go func() { errCh <- pumpUDPSockToStream(udpSocks[i], udpStreams[i]) }()
+		go func() {
+			udpDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: selfPort}
+			errCh <- pumpUDPStreamToSock(udpStreams[i], udpSocks[i], udpDst)
+		}()
+		go func() {
+			peerPort := peer.Ports[i]
+			errCh <- acceptLocalTCP(tcpListeners[i], sess, peerPort)
+		}()
+	}
 	return <-errCh
 }
 
-func openOrAcceptUDPStream(sess *yamux.Session, isClient bool) (*yamux.Stream, error) {
-	if isClient {
-		s, err := sess.OpenStream()
-		if err != nil {
-			return nil, err
-		}
-		if _, err := s.Write([]byte{streamUDP}); err != nil {
-			return nil, err
-		}
-		return s, nil
-	}
-	// Server: first stream with streamUDP tag is the UDP pipe.
-	for {
-		s, err := sess.AcceptStream()
-		if err != nil {
-			return nil, err
-		}
-		var tag [1]byte
-		if _, err := io.ReadFull(s, tag[:]); err != nil {
-			s.Close()
-			continue
-		}
-		if tag[0] == streamUDP {
-			return s, nil
-		}
-		// Stray stream before the UDP one — shouldn't happen, but handle it.
-		s.Close()
-	}
-}
-
-func acceptRemoteStreams(sess *yamux.Session, tcpDst *net.TCPAddr) error {
+// runAcceptLoop handles every incoming yamux stream from the peer.
+// streamUDP headers are matched to the right slot in udpStreams (one per
+// port, by index in self.Ports). streamTCP triggers a Dial to the
+// corresponding local TCP service.
+func runAcceptLoop(sess *yamux.Session, self, peer *Peer, udpStreams []*yamux.Stream, allUDPReady chan struct{}) error {
+	udpRegisteredCount := 0
+	udpRegisteredOnce := make([]bool, len(self.Ports))
 	for {
 		s, err := sess.AcceptStream()
 		if err != nil {
 			return fmt.Errorf("yamux accept: %w", err)
 		}
-		go handleRemoteStream(s, tcpDst)
+		hdr := make([]byte, 3)
+		if _, err := io.ReadFull(s, hdr); err != nil {
+			s.Close()
+			continue
+		}
+		tag := hdr[0]
+		port := int(hdr[1])<<8 | int(hdr[2])
+		// "port" is the receiver-side port — we look it up in our own ports.
+		idx := self.hasPort(port)
+		if idx < 0 {
+			log.Printf("[%s] stream for unknown self-port %d", peer.ID, port)
+			s.Close()
+			continue
+		}
+		switch tag {
+		case streamUDP:
+			udpStreams[idx] = s
+			if !udpRegisteredOnce[idx] {
+				udpRegisteredOnce[idx] = true
+				udpRegisteredCount++
+				if udpRegisteredCount == len(self.Ports) {
+					close(allUDPReady)
+				}
+			}
+		case streamTCP:
+			go handleIncomingTCP(s, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+		default:
+			log.Printf("[%s] unknown stream tag 0x%x", peer.ID, tag)
+			s.Close()
+		}
 	}
 }
 
-func handleRemoteStream(s *yamux.Stream, tcpDst *net.TCPAddr) {
+func handleIncomingTCP(s *yamux.Stream, dst *net.TCPAddr) {
 	defer s.Close()
-	var tag [1]byte
-	if _, err := io.ReadFull(s, tag[:]); err != nil {
+	c, err := net.DialTCP("tcp", nil, dst)
+	if err != nil {
+		log.Printf("dial local %s: %v", dst, err)
 		return
 	}
-	switch tag[0] {
-	case streamTCP:
-		dial, err := net.DialTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}, tcpDst)
-		if err != nil {
-			log.Printf("dial local TCP: %v", err)
-			return
-		}
-		defer dial.Close()
-		spliceBoth(s, dial)
-	default:
-		log.Printf("unexpected stream tag 0x%x", tag[0])
-	}
+	defer c.Close()
+	spliceBoth(s, c)
 }
 
-func acceptLocalTCP(lis *net.TCPListener, sess *yamux.Session) error {
+func acceptLocalTCP(lis *net.TCPListener, sess *yamux.Session, dstPeerPort int) error {
 	for {
 		c, err := lis.AcceptTCP()
 		if err != nil {
@@ -289,7 +335,8 @@ func acceptLocalTCP(lis *net.TCPListener, sess *yamux.Session) error {
 				return
 			}
 			defer s.Close()
-			if _, err := s.Write([]byte{streamTCP}); err != nil {
+			hdr := []byte{streamTCP, byte(dstPeerPort >> 8), byte(dstPeerPort & 0xff)}
+			if _, err := s.Write(hdr); err != nil {
 				return
 			}
 			spliceBoth(s, c)
