@@ -5,7 +5,6 @@ go 1.22
 require (
 	github.com/pion/ice/v2 v2.3.25
 	github.com/pion/stun v0.6.1
-	github.com/songgao/water v0.0.0-20200317203138-2b4b6d7c09d8
 )
 
 require (

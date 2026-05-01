@@ -1,67 +1,62 @@
-# Stage 1 — `mesh-conn` userspace L3 overlay over ICE
+# Stage 1 — `mesh-conn` UDP port-forwarder over ICE
 
 Builds on the [phase-0](../phase0/) finding that direct UDP hole-punching
-works between two dstack CVMs. Stage 1 turns that into a proper L3
-overlay so anything can run on top — Consul, web servers, whatever — and
-addresses peers by stable virtual IPs.
+works between dstack CVMs. Stage 1 turns that into a tiny userspace
+agent that bridges localhost UDP sockets across CVMs through one
+pion/ice connection per peer-pair. No TUN device, no kernel routing,
+no virtual L3 — apps just bind localhost and address peers by their
+identity port on `127.0.0.1`.
+
+## Naming convention
+
+Every peer in the cluster has a unique 16-bit "identity port". On every
+peer's host:
+
+- the local app binds `127.0.0.1:<own_port>` (its own identity)
+- `mesh-conn` binds `127.0.0.1:<other_peer_port>` for every OTHER peer
+- to reach peer X, the app sends UDP to `127.0.0.1:<X_port>`
+
+`mesh-conn` ships those packets through one ICE connection per peer-pair
+(direct-when-possible, TURN-relay-when-not — pion/ice picks the best
+candidate transparently). Replies use the same socket so the peer sees
+the source as `127.0.0.1:<X_port>`, matching what its app expects.
 
 ## Layout
 
 ```
 stage1/
 ├── README.md
-├── docker-compose.yaml          two-service compose: mesh-conn + netshoot tester
+├── docker-compose.yaml          mesh-conn + netshoot tester (host net)
 └── mesh-conn/
     ├── go.mod / go.sum
-    ├── main.go                  pion/ice + songgao/water TUN, single-peer MVP
+    ├── main.go                  ~280 LoC; pion/ice + per-peer UDP socket
     └── Dockerfile
 ```
 
-## Components
-
-- **mesh-conn**: per-CVM userspace daemon that
-  1. opens a TUN device, assigns a virtual IP from a /24,
-  2. establishes one pion/ice connection to its partner peer (signaling +
-     STUN/TURN identical to phase-0),
-  3. pumps L3 packets between TUN and the ICE socket, 1:1 (no framing —
-     ICE rides on UDP, datagram boundaries are preserved).
-- **tester** (netshoot sidecar with `network_mode: service:mesh-conn`):
-  shares mesh-conn's net namespace so we can `ping`, `nc`, `curl`, and
-  `tcpdump` against the virtual subnet without bringing in extra
-  containers.
-
-## MVP scope
-
-Exactly two peers. PEER_ID and PARTNER_ID env vars distinguish the two
-sides; the lex-smaller side calls `Dial`, the other calls `Accept`. Each
-side gets its own `VIRTUAL_IP` (e.g. `10.66.0.1` and `10.66.0.2`). After
-the ICE connection is up, `ping <other-virtual-ip>` from inside the
-tester container should work.
-
-Multi-peer support (one mesh-conn process holding N ICE links + TUN
-routing for the whole subnet) is the next step.
-
 ## Required env vars
 
-| var                  | what                                                |
-| ---                  | ---                                                 |
-| `MESH_CONN_IMAGE`    | published mesh-conn image (e.g. ttl.sh/...)         |
-| `PEER_ID`            | this peer's identifier                               |
-| `PARTNER_ID`         | the other peer's identifier                          |
-| `SIGNALING_URL`      | `http://<coord>:7000` from phase-0                   |
-| `TURN_HOST`          | coordinator host running coturn                      |
-| `TURN_SHARED_SECRET` | coturn `--static-auth-secret`                       |
-| `VIRTUAL_IP`         | this peer's IP on the overlay (e.g. `10.66.0.1`)     |
+| var                  | what                                                              |
+| ---                  | ---                                                               |
+| `MESH_CONN_IMAGE`    | published image (e.g. `ttl.sh/...`)                               |
+| `PEER_ID`            | this peer's identifier                                             |
+| `PEERS_JSON`         | JSON list of all peers, e.g. `[{"id":"a","port":18001},{"id":"b","port":18002}]` |
+| `SIGNALING_URL`      | `http://<coord>:7000` from phase-0                                 |
+| `TURN_HOST`          | coordinator host running coturn                                    |
+| `TURN_SHARED_SECRET` | coturn `--static-auth-secret`                                     |
 
 ## Container requirements
 
-- `cap_add: NET_ADMIN` for both `mesh-conn` and `tester` (so each can
-  configure routes / interfaces in the shared netns).
-- `/dev/net/tun` mounted into mesh-conn so it can open a TUN device.
+- `network_mode: host` — without this, ICE picks the TURN-relay path
+  because docker-bridge NAT prevents srflx replies from reaching back
+  through the bridge. Result: ~163 ms RTT instead of ~6 ms (see
+  `../deploy/stage1-mvp-results.md`).
 
 ## Status
 
-- [x] Single-peer MVP compiled.
-- [ ] Verified end-to-end on two dstack CVMs.
-- [ ] Multi-peer extension.
+- [x] Phase-0 confirmed direct UDP hole-punch between CVMs.
+- [x] TUN-based MVP confirmed arbitrary IP traffic flows over the ICE
+      pipe (committed earlier; later replaced by the port-forwarder).
+- [x] Port-forwarder rewrite (this version).
+- [ ] Verified end-to-end on two CVMs.
+- [ ] Multi-peer (N > 2) verification.
 - [ ] Consul running on top.

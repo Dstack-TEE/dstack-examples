@@ -1,28 +1,29 @@
-// mesh-conn — userspace L3 overlay for dstack CVMs over ICE.
+// mesh-conn — userspace UDP port-forwarding agent over pion/ice.
 //
-// Each CVM runs one mesh-conn instance. mesh-conn:
-//  1. Creates a TUN device, assigns it a virtual IP from a /24 subnet
-//     all peers share.
-//  2. For every other peer, establishes a pion/ice connection (signaling
-//     + STUN/TURN identical to phase-0).
-//  3. Plumbs packets between the TUN device and ICE connections, routing
-//     by destination IP.
+// Replaces the earlier TUN-based version. The TUN approach worked but
+// gave us a virtual L3 overlay we never really needed: our apps (Consul
+// gossip, simple HTTP services) just want a stable peer address they can
+// send UDP to.
 //
-// Consul (or any other UDP/TCP service) running on top sees a flat L3
-// network and gossips/connects normally.
+// Naming convention used by the whole cluster:
+//   each peer has a unique 16-bit "identity port". On every peer's host,
+//   - the local app binds 127.0.0.1:<own_port> (its own identity)
+//   - mesh-conn binds 127.0.0.1:<other_peer_port> for every OTHER peer
+//   - apps reach peer X by sending UDP to 127.0.0.1:<X_port>
+//   - mesh-conn shuffles those packets through one pion/ice connection
+//     per peer-pair (direct-when-possible, TURN-relay-when-not)
 //
-// MVP scope: exactly two peers (PEER_ID and PARTNER_ID) with one ICE
-// link. Multi-peer comes next.
+// This means apps don't have to know anything about the overlay: they
+// just see a flat localhost address space where each peer (including
+// themselves) is addressable as 127.0.0.1:<peer_port>.
 
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -32,79 +33,54 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/pion/ice/v2"
 	"github.com/pion/stun"
-	"github.com/songgao/water"
 )
-
-func main() {
-	flag.Parse()
-
-	cfg := loadConfig()
-	log.Printf("mesh-conn: peer=%s partner=%s virtIP=%s tun=%s",
-		cfg.PeerID, cfg.PartnerID, cfg.VirtualIP, cfg.TunName)
-
-	tun, err := openTun(cfg.TunName, cfg.VirtualIP, cfg.VirtualPrefix)
-	if err != nil {
-		log.Fatalf("tun setup: %v", err)
-	}
-	defer tun.Close()
-	log.Printf("tun device %s up with %s/%d", tun.Name(), cfg.VirtualIP, cfg.VirtualPrefix)
-
-	conn, agent, err := dialICE(cfg)
-	if err != nil {
-		log.Fatalf("ice dial: %v", err)
-	}
-	if pair, perr := agent.GetSelectedCandidatePair(); perr == nil && pair != nil {
-		log.Printf("ICE selected pair: local=%s remote=%s", pair.Local.Type(), pair.Remote.Type())
-		log.Printf("  local : %s", pair.Local.String())
-		log.Printf("  remote: %s", pair.Remote.String())
-	}
-	log.Printf("ICE connection established to %s", cfg.PartnerID)
-
-	// Bidirectional copy. Each L3 packet read from TUN is sent as one
-	// length-framed message over the ICE conn (stream-oriented). Receive
-	// side reads frames and writes them back to TUN.
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() { defer wg.Done(); pumpTunToICE(tun, conn) }()
-	go func() { defer wg.Done(); pumpICEToTun(conn, tun) }()
-	wg.Wait()
-	log.Printf("mesh-conn exiting")
-}
 
 // =============================================================================
 // config
 // =============================================================================
 
+type Peer struct {
+	ID   string `json:"id"`
+	Port int    `json:"port"`
+}
+
 type Config struct {
-	PeerID        string
-	PartnerID     string
-	SignalingURL  string
-	TurnHost      string
-	TurnSecret    string
-	VirtualIP     string // e.g. "10.66.0.2"
-	VirtualPrefix int    // e.g. 24
-	TunName       string // optional, default "mesh0"
+	SelfID       string
+	Peers        []Peer
+	SignalingURL string
+	TurnHost     string
+	TurnSecret   string
 }
 
 func loadConfig() *Config {
-	c := &Config{
-		PeerID:        mustEnv("PEER_ID"),
-		PartnerID:     mustEnv("PARTNER_ID"),
-		SignalingURL:  strings.TrimRight(mustEnv("SIGNALING_URL"), "/"),
-		TurnHost:      os.Getenv("TURN_HOST"),
-		TurnSecret:    os.Getenv("TURN_SHARED_SECRET"),
-		VirtualIP:     mustEnv("VIRTUAL_IP"),
-		VirtualPrefix: 24,
-		TunName:       envOr("TUN_NAME", "mesh0"),
+	cfg := &Config{
+		SelfID:       mustEnv("PEER_ID"),
+		SignalingURL: strings.TrimRight(mustEnv("SIGNALING_URL"), "/"),
+		TurnHost:     os.Getenv("TURN_HOST"),
+		TurnSecret:   os.Getenv("TURN_SHARED_SECRET"),
 	}
-	return c
+	if err := json.Unmarshal([]byte(mustEnv("PEERS_JSON")), &cfg.Peers); err != nil {
+		log.Fatalf("PEERS_JSON: %v", err)
+	}
+	if cfg.peerByID(cfg.SelfID) == nil {
+		log.Fatalf("PEER_ID %q not in PEERS_JSON", cfg.SelfID)
+	}
+	return cfg
+}
+
+func (c *Config) peerByID(id string) *Peer {
+	for i := range c.Peers {
+		if c.Peers[i].ID == id {
+			return &c.Peers[i]
+		}
+	}
+	return nil
 }
 
 func mustEnv(k string) string {
@@ -115,59 +91,154 @@ func mustEnv(k string) string {
 	return v
 }
 
-func envOr(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
+// =============================================================================
+// main
+// =============================================================================
+
+func main() {
+	flag.Parse()
+	cfg := loadConfig()
+	self := cfg.peerByID(cfg.SelfID)
+
+	others := make([]Peer, 0, len(cfg.Peers)-1)
+	for _, p := range cfg.Peers {
+		if p.ID != cfg.SelfID {
+			others = append(others, p)
+		}
 	}
-	return def
+	log.Printf("mesh-conn: self=%s(:%d) other=%d", cfg.SelfID, self.Port, len(others))
+
+	go pollLoop(cfg)
+
+	var wg sync.WaitGroup
+	for _, p := range others {
+		wg.Add(1)
+		go func(p Peer) {
+			defer wg.Done()
+			runPeerLink(cfg, *self, p)
+		}(p)
+	}
+	wg.Wait()
+	log.Printf("all peer links exited")
 }
 
 // =============================================================================
-// TUN setup (Linux, requires NET_ADMIN + /dev/net/tun)
+// per-peer link: ICE conn + bound UDP socket on peer's identity port
 // =============================================================================
 
-func openTun(name, ip string, prefix int) (*water.Interface, error) {
-	cfg := water.Config{DeviceType: water.TUN}
-	cfg.Name = name
-	iface, err := water.New(cfg)
+func runPeerLink(cfg *Config, self, peer Peer) {
+	for {
+		if err := dialAndPump(cfg, self, peer); err != nil {
+			log.Printf("[%s] link failed: %v — retrying in 5s", peer.ID, err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		// dialAndPump returns nil only when the conn closed cleanly.
+		log.Printf("[%s] link closed — reconnecting", peer.ID)
+	}
+}
+
+func dialAndPump(cfg *Config, self, peer Peer) error {
+	// 1. Establish ICE.
+	conn, err := dialICE(cfg, peer.ID)
 	if err != nil {
-		return nil, fmt.Errorf("water.New: %w", err)
+		return fmt.Errorf("ice: %w", err)
 	}
-	// Bring it up + assign IP via iproute2.
-	if err := run("ip", "addr", "add", fmt.Sprintf("%s/%d", ip, prefix), "dev", iface.Name()); err != nil {
-		return nil, err
-	}
-	if err := run("ip", "link", "set", "dev", iface.Name(), "up", "mtu", "1300"); err != nil {
-		return nil, err
-	}
-	return iface, nil
-}
+	defer conn.Close()
 
-func run(args ...string) error {
-	cmd := exec.Command(args[0], args[1:]...)
-	out, err := cmd.CombinedOutput()
+	// 2. Bind local UDP socket on peer's identity port.
+	//    Apps on this host send to 127.0.0.1:<peer.Port> to reach the peer;
+	//    we read those, ship them through ICE, and reply by writing back
+	//    via the same socket so the source IP:port matches what apps expect.
+	localAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", peer.Port))
+	sock, err := net.ListenUDP("udp", localAddr)
 	if err != nil {
-		return fmt.Errorf("%s: %v: %s", strings.Join(args, " "), err, bytes.TrimSpace(out))
+		return fmt.Errorf("listen %s: %w", localAddr, err)
 	}
-	return nil
+	defer sock.Close()
+
+	log.Printf("[%s] link up — listening on %s, peer reachable via ICE", peer.ID, localAddr)
+
+	// "destination" inside this host = the local app's identity port.
+	dstAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: self.Port}
+
+	// Bidirectional pumps.
+	errCh := make(chan error, 2)
+	go func() { errCh <- pumpSockToICE(sock, conn) }()
+	go func() { errCh <- pumpICEToSock(conn, sock, dstAddr) }()
+	return <-errCh
+}
+
+func pumpSockToICE(sock *net.UDPConn, conn *ice.Conn) error {
+	buf := make([]byte, 1500)
+	for {
+		n, _, err := sock.ReadFromUDP(buf)
+		if err != nil {
+			return fmt.Errorf("sock read: %w", err)
+		}
+		if _, err := conn.Write(buf[:n]); err != nil {
+			return fmt.Errorf("ice write: %w", err)
+		}
+	}
+}
+
+func pumpICEToSock(conn *ice.Conn, sock *net.UDPConn, dst *net.UDPAddr) error {
+	buf := make([]byte, 1500)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			return fmt.Errorf("ice read: %w", err)
+		}
+		if _, err := sock.WriteToUDP(buf[:n], dst); err != nil {
+			return fmt.Errorf("sock write: %w", err)
+		}
+	}
 }
 
 // =============================================================================
-// ICE
+// ICE — one agent per peer pair
 // =============================================================================
 
-func dialICE(cfg *Config) (*ice.Conn, *ice.Agent, error) {
+type peerSession struct {
+	agent  *ice.Agent
+	authCh chan [2]string
+}
+
+var (
+	sessionsMu sync.Mutex
+	sessions   = map[string]*peerSession{} // key = remote peer id
+)
+
+func getOrMakeSession(cfg *Config, remoteID string) (*peerSession, bool) {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	if s, ok := sessions[remoteID]; ok {
+		return s, false
+	}
+	s := &peerSession{authCh: make(chan [2]string, 1)}
+	sessions[remoteID] = s
+	return s, true
+}
+
+func clearSession(remoteID string) {
+	sessionsMu.Lock()
+	defer sessionsMu.Unlock()
+	delete(sessions, remoteID)
+}
+
+func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
+	sess, _ := getOrMakeSession(cfg, remoteID)
+
 	var urls []*stun.URI
 	if cfg.TurnHost != "" {
 		user, pass := turnCreds(cfg.TurnSecret, time.Hour)
 		urls = []*stun.URI{
 			{Scheme: stun.SchemeTypeSTUN, Host: cfg.TurnHost, Port: 3478, Proto: stun.ProtoTypeUDP},
-			{Scheme: stun.SchemeTypeTURN, Host: cfg.TurnHost, Port: 3478, Proto: stun.ProtoTypeUDP,
-				Username: user, Password: pass},
-			{Scheme: stun.SchemeTypeTURN, Host: cfg.TurnHost, Port: 3478, Proto: stun.ProtoTypeTCP,
-				Username: user, Password: pass},
+			{Scheme: stun.SchemeTypeTURN, Host: cfg.TurnHost, Port: 3478, Proto: stun.ProtoTypeUDP, Username: user, Password: pass},
+			{Scheme: stun.SchemeTypeTURN, Host: cfg.TurnHost, Port: 3478, Proto: stun.ProtoTypeTCP, Username: user, Password: pass},
 		}
 	}
+
 	agent, err := ice.NewAgent(&ice.AgentConfig{
 		Urls:         urls,
 		NetworkTypes: []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
@@ -179,64 +250,57 @@ func dialICE(cfg *Config) (*ice.Conn, *ice.Agent, error) {
 		},
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("ice.NewAgent: %w", err)
+		return nil, fmt.Errorf("NewAgent: %w", err)
 	}
+	sess.agent = agent
 
 	if err := agent.OnCandidate(func(c ice.Candidate) {
 		if c == nil {
 			return
 		}
-		log.Printf("local candidate: %s", c.Type())
-		publish(cfg, "candidate", c.Marshal())
+		publish(cfg, remoteID, "candidate", c.Marshal())
 	}); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
 	if err := agent.OnConnectionStateChange(func(s ice.ConnectionState) {
-		log.Printf("ice state: %s", s)
+		log.Printf("[%s] ice state: %s", remoteID, s)
 	}); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
 	localUfrag, localPwd, err := agent.GetLocalUserCredentials()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	publish(cfg, "auth", localUfrag+":"+localPwd)
+	publish(cfg, remoteID, "auth", localUfrag+":"+localPwd)
 
 	if err := agent.GatherCandidates(); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-
-	authCh := make(chan [2]string, 1)
-	go pollLoop(cfg, agent, authCh)
 
 	var remote [2]string
 	select {
-	case remote = <-authCh:
+	case remote = <-sess.authCh:
 	case <-time.After(10 * time.Minute):
-		return nil, nil, fmt.Errorf("timed out waiting for partner auth")
+		return nil, fmt.Errorf("timeout waiting for remote auth from %s", remoteID)
 	}
-	log.Printf("got partner auth, role=%s", roleName(cfg))
 
 	ctx := context.Background()
 	var conn *ice.Conn
-	if cfg.PeerID < cfg.PartnerID {
+	if cfg.SelfID < remoteID {
 		conn, err = agent.Dial(ctx, remote[0], remote[1])
 	} else {
 		conn, err = agent.Accept(ctx, remote[0], remote[1])
 	}
 	if err != nil {
-		return nil, nil, err
+		clearSession(remoteID)
+		return nil, err
 	}
-	return conn, agent, nil
-}
 
-func roleName(cfg *Config) string {
-	if cfg.PeerID < cfg.PartnerID {
-		return "controlling/Dial"
+	if pair, perr := agent.GetSelectedCandidatePair(); perr == nil && pair != nil {
+		log.Printf("[%s] selected pair: %s <-> %s", remoteID, pair.Local.Type(), pair.Remote.Type())
 	}
-	return "controlled/Accept"
+	return conn, nil
 }
 
 func turnCreds(secret string, ttl time.Duration) (string, string) {
@@ -248,7 +312,7 @@ func turnCreds(secret string, ttl time.Duration) (string, string) {
 }
 
 // =============================================================================
-// Signaling (same wire format as phase-0/icetest)
+// signaling — same wire format as phase-0/icetest
 // =============================================================================
 
 type Message struct {
@@ -257,9 +321,9 @@ type Message struct {
 	Data string `json:"data"`
 }
 
-func publish(cfg *Config, typ, data string) {
-	body, _ := json.Marshal(Message{From: cfg.PeerID, Type: typ, Data: data})
-	resp, err := http.Post(cfg.SignalingURL+"/publish?to="+url.QueryEscape(cfg.PartnerID),
+func publish(cfg *Config, to, typ, data string) {
+	body, _ := json.Marshal(Message{From: cfg.SelfID, Type: typ, Data: data})
+	resp, err := http.Post(cfg.SignalingURL+"/publish?to="+url.QueryEscape(to),
 		"application/json", strings.NewReader(string(body)))
 	if err != nil {
 		log.Printf("publish err: %v", err)
@@ -269,10 +333,9 @@ func publish(cfg *Config, typ, data string) {
 	resp.Body.Close()
 }
 
-func pollLoop(cfg *Config, agent *ice.Agent, authCh chan<- [2]string) {
-	authSent := false
+func pollLoop(cfg *Config) {
 	for {
-		resp, err := http.Get(cfg.SignalingURL + "/poll?peer=" + url.QueryEscape(cfg.PeerID))
+		resp, err := http.Get(cfg.SignalingURL + "/poll?peer=" + url.QueryEscape(cfg.SelfID))
 		if err != nil {
 			log.Printf("poll err: %v", err)
 			time.Sleep(time.Second)
@@ -287,80 +350,33 @@ func pollLoop(cfg *Config, agent *ice.Agent, authCh chan<- [2]string) {
 		}
 		resp.Body.Close()
 		for _, m := range msgs {
+			sess, _ := getOrMakeSession(cfg, m.From)
 			switch m.Type {
 			case "auth":
-				if authSent {
-					continue
-				}
 				parts := strings.SplitN(m.Data, ":", 2)
 				if len(parts) != 2 {
-					log.Printf("bad auth %q", m.Data)
+					log.Printf("[%s] bad auth %q", m.From, m.Data)
 					continue
 				}
-				authCh <- [2]string{parts[0], parts[1]}
-				authSent = true
+				select {
+				case sess.authCh <- [2]string{parts[0], parts[1]}:
+				default:
+					// already delivered for this attempt
+				}
 			case "candidate":
+				if sess.agent == nil {
+					// agent not yet created; drop — peer will retry candidates
+					continue
+				}
 				cand, err := ice.UnmarshalCandidate(m.Data)
 				if err != nil {
-					log.Printf("bad candidate: %v", err)
+					log.Printf("[%s] bad candidate: %v", m.From, err)
 					continue
 				}
-				if err := agent.AddRemoteCandidate(cand); err != nil {
-					log.Printf("AddRemoteCandidate: %v", err)
+				if err := sess.agent.AddRemoteCandidate(cand); err != nil {
+					log.Printf("[%s] AddRemoteCandidate: %v", m.From, err)
 				}
 			}
 		}
 	}
 }
-
-// =============================================================================
-// TUN <-> ICE pumps
-//
-// ice.Conn rides on UDP; each Read/Write maps to one datagram. The TUN
-// device also reads/writes whole packets. So we just pass packets across
-// 1:1, no framing needed. MTU is set to 1300 so we stay well under the
-// 1500-byte path MTU after any ICE/UDP overhead.
-// =============================================================================
-
-const maxPacket = 1500
-
-func pumpTunToICE(tun *water.Interface, conn *ice.Conn) {
-	buf := make([]byte, maxPacket)
-	for {
-		n, err := tun.Read(buf)
-		if err != nil {
-			log.Printf("tun read: %v", err)
-			return
-		}
-		if n == 0 {
-			continue
-		}
-		if _, err := conn.Write(buf[:n]); err != nil {
-			log.Printf("ice write: %v", err)
-			return
-		}
-	}
-}
-
-func pumpICEToTun(conn *ice.Conn, tun *water.Interface) {
-	buf := make([]byte, maxPacket)
-	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			log.Printf("ice read: %v", err)
-			return
-		}
-		if n == 0 {
-			continue
-		}
-		if _, err := tun.Write(buf[:n]); err != nil {
-			log.Printf("tun write: %v", err)
-			return
-		}
-	}
-}
-
-// keep imports stable across edits
-var _ = net.ParseIP
-var _ = binary.BigEndian
-var _ = io.ReadFull
