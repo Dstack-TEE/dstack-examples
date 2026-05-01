@@ -24,6 +24,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -37,6 +38,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/hashicorp/yamux"
 	"github.com/pion/ice/v2"
 	"github.com/pion/stun"
 )
@@ -138,6 +140,13 @@ func runPeerLink(cfg *Config, self, peer Peer) {
 	}
 }
 
+// Stream tag byte sent as the first byte of each yamux stream so the
+// remote side knows what to do with it.
+const (
+	streamUDP byte = 0x55 // long-lived: length-prefixed UDP datagrams
+	streamTCP byte = 0x33 // per-conn:   raw TCP-stream forwarding
+)
+
 func dialAndPump(cfg *Config, self, peer Peer) error {
 	// 1. Establish ICE.
 	conn, err := dialICE(cfg, peer.ID)
@@ -146,51 +155,191 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 	}
 	defer conn.Close()
 
-	// 2. Bind local UDP socket on peer's identity port.
-	//    Apps on this host send to 127.0.0.1:<peer.Port> to reach the peer;
-	//    we read those, ship them through ICE, and reply by writing back
-	//    via the same socket so the source IP:port matches what apps expect.
-	localAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", peer.Port))
-	sock, err := net.ListenUDP("udp", localAddr)
-	if err != nil {
-		return fmt.Errorf("listen %s: %w", localAddr, err)
+	// 2. Multiplex with yamux. Lex-smaller side runs the client (matches
+	//    ICE Dial); the larger side is the server. Either side can open
+	//    streams. We use a long-lived UDP control stream for datagram
+	//    forwarding, plus per-TCP-conn ephemeral streams for byte-stream
+	//    forwarding. Each new stream's first byte tags its purpose.
+	ycfg := yamux.DefaultConfig()
+	ycfg.LogOutput = io.Discard       // yamux is chatty
+	ycfg.EnableKeepAlive = true
+	var sess *yamux.Session
+	if cfg.SelfID < peer.ID {
+		sess, err = yamux.Client(conn, ycfg)
+	} else {
+		sess, err = yamux.Server(conn, ycfg)
 	}
-	defer sock.Close()
+	if err != nil {
+		return fmt.Errorf("yamux: %w", err)
+	}
+	defer sess.Close()
 
-	log.Printf("[%s] link up — listening on %s, peer reachable via ICE", peer.ID, localAddr)
+	// 3. Bind localhost UDP + TCP listeners on peer's identity port.
+	udpAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: peer.Port}
+	udpSock, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return fmt.Errorf("udp listen %s: %w", udpAddr, err)
+	}
+	defer udpSock.Close()
 
-	// "destination" inside this host = the local app's identity port.
-	dstAddr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: self.Port}
+	tcpAddr := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: peer.Port}
+	tcpLis, err := net.ListenTCP("tcp", tcpAddr)
+	if err != nil {
+		return fmt.Errorf("tcp listen %s: %w", tcpAddr, err)
+	}
+	defer tcpLis.Close()
 
-	// Bidirectional pumps.
-	errCh := make(chan error, 2)
-	go func() { errCh <- pumpSockToICE(sock, conn) }()
-	go func() { errCh <- pumpICEToSock(conn, sock, dstAddr) }()
+	// 4. Open the long-lived UDP stream. Both sides need to know which
+	//    yamux stream is "the UDP one" — the client opens it eagerly,
+	//    the server picks up the first stream that arrives with the
+	//    streamUDP tag.
+	udpStream, err := openOrAcceptUDPStream(sess, cfg.SelfID < peer.ID)
+	if err != nil {
+		return fmt.Errorf("udp stream: %w", err)
+	}
+
+	log.Printf("[%s] link up — listening on 127.0.0.1:%d (udp+tcp), peer reachable via ICE",
+		peer.ID, peer.Port)
+
+	udpDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: self.Port}
+	tcpDst := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: self.Port}
+
+	errCh := make(chan error, 4)
+	// UDP pumps over the dedicated stream.
+	go func() { errCh <- pumpUDPSockToStream(udpSock, udpStream) }()
+	go func() { errCh <- pumpUDPStreamToSock(udpStream, udpSock, udpDst) }()
+	// TCP listener: each local Accept opens a new yamux stream tagged TCP.
+	go func() { errCh <- acceptLocalTCP(tcpLis, sess) }()
+	// Yamux accept loop: every incoming stream after the UDP one is a TCP forward.
+	go func() { errCh <- acceptRemoteStreams(sess, tcpDst) }()
 	return <-errCh
 }
 
-func pumpSockToICE(sock *net.UDPConn, conn *ice.Conn) error {
+func openOrAcceptUDPStream(sess *yamux.Session, isClient bool) (*yamux.Stream, error) {
+	if isClient {
+		s, err := sess.OpenStream()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := s.Write([]byte{streamUDP}); err != nil {
+			return nil, err
+		}
+		return s, nil
+	}
+	// Server: first stream with streamUDP tag is the UDP pipe.
+	for {
+		s, err := sess.AcceptStream()
+		if err != nil {
+			return nil, err
+		}
+		var tag [1]byte
+		if _, err := io.ReadFull(s, tag[:]); err != nil {
+			s.Close()
+			continue
+		}
+		if tag[0] == streamUDP {
+			return s, nil
+		}
+		// Stray stream before the UDP one — shouldn't happen, but handle it.
+		s.Close()
+	}
+}
+
+func acceptRemoteStreams(sess *yamux.Session, tcpDst *net.TCPAddr) error {
+	for {
+		s, err := sess.AcceptStream()
+		if err != nil {
+			return fmt.Errorf("yamux accept: %w", err)
+		}
+		go handleRemoteStream(s, tcpDst)
+	}
+}
+
+func handleRemoteStream(s *yamux.Stream, tcpDst *net.TCPAddr) {
+	defer s.Close()
+	var tag [1]byte
+	if _, err := io.ReadFull(s, tag[:]); err != nil {
+		return
+	}
+	switch tag[0] {
+	case streamTCP:
+		dial, err := net.DialTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1)}, tcpDst)
+		if err != nil {
+			log.Printf("dial local TCP: %v", err)
+			return
+		}
+		defer dial.Close()
+		spliceBoth(s, dial)
+	default:
+		log.Printf("unexpected stream tag 0x%x", tag[0])
+	}
+}
+
+func acceptLocalTCP(lis *net.TCPListener, sess *yamux.Session) error {
+	for {
+		c, err := lis.AcceptTCP()
+		if err != nil {
+			return fmt.Errorf("tcp accept: %w", err)
+		}
+		go func(c *net.TCPConn) {
+			defer c.Close()
+			s, err := sess.OpenStream()
+			if err != nil {
+				log.Printf("yamux open: %v", err)
+				return
+			}
+			defer s.Close()
+			if _, err := s.Write([]byte{streamTCP}); err != nil {
+				return
+			}
+			spliceBoth(s, c)
+		}(c)
+	}
+}
+
+func spliceBoth(a, b io.ReadWriteCloser) {
+	done := make(chan struct{}, 2)
+	go func() { io.Copy(a, b); done <- struct{}{} }()
+	go func() { io.Copy(b, a); done <- struct{}{} }()
+	<-done
+}
+
+// =============================================================================
+// UDP-over-yamux: length-prefixed datagrams on the dedicated stream.
+// =============================================================================
+
+func pumpUDPSockToStream(sock *net.UDPConn, s *yamux.Stream) error {
 	buf := make([]byte, 1500)
+	frame := make([]byte, 2+1500)
 	for {
 		n, _, err := sock.ReadFromUDP(buf)
 		if err != nil {
-			return fmt.Errorf("sock read: %w", err)
+			return fmt.Errorf("udp sock read: %w", err)
 		}
-		if _, err := conn.Write(buf[:n]); err != nil {
-			return fmt.Errorf("ice write: %w", err)
+		if n > 65535 {
+			continue
+		}
+		binary.BigEndian.PutUint16(frame[:2], uint16(n))
+		copy(frame[2:], buf[:n])
+		if _, err := s.Write(frame[:2+n]); err != nil {
+			return fmt.Errorf("udp stream write: %w", err)
 		}
 	}
 }
 
-func pumpICEToSock(conn *ice.Conn, sock *net.UDPConn, dst *net.UDPAddr) error {
-	buf := make([]byte, 1500)
+func pumpUDPStreamToSock(s *yamux.Stream, sock *net.UDPConn, dst *net.UDPAddr) error {
+	hdr := make([]byte, 2)
+	buf := make([]byte, 65536)
 	for {
-		n, err := conn.Read(buf)
-		if err != nil {
-			return fmt.Errorf("ice read: %w", err)
+		if _, err := io.ReadFull(s, hdr); err != nil {
+			return fmt.Errorf("udp stream read header: %w", err)
+		}
+		n := int(binary.BigEndian.Uint16(hdr))
+		if _, err := io.ReadFull(s, buf[:n]); err != nil {
+			return fmt.Errorf("udp stream read body: %w", err)
 		}
 		if _, err := sock.WriteToUDP(buf[:n], dst); err != nil {
-			return fmt.Errorf("sock write: %w", err)
+			return fmt.Errorf("udp sock write: %w", err)
 		}
 	}
 }

@@ -3,6 +3,7 @@ module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/stage1/mesh-conn
 go 1.22
 
 require (
+	github.com/hashicorp/yamux v0.1.2
 	github.com/pion/ice/v2 v2.3.25
 	github.com/pion/stun v0.6.1
 )
