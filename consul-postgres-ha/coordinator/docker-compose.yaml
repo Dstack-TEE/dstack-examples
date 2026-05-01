@@ -1,0 +1,36 @@
+# Runs on the user-provided public-IP host (NOT a dstack CVM).
+# Provides STUN/TURN for ICE traversal and (for Phase 0) a tiny signaling
+# broker so the two test CVMs can swap ICE candidates.
+#
+# Image tags are deliberately unpinned during Phase 0 iteration; pin to
+# sha256 digests before stage-1 deploy.
+
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - -n
+      - --realm=dstack-mesh
+      - --listening-port=3478
+      - --tls-listening-port=5349
+      - --min-port=49152
+      - --max-port=49999
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SHARED_SECRET}
+      - --no-cli
+      - --no-multicast-peers
+      - --log-file=stdout
+      - --simple-log
+      - --fingerprint
+
+  signaling:
+    image: golang:1.22-alpine
+    restart: unless-stopped
+    working_dir: /src
+    volumes:
+      - ../phase0/icetest:/src
+    command: ["sh", "-c", "cd /src && go mod download && go run . -mode=signaling -addr=:7000"]
+    ports:
+      - "7000:7000"

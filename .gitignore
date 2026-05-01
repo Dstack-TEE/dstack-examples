@@ -1,1 +1,6 @@
 *~
+.claude/
+consul-postgres-ha/.local/
+
+# compiled go binaries
+consul-postgres-ha/phase0/icetest/icetest
