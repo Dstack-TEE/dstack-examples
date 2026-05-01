@@ -1,0 +1,93 @@
+# stage-3a — Consul-backed service discovery, plain HTTP between services.
+#
+# Adds a `webdemo` service to every peer (ctrl included for symmetry,
+# though only workers are interesting clients). Each instance:
+#   - registers with the LOCAL Consul agent as service "webdemo" with
+#     Address=127.0.0.1, Port=<own webdemo port>
+#   - exposes /hello returning "hello from <peer>"
+#   - exposes /all that queries Consul for all webdemo instances and
+#     fans out /hello calls to each. The addresses Consul returns
+#     (127.0.0.1:<peer_webdemo_port>) resolve through mesh-conn to the
+#     right peer's HTTP server.
+#
+# Per-peer port plan grew by one slot (index 4 = webdemo):
+#   ctrl:  18000 / 18100 / 18200 / 18300 / 18500
+#   w1:    18001 / 18101 / 18201 / 18301 / 18501
+#   w2:    18002 / 18102 / 18202 / 18302 / 18502
+#   w3:    18003 / 18103 / 18203 / 18303 / 18503
+# So PEERS_JSON now has five-element ports lists.
+
+services:
+  mesh-conn:
+    image: ${MESH_CONN_IMAGE}
+    restart: on-failure
+    network_mode: host
+    environment:
+      - PEER_ID=${PEER_ID}
+      - PEERS_JSON=${PEERS_JSON}
+      - SIGNALING_URL=${SIGNALING_URL}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
+
+  consul:
+    image: hashicorp/consul:1.19
+    restart: unless-stopped
+    network_mode: host
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        if [ "$$ROLE" = "server" ]; then
+          MODE_FLAGS="-server -bootstrap-expect=1 -ui"
+        else
+          MODE_FLAGS="-retry-join=127.0.0.1:$$CTRL_SERF_LAN_PORT"
+        fi
+        exec consul agent \
+          -node=$$PEER_ID \
+          -datacenter=dstack-mesh \
+          -bind=127.0.0.1 \
+          -advertise=127.0.0.1 \
+          -client=127.0.0.1 \
+          -serf-lan-port=$$SERF_LAN_PORT \
+          -server-port=$$SERVER_PORT \
+          -http-port=$$HTTP_PORT \
+          -grpc-port=$$GRPC_PORT \
+          -dns-port=-1 \
+          -data-dir=/consul/data \
+          -log-level=INFO \
+          $$MODE_FLAGS
+    environment:
+      - PEER_ID=${PEER_ID}
+      - ROLE=${ROLE}
+      - SERF_LAN_PORT=${SERF_LAN_PORT}
+      - SERVER_PORT=${SERVER_PORT}
+      - HTTP_PORT=${HTTP_PORT}
+      - GRPC_PORT=${GRPC_PORT}
+      - CTRL_SERF_LAN_PORT=${CTRL_SERF_LAN_PORT}
+    volumes:
+      - consul-data:/consul/data
+    depends_on:
+      - mesh-conn
+
+  webdemo:
+    image: ${WEBDEMO_IMAGE}
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - PEER_ID=${PEER_ID}
+      - WEBDEMO_PORT=${WEBDEMO_PORT}
+      - CONSUL_HTTP_ADDR=127.0.0.1:${HTTP_PORT}
+    depends_on:
+      - consul
+
+  tester:
+    image: nicolaka/netshoot:latest
+    network_mode: host
+    command: ["sleep", "infinity"]
+    depends_on:
+      - mesh-conn
+      - consul
+      - webdemo
+
+volumes:
+  consul-data:
