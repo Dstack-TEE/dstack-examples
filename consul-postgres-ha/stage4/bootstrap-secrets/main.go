@@ -80,6 +80,11 @@ func main() {
 		{"gossip", "dstack-mesh/gossip", "base64"},
 		{"turn", "dstack-mesh/turn", "hex"},
 		{"ca-seed", "dstack-mesh/connect-ca", "hex"},
+		// Patroni superuser + replication passwords. Both are random
+		// 32-byte hex strings; identical on every replica because all
+		// peers derive against the same path + ClusterName.
+		{"patroni-superuser", "dstack-mesh/patroni-superuser", "hex"},
+		{"patroni-replication", "dstack-mesh/patroni-replication", "hex"},
 	}
 	for _, d := range derived {
 		seed, err := client.GetKey(ctx, d.path, cfg.ClusterName, "secp256k1")

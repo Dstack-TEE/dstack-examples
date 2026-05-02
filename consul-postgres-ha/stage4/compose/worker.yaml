@@ -130,14 +130,34 @@ services:
       - /tmp/dstack-runtime/instance:/run/instance:ro
     depends_on: [webdemo]
 
+  patroni:
+    image: ${PATRONI_IMAGE}
+    network_mode: host
+    restart: on-failure
+    # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
+    # must use the same value to land in the same cluster. The rest
+    # is read from /run/instance/info.json by entrypoint.sh.
+    environment:
+      - CLUSTER_NAME=${CLUSTER_NAME}
+    volumes:
+      - /tmp/dstack-runtime/instance:/run/instance:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+      - patroni-pgdata:/var/lib/patroni
+    depends_on:
+      consul:
+        condition: service_started
+      bootstrap-secrets:
+        condition: service_completed_successfully
+
   tester:
     image: nicolaka/netshoot:latest
     network_mode: host
     command: ["sleep", "infinity"]
-    depends_on: [mesh-conn, consul, webdemo]
+    depends_on: [mesh-conn, consul, webdemo, patroni]
 
 volumes:
   consul-data:
+  patroni-pgdata:
 
 # Shared state goes through HOST BIND MOUNTS, not named docker
 # volumes. See coordinator.yaml for the full note — short version:

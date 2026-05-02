@@ -44,6 +44,7 @@ variable "mesh_conn_image"         { type = string }
 variable "signaling_image"         { type = string }
 variable "webdemo_image"           { type = string }
 variable "sidecar_image"           { type = string }
+variable "patroni_image"           { type = string }
 
 # External coordinator (Vultr coturn + signaling box) used until
 # Phala admin enables UDP ingress on dstack apps. coordinator's own
@@ -69,6 +70,8 @@ locals {
     grpc           = 18300
     webdemo        = 18500
     sidecar_public = 18600
+    postgres       = 18700 # Patroni-managed PostgreSQL listen
+    patroni_rest   = 18800 # Patroni REST API (peer health, leader query)
   }
 
   # The full peer list, identical on every CVM. Coordinator is always
@@ -172,6 +175,7 @@ resource "phala_app" "worker" {
     MESH_CONN_IMAGE          = var.mesh_conn_image
     WEBDEMO_IMAGE            = var.webdemo_image
     SIDECAR_IMAGE            = var.sidecar_image
+    PATRONI_IMAGE            = var.patroni_image
   }
 
   listed         = false
