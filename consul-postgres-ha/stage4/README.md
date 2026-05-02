@@ -116,12 +116,35 @@ The runtime stack is solid; what's left is operational polish:
   validate` + `terraform plan` smoke check on every PR.
 - **Periodic metrics** on mesh-conn (per-link bytes, ICE state,
   yamux stream count).
+- **Shared TEE-derived secrets across separate `phala_app`s.**
+  Today coordinator + each worker is its own `phala_app`, so each
+  derives its own KMS root from its own AppAuth contract — they
+  *can't* `getKey()` to the same value. We sidestep this by
+  bootstrap-secrets only deriving values used locally (TURN secret,
+  ordinal, info.json) and using Consul as the cross-CVM trust
+  anchor. The clean fix is a "shared AppAuth contract" referenced
+  by all 4 apps so they can derive identical gossip / Connect-CA
+  seeds purely from the TEE — that wants on-chain KMS work and is
+  the gating piece for stage 2 (attestation-gated mesh join).
+- **mesh-conn ICE recovery beyond the in-process retry.** The fix
+  in `dialICE` correctly cancels stuck `agent.Dial`/`Accept` on
+  Failed/Closed and the outer `runPeerLink` retries every 5s — but
+  if both sides of a link end up Failed simultaneously, the new
+  attempts may race against still-cached signaling state. The
+  mitigation today is bouncing the container; production wants the
+  signaling broker to expire stale auth/candidate entries on a
+  short timer.
 
 ## Open issues filed upstream
 
 - [`Phala-Network/terraform-provider-phala#5`](https://github.com/Phala-Network/terraform-provider-phala/issues/5)
   — `storage_fs` ForceNew bug. We pin `storage_fs = "zfs"`
   explicitly in cluster.tf to avoid it.
+- [`Phala-Network/terraform-provider-phala#6`](https://github.com/Phala-Network/terraform-provider-phala/issues/6)
+  — env-block in-place updates silently noop (provider reports
+  "No changes" even when env values changed). Workaround during
+  dev is hot-patching containers via `docker compose --env-file
+  /dstack/.host-shared/.decrypted-env -p dstack up -d <svc>`.
 - [`Phala-Network/phala-cloud#242`](https://github.com/Phala-Network/phala-cloud/issues/242)
   — `phala cvms list` collapses replicas to one entry.
 - [`Phala-Network/phala-cloud#243`](https://github.com/Phala-Network/phala-cloud/issues/243)
