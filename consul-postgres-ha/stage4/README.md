@@ -140,11 +140,13 @@ The runtime stack is solid; what's left is operational polish:
 - [`Phala-Network/terraform-provider-phala#5`](https://github.com/Phala-Network/terraform-provider-phala/issues/5)
   — `storage_fs` ForceNew bug. We pin `storage_fs = "zfs"`
   explicitly in cluster.tf to avoid it.
-- [`Phala-Network/terraform-provider-phala#6`](https://github.com/Phala-Network/terraform-provider-phala/issues/6)
+- [`Phala-Network/phala-cloud#246`](https://github.com/Phala-Network/phala-cloud/issues/246)
   — env-block in-place updates silently noop (provider reports
-  "No changes" even when env values changed). Workaround during
-  dev is hot-patching containers via `docker compose --env-file
-  /dstack/.host-shared/.decrypted-env -p dstack up -d <svc>`.
+  "No changes" even when env values changed). Cause likely lives
+  in the API (no env-update path) with the provider downstream.
+  Workaround during dev is hot-patching containers via `docker
+  compose --env-file /dstack/.host-shared/.decrypted-env -p dstack
+  up -d <svc>`.
 - [`Phala-Network/phala-cloud#242`](https://github.com/Phala-Network/phala-cloud/issues/242)
   — `phala cvms list` collapses replicas to one entry.
 - [`Phala-Network/phala-cloud#243`](https://github.com/Phala-Network/phala-cloud/issues/243)
