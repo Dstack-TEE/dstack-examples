@@ -104,11 +104,10 @@ func main() {
 
 	// 3. Ordinal selection.
 	//    Three sources, in order of preference:
-	//      a. WORKER_ORDINAL env (set by cluster.tf when each worker
-	//         is its own phala_app — sidesteps the Consul-bootstrap
-	//         chicken-and-egg).
-	//      b. Coordinator role: always 0 (single-coordinator phase).
-	//      c. Consul KV CAS (the multi-server / dynamic case once
+	//      a. WORKER_ORDINAL or COORDINATOR_ORDINAL env (set by
+	//         cluster.tf when each peer is its own phala_app —
+	//         sidesteps the Consul-bootstrap chicken-and-egg).
+	//      b. Consul KV CAS (the multi-server / dynamic case once
 	//         phala-cloud#243 lets us pass per-instance env to a
 	//         replicas:N app).
 	ordinal := 0
@@ -116,9 +115,11 @@ func main() {
 	case cfg.WorkerOrdinal > 0:
 		ordinal = cfg.WorkerOrdinal
 		log.Printf("ordinal from WORKER_ORDINAL env: %d", ordinal)
-	case cfg.Role == "coordinator":
-		ordinal = 0
-		log.Printf("ordinal=0 (coordinator role)")
+	case cfg.HasCoordinatorOrdinal:
+		// Coordinator ordinal can be 0 (the first coord), so we use
+		// a separate "set?" flag instead of >0.
+		ordinal = cfg.CoordinatorOrdinal
+		log.Printf("ordinal from COORDINATOR_ORDINAL env: %d", ordinal)
 	default:
 		var err error
 		ordinal, err = claimOrdinal(cfg, info.InstanceID)
@@ -151,12 +152,14 @@ func main() {
 // =============================================================================
 
 type Config struct {
-	ClusterName      string
-	Role             string // coordinator | worker
-	ConsulHTTPAddr   string // 127.0.0.1:<port> on the local agent
-	ExpectedReplicas int    // upper bound on ordinal slots to try
-	ProtocolBases    map[string]int
-	WorkerOrdinal    int // optional, set by cluster.tf per-worker
+	ClusterName           string
+	Role                  string // coordinator | worker
+	ConsulHTTPAddr        string // 127.0.0.1:<port> on the local agent
+	ExpectedReplicas      int    // upper bound on ordinal slots to try
+	ProtocolBases         map[string]int
+	WorkerOrdinal         int  // optional, set by cluster.tf per-worker (>0)
+	CoordinatorOrdinal    int  // optional, set by cluster.tf per-coordinator (>=0)
+	HasCoordinatorOrdinal bool // distinguishes ordinal=0 from "unset"
 }
 
 func loadConfig() *Config {
@@ -172,6 +175,14 @@ func loadConfig() *Config {
 			log.Fatalf("WORKER_ORDINAL invalid: %q", v)
 		}
 		cfg.WorkerOrdinal = n
+	}
+	if v := os.Getenv("COORDINATOR_ORDINAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			log.Fatalf("COORDINATOR_ORDINAL invalid: %q", v)
+		}
+		cfg.CoordinatorOrdinal = n
+		cfg.HasCoordinatorOrdinal = true
 	}
 	// PROTOCOL_BASES: JSON object of name -> base port.
 	rawBases := mustEnv("PROTOCOL_BASES")

@@ -30,7 +30,11 @@ services:
       - PROTOCOL_BASES=${PROTOCOL_BASES}
       - WORKER_ORDINAL=${WORKER_ORDINAL}
       - EXPECTED_REPLICAS=${EXPECTED_REPLICAS}
-      - CONSUL_HTTP_ADDR=127.0.0.1:${COORDINATOR_HTTP_PORT}
+      # COORDINATOR_HTTP_PORTS is comma-separated; bootstrap-secrets
+      # picks the first reachable one to talk to Consul KV (only used
+      # if WORKER_ORDINAL is unset, which it isn't with the per-worker
+      # phala_app pattern — kept for the legacy CAS-claim fallback).
+      - COORDINATOR_HTTP_PORTS=${COORDINATOR_HTTP_PORTS}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
       - /tmp/dstack-runtime/secrets:/run/secrets
@@ -64,6 +68,13 @@ services:
         RPC=$$(jq -r  '.ports.server_rpc' /run/instance/info.json)
         HTTP=$$(jq -r '.ports.http_api'   /run/instance/info.json)
         GRPC=$$(jq -r '.ports.grpc'       /run/instance/info.json)
+        # Workers retry-join EVERY coordinator's serf port (mesh-conn
+        # forwards each one to its actual coordinator). Consul's serf
+        # gossip then connects via whichever join succeeds first.
+        RETRYJOIN=""
+        for p in $$(echo "${COORDINATOR_SERF_PORTS}" | tr ',' ' '); do
+          RETRYJOIN="$$RETRYJOIN -retry-join=127.0.0.1:$$p"
+        done
         exec consul agent \
           -node=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json) \
           -datacenter=${CLUSTER_NAME} \
@@ -73,7 +84,7 @@ services:
           -http-port=$$HTTP \
           -grpc-port=$$GRPC \
           -dns-port=-1 \
-          -retry-join=127.0.0.1:${COORDINATOR_SERF_PORT} \
+          $$RETRYJOIN \
           -data-dir=/consul/data \
           -hcl='connect { enabled = true }' \
           -log-level=INFO

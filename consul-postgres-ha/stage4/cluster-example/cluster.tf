@@ -29,6 +29,12 @@ variable "cluster_name" {
   default = "demo"
 }
 
+variable "coordinator_replicas" {
+  type        = number
+  default     = 3
+  description = "Number of voting Consul-server CVMs. 3 gives fault tolerance of 1; 5 of 2."
+}
+
 variable "worker_replicas" {
   type    = number
   default = 3
@@ -74,17 +80,24 @@ locals {
     patroni_rest   = 18800 # Patroni REST API (peer health, leader query)
   }
 
-  # The full peer list, identical on every CVM. Coordinator is always
-  # ordinal 0; workers fill ordinals 1..N. PEERS_JSON is what mesh-conn
-  # consumes; the role-ordinal pair is what each peer self-identifies as
-  # in its bootstrap-secrets-derived /run/instance/info.json (mesh-conn
-  # then reads "<role>-<ordinal>" as its self ID).
+  # The full peer list, identical on every CVM. Coordinators occupy
+  # ordinals 0..C-1 (where C = coordinator_replicas), workers fill
+  # ordinals C..C+W-1. PEERS_JSON is what mesh-conn consumes; the
+  # role-ordinal pair is what each peer self-identifies as in its
+  # bootstrap-secrets-derived /run/instance/info.json (mesh-conn then
+  # reads "<role>-<ordinal>" as its self ID).
   peers = concat(
-    [{ id = "coordinator-0", ordinal = 0, role = "coordinator" }],
+    [
+      for i in range(var.coordinator_replicas) : {
+        id      = "coordinator-${i}"
+        ordinal = i
+        role    = "coordinator"
+      }
+    ],
     [
       for i in range(var.worker_replicas) : {
         id      = "worker-${i + 1}"
-        ordinal = i + 1
+        ordinal = i + var.coordinator_replicas
         role    = "worker"
       }
     ],
@@ -99,15 +112,29 @@ locals {
 
   protocol_bases_json = jsonencode(local.protocol_bases)
 
-  # Coordinator's own per-protocol ports (ordinal 0, so == base).
-  coordinator_serf_port = local.protocol_bases.serf_lan + 0
-  coordinator_http_port = local.protocol_bases.http_api + 0
+  # Comma-separated lists of coordinator-ordinal-shifted ports. Workers
+  # use COORDINATOR_SERF_PORTS to retry-join EVERY coordinator, and
+  # COORDINATOR_HTTP_PORTS to pick ANY coordinator's HTTP API for
+  # KV-CAS bootstrapping. Coordinators use COORDINATOR_SERF_PORTS to
+  # gossip-join their server peers (consul -bootstrap-expect=N).
+  coordinator_serf_ports = join(",", [for i in range(var.coordinator_replicas) : tostring(local.protocol_bases.serf_lan + i)])
+  coordinator_http_ports = join(",", [for i in range(var.coordinator_replicas) : tostring(local.protocol_bases.http_api + i)])
+
+  # First coordinator's HTTP port — used as a single endpoint for the
+  # consul-ui output and for legacy single-coord callers.
+  coordinator_http_port_first = local.protocol_bases.http_api + 0
 }
 
 # ---------- Coordinator ----------
 
 resource "phala_app" "coordinator" {
-  name           = "${var.cluster_name}-coordinator"
+  # One phala_app per coordinator (with replicas:1) — same per-resource
+  # ordinal pattern as workers, same chicken-and-egg sidestep
+  # (bootstrap-secrets needs to know its own ordinal before Consul is
+  # reachable, since Consul is on the coordinators themselves).
+  for_each = { for i in range(var.coordinator_replicas) : tostring(i) => i }
+
+  name           = "${var.cluster_name}-coordinator-${each.key}"
   size           = "tdx.small"
   region         = "US-WEST-1"
   disk_size      = 20
@@ -119,6 +146,9 @@ resource "phala_app" "coordinator" {
     CLUSTER_NAME             = var.cluster_name
     PROTOCOL_BASES           = local.protocol_bases_json
     PEERS_JSON               = local.peers_json
+    COORDINATOR_ORDINAL      = tostring(each.value)
+    BOOTSTRAP_EXPECT         = tostring(var.coordinator_replicas)
+    COORDINATOR_SERF_PORTS   = local.coordinator_serf_ports
     SIGNALING_URL            = var.external_signaling_url
     TURN_HOST                = var.external_coordinator_host
     TURN_SHARED_SECRET       = var.external_turn_secret
@@ -150,7 +180,10 @@ resource "phala_app" "worker" {
   # Once phala-cloud#243 lands phala_app_instance + per-instance
   # env, this reverts to one resource with replicas:N + per-instance
   # env block.
-  for_each = { for i in range(var.worker_replicas) : tostring(i + 1) => i + 1 }
+  # Key is the worker's 1-based slot (used in the CVM name); value is
+  # the cluster-wide ordinal (= slot + coordinator_replicas, since
+  # coordinators occupy ordinals 0..C-1).
+  for_each = { for i in range(var.worker_replicas) : tostring(i + 1) => i + var.coordinator_replicas }
 
   name           = "${var.cluster_name}-worker-${each.key}"
   size           = "tdx.small"
@@ -165,9 +198,9 @@ resource "phala_app" "worker" {
     PROTOCOL_BASES           = local.protocol_bases_json
     PEERS_JSON               = local.peers_json
     WORKER_ORDINAL           = tostring(each.value)
-    EXPECTED_REPLICAS        = var.worker_replicas + 1
-    COORDINATOR_SERF_PORT    = local.coordinator_serf_port
-    COORDINATOR_HTTP_PORT    = local.coordinator_http_port
+    EXPECTED_REPLICAS        = var.worker_replicas + var.coordinator_replicas
+    COORDINATOR_SERF_PORTS   = local.coordinator_serf_ports
+    COORDINATOR_HTTP_PORTS   = local.coordinator_http_ports
     SIGNALING_URL            = var.external_signaling_url
     TURN_HOST                = var.external_coordinator_host
     TURN_SHARED_SECRET       = var.external_turn_secret
@@ -188,8 +221,9 @@ resource "phala_app" "worker" {
   depends_on = [phala_app.coordinator]
 }
 
-output "coordinator_app_id" { value = phala_app.coordinator.app_id }
-output "worker_app_ids"     { value = { for k, w in phala_app.worker : k => w.app_id } }
+output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k => c.app_id } }
+output "worker_app_ids"      { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "consul_ui" {
-  value = "https://${phala_app.coordinator.app_id}-${local.coordinator_http_port}s.${var.gateway_domain}/ui"
+  # Any coordinator's HTTP port serves the UI. Pick coord-0 by convention.
+  value = "https://${phala_app.coordinator["0"].app_id}-${local.coordinator_http_port_first}s.${var.gateway_domain}/ui"
 }
