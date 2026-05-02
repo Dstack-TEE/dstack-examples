@@ -122,11 +122,25 @@ resource "phala_app" "coordinator" {
 # ---------- Workers ----------
 
 resource "phala_app" "worker" {
-  name           = "${var.cluster_name}-worker"
+  # One phala_app per worker (with replicas:1) instead of a single
+  # app with replicas:N. Reason: each worker needs its OWN ordinal
+  # passed in via env so bootstrap-secrets can write the correct
+  # /run/instance/info.json without a Consul KV CAS round-trip.
+  # The CAS path has a chicken-and-egg: workers need Consul to
+  # claim an ordinal, but Consul (on the coordinator) is reached
+  # via mesh-conn, which depends on bootstrap-secrets having
+  # finished. Per-worker resources sidestep this entirely.
+  #
+  # Once phala-cloud#243 lands phala_app_instance + per-instance
+  # env, this reverts to one resource with replicas:N + per-instance
+  # env block.
+  for_each = { for i in range(var.worker_replicas) : tostring(i + 1) => i + 1 }
+
+  name           = "${var.cluster_name}-worker-${each.key}"
   size           = "tdx.small"
   region         = "US-WEST-1"
   disk_size      = 20
-  replicas       = var.worker_replicas
+  replicas       = 1
   storage_fs     = "zfs"
   docker_compose = file("${path.module}/../compose/worker.yaml")
 
@@ -134,7 +148,8 @@ resource "phala_app" "worker" {
     CLUSTER_NAME             = var.cluster_name
     PROTOCOL_BASES           = local.protocol_bases_json
     PEERS_JSON               = local.peers_json
-    EXPECTED_REPLICAS        = var.worker_replicas + 1   # +1 for coordinator slot
+    WORKER_ORDINAL           = tostring(each.value)
+    EXPECTED_REPLICAS        = var.worker_replicas + 1
     COORDINATOR_HOST         = "${phala_app.coordinator.app_id}.${var.gateway_domain}"
     COORDINATOR_SERF_PORT    = local.coordinator_serf_port
     COORDINATOR_HTTP_PORT    = local.coordinator_http_port
@@ -155,7 +170,7 @@ resource "phala_app" "worker" {
 }
 
 output "coordinator_app_id" { value = phala_app.coordinator.app_id }
-output "worker_app_id"      { value = phala_app.worker.app_id }
+output "worker_app_ids"     { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "consul_ui" {
   value = "https://${phala_app.coordinator.app_id}-${local.coordinator_http_port}s.${var.gateway_domain}/ui"
 }

@@ -29,8 +29,9 @@ services:
       # because it IS the Consul server (chicken-and-egg).
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
-      - run-secrets:/run/secrets
-      - run-instance:/run/instance
+      # Bind mounts (NOT named volumes) — see compose footer note
+      - /tmp/dstack-runtime/secrets:/run/secrets
+      - /tmp/dstack-runtime/instance:/run/instance
 
   mesh-conn:
     image: ${MESH_CONN_IMAGE}
@@ -42,8 +43,8 @@ services:
       - TURN_HOST=127.0.0.1
       # TURN_SHARED_SECRET read from /run/secrets/turn (file)
     volumes:
-      - run-secrets:/run/secrets:ro
-      - run-instance:/run/instance:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+      - /tmp/dstack-runtime/instance:/run/instance:ro
     depends_on:
       bootstrap-secrets:
         condition: service_completed_successfully
@@ -76,7 +77,7 @@ services:
           --no-cli --no-multicast-peers \
           --log-file=stdout --simple-log --fingerprint
     volumes:
-      - run-secrets:/run/secrets:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
     depends_on:
       bootstrap-secrets:
         condition: service_completed_successfully
@@ -105,14 +106,14 @@ services:
           -http-port=$$HTTP \
           -grpc-port=$$GRPC \
           -dns-port=-1 \
-          -encrypt-key-file=/run/secrets/gossip \
+          -encrypt=$$(cat /run/secrets/gossip) \
           -data-dir=/consul/data \
           -hcl='connect { enabled = true }' \
           -log-level=INFO
     volumes:
       - consul-data:/consul/data
-      - run-secrets:/run/secrets:ro
-      - run-instance:/run/instance:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+      - /tmp/dstack-runtime/instance:/run/instance:ro
     depends_on:
       bootstrap-secrets:
         condition: service_completed_successfully
@@ -125,15 +126,13 @@ services:
 
 volumes:
   consul-data:
-  # tmpfs volumes for derived state — gone on reboot, re-derived
-  # by bootstrap-secrets on next boot. Never on the persisted disk.
-  run-secrets:
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: "size=1m,mode=0700"
-  run-instance:
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: "size=1m,mode=0755"
+
+# NOTE: shared state goes through HOST BIND MOUNTS, not named docker
+# volumes. On the dstack platform we run on, named volumes don't share
+# data across containers — the second container always sees an empty
+# volume even when the first wrote to it (filed as a phala-cloud
+# issue). Bind mounts to the CVM's /tmp work fine.
+#
+# /tmp is ephemeral inside the TEE; secrets are re-derived
+# deterministically from getKey() on every boot, so the on-disk copy
+# is effectively a per-boot cache.

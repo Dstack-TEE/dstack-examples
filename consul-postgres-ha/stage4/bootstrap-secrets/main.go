@@ -33,6 +33,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -66,32 +67,54 @@ func main() {
 
 	// 2. Derive cluster-wide secrets. Same path/purpose triple
 	// returns the same 32 bytes on every replica of this app.
-	derived := map[string]string{
-		"gossip":  "dstack-mesh/gossip",
-		"turn":    "dstack-mesh/turn",
-		"ca-seed": "dstack-mesh/connect-ca",
+	// Each secret has a name, a derivation path, and a serialisation
+	// format that matches what its consumer expects:
+	//   gossip:  consul agent's -encrypt=<key> wants base64.
+	//   turn:    coturn's --static-auth-secret takes any string;
+	//            we use hex for compactness.
+	//   ca-seed: just bytes we re-derive into a Connect CA root;
+	//            hex is fine.
+	derived := []struct {
+		name, path, format string
+	}{
+		{"gossip", "dstack-mesh/gossip", "base64"},
+		{"turn", "dstack-mesh/turn", "hex"},
+		{"ca-seed", "dstack-mesh/connect-ca", "hex"},
 	}
-	for name, path := range derived {
-		seed, err := client.GetKey(ctx, path, cfg.ClusterName, "secp256k1")
+	for _, d := range derived {
+		seed, err := client.GetKey(ctx, d.path, cfg.ClusterName, "secp256k1")
 		if err != nil {
-			log.Fatalf("GetKey %s: %v", path, err)
+			log.Fatalf("GetKey %s: %v", d.path, err)
 		}
 		keyBytes, err := seed.DecodeKey()
 		if err != nil {
-			log.Fatalf("decode %s: %v", path, err)
+			log.Fatalf("decode %s: %v", d.path, err)
 		}
-		if err := writeSecret("/run/secrets/"+name, keyBytes); err != nil {
-			log.Fatalf("write %s: %v", name, err)
+		if err := writeSecretEncoded("/run/secrets/"+d.name, keyBytes, d.format); err != nil {
+			log.Fatalf("write %s: %v", d.name, err)
 		}
-		log.Printf("derived %s (%d bytes) -> /run/secrets/%s", name, len(keyBytes), name)
+		log.Printf("derived %s (%d bytes, %s-encoded) -> /run/secrets/%s",
+			d.name, len(keyBytes), d.format, d.name)
 	}
 
-	// 3. Ordinal claim via Consul KV (workers only).
-	//    Coordinator is always ordinal 0 — there's exactly one
-	//    coordinator initially, and Consul itself runs there so the
-	//    catalog can't bootstrap us before we bootstrap it.
+	// 3. Ordinal selection.
+	//    Three sources, in order of preference:
+	//      a. WORKER_ORDINAL env (set by cluster.tf when each worker
+	//         is its own phala_app — sidesteps the Consul-bootstrap
+	//         chicken-and-egg).
+	//      b. Coordinator role: always 0 (single-coordinator phase).
+	//      c. Consul KV CAS (the multi-server / dynamic case once
+	//         phala-cloud#243 lets us pass per-instance env to a
+	//         replicas:N app).
 	ordinal := 0
-	if cfg.Role != "coordinator" {
+	switch {
+	case cfg.WorkerOrdinal > 0:
+		ordinal = cfg.WorkerOrdinal
+		log.Printf("ordinal from WORKER_ORDINAL env: %d", ordinal)
+	case cfg.Role == "coordinator":
+		ordinal = 0
+		log.Printf("ordinal=0 (coordinator role)")
+	default:
 		var err error
 		ordinal, err = claimOrdinal(cfg, info.InstanceID)
 		if err != nil {
@@ -128,6 +151,7 @@ type Config struct {
 	ConsulHTTPAddr   string // 127.0.0.1:<port> on the local agent
 	ExpectedReplicas int    // upper bound on ordinal slots to try
 	ProtocolBases    map[string]int
+	WorkerOrdinal    int // optional, set by cluster.tf per-worker
 }
 
 func loadConfig() *Config {
@@ -136,6 +160,13 @@ func loadConfig() *Config {
 		Role:             mustEnv("ROLE"),
 		ConsulHTTPAddr:   os.Getenv("CONSUL_HTTP_ADDR"), // empty for coordinator
 		ExpectedReplicas: 16,                            // generous upper bound
+	}
+	if v := os.Getenv("WORKER_ORDINAL"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 1 {
+			log.Fatalf("WORKER_ORDINAL invalid: %q", v)
+		}
+		cfg.WorkerOrdinal = n
 	}
 	// PROTOCOL_BASES: JSON object of name -> base port.
 	rawBases := mustEnv("PROTOCOL_BASES")
@@ -253,15 +284,23 @@ func computePorts(bases map[string]int, ordinal int) map[string]int {
 	return out
 }
 
-func writeSecret(path string, b []byte) error {
+// writeSecretEncoded writes b to path with the given encoding. 0444
+// because non-root sibling containers (coturn) need to read these;
+// the trust boundary is the TEE itself, not the unix uid.
+func writeSecretEncoded(path string, b []byte, format string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	// Hex-encode so non-binary-safe consumers (Consul -encrypt-key-file
-	// expects a base64-or-hex string in a file) can use the file
-	// directly.
-	encoded := hex.EncodeToString(b) + "\n"
-	return os.WriteFile(path, []byte(encoded), 0o400)
+	switch format {
+	case "raw":
+		return os.WriteFile(path, b, 0o444)
+	case "hex":
+		return os.WriteFile(path, []byte(hex.EncodeToString(b)), 0o444)
+	case "base64":
+		return os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(b)), 0o444)
+	default:
+		return fmt.Errorf("unknown encoding %q", format)
+	}
 }
 
 func writeJSON(path string, v any) error {

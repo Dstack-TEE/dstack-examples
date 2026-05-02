@@ -9,6 +9,17 @@
 #   - tester             (netshoot)
 
 services:
+  # Keepalive holds the CVM up regardless of bootstrap-secrets / consul /
+  # mesh-conn / sidecar success. Without it, dstack tears the CVM down
+  # the moment any service in the dependency tree fails — and we lose
+  # the ability to SSH in and diagnose. Removable once the stack is
+  # known-good.
+  keepalive:
+    image: alpine:3.19
+    network_mode: host
+    restart: unless-stopped
+    command: ["sh", "-c", "echo KEEPALIVE; sleep infinity"]
+
   bootstrap-secrets:
     image: ${BOOTSTRAP_SECRETS_IMAGE}
     network_mode: host
@@ -17,12 +28,13 @@ services:
       - CLUSTER_NAME=${CLUSTER_NAME}
       - ROLE=worker
       - PROTOCOL_BASES=${PROTOCOL_BASES}
+      - WORKER_ORDINAL=${WORKER_ORDINAL}
       - EXPECTED_REPLICAS=${EXPECTED_REPLICAS}
       - CONSUL_HTTP_ADDR=127.0.0.1:${COORDINATOR_HTTP_PORT}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
-      - run-secrets:/run/secrets
-      - run-instance:/run/instance
+      - /tmp/dstack-runtime/secrets:/run/secrets
+      - /tmp/dstack-runtime/instance:/run/instance
 
   mesh-conn:
     image: ${MESH_CONN_IMAGE}
@@ -33,8 +45,8 @@ services:
       - SIGNALING_URL=http://${COORDINATOR_HOST}:7000
       - TURN_HOST=${COORDINATOR_HOST}
     volumes:
-      - run-secrets:/run/secrets:ro
-      - run-instance:/run/instance:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+      - /tmp/dstack-runtime/instance:/run/instance:ro
     depends_on:
       bootstrap-secrets:
         condition: service_completed_successfully
@@ -60,15 +72,15 @@ services:
           -http-port=$$HTTP \
           -grpc-port=$$GRPC \
           -dns-port=-1 \
-          -encrypt-key-file=/run/secrets/gossip \
+          -encrypt=$$(cat /run/secrets/gossip) \
           -retry-join=127.0.0.1:${COORDINATOR_SERF_PORT} \
           -data-dir=/consul/data \
           -hcl='connect { enabled = true }' \
           -log-level=INFO
     volumes:
       - consul-data:/consul/data
-      - run-secrets:/run/secrets:ro
-      - run-instance:/run/instance:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+      - /tmp/dstack-runtime/instance:/run/instance:ro
     depends_on:
       bootstrap-secrets:
         condition: service_completed_successfully
@@ -89,7 +101,7 @@ services:
         export CONSUL_HTTP_ADDR=127.0.0.1:$$(jq -r '.ports.http_api' /run/instance/info.json)
         exec webdemo
     volumes:
-      - run-instance:/run/instance:ro
+      - /tmp/dstack-runtime/instance:/run/instance:ro
     depends_on: [consul]
 
   sidecar:
@@ -115,7 +127,7 @@ services:
         done
         exec envoy -c /tmp/envoy-bootstrap.json -l info
     volumes:
-      - run-instance:/run/instance:ro
+      - /tmp/dstack-runtime/instance:/run/instance:ro
     depends_on: [webdemo]
 
   tester:
@@ -126,13 +138,8 @@ services:
 
 volumes:
   consul-data:
-  run-secrets:
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: "size=1m,mode=0700"
-  run-instance:
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
-      o: "size=1m,mode=0755"
+
+# Shared state goes through HOST BIND MOUNTS, not named docker
+# volumes. See coordinator.yaml for the full note — short version:
+# named docker volumes don't share data across containers on the
+# dstack platform we run on. Bind mounts to /tmp work fine.
