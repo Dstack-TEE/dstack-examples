@@ -1,52 +1,87 @@
-# Stage 4 — Developer-experience overhaul (revised)
+# Stage 4 — Developer-experience overhaul (revision 2)
 
-## What changed in this revision
+## What's new in this revision
 
-After a first round, four user decisions reshape this plan:
+Three things changed since revision 1:
 
-1. **No new CLI.** Use the official
-   [`Phala-Network/terraform-provider-phala`](https://github.com/Phala-Network/terraform-provider-phala)
-   instead. Avoids "yet another tool" and inherits the standard Terraform
-   workflow (plan / apply / state / etc.).
-2. **No human in the secret path.** Gossip key, TURN secret, and any
-   future shared cluster keys are **derived inside each TEE** via
-   `dstack-sdk getKey()`. The deploy host never holds them in cleartext;
-   they exist only inside the CVMs that derive them.
-3. **Multi-server Consul** is necessary, but landing it is the *next*
-   stage after the dev-experience overhaul. Once shipped, **the
-   service-mesh members discover the hole-punch / control-plane
-   endpoints from Consul itself** — the control plane self-bootstraps
-   via the catalog, removing one more hardcoded address from the
-   topology.
-4. **In-place updates** that preserve CVM disk volumes (Consul KV,
-   webdemo state, future Patroni WAL, etc.).
+1. **Provider shakedown.** Verified `phala_app` create / in-place
+   compose+env update / `replicas: N` / destroy all work; documented
+   two gotchas (`storage_fs` ForceNew, `>=` constraint excluding
+   pre-release). See `stage4-experiments/tf-shakedown/RESULTS.md`.
+2. **dstack's grain is `app -> instance`.** I'd over-modelled stage 4
+   as one `phala_app` per peer (which would require AppAuth-shared
+   identity to bridge them). The cleaner shape is **one `phala_app`
+   per role with `replicas: N`**, leveraging dstack's native
+   instance-bound disk + on-disk identity.
+3. **Per-instance Terraform resources are not (yet) a thing.** Filed
+   [phala-cloud#243](https://github.com/Phala-Network/phala-cloud/issues/243)
+   to ask for `phala_app_instance` + `update_policy` + lifecycle
+   hooks + `auto_healing`, modelled on GCP MIG / k8s StatefulSet.
+   Not a blocker for the architecture testing — see "Rolling updates
+   without per-instance resources" below.
 
-This document supersedes the first revision.
+This revision keeps the four user-decisions from rev-1 (no new CLI,
+TEE-only secrets, multi-server Consul self-discovery, in-place
+updates). What changes is **how identity flows**: cluster-wide via
+`getKey()`, per-instance via on-disk UUID written on first boot.
 
-## The whole stage in one paragraph
+## Whole stage in one paragraph
 
-Operators write **one `cluster.tf`** describing peers, ports, and
-intentions. They `terraform apply`. The Phala provider creates one
-`phala_app` per peer-role; all peers share an `app_id` (via
-`custom_app_id` + a per-cluster nonce), so every TEE derives the same
-gossip / TURN secret via `getKey()` without those keys ever leaving
-the CVM. Workers boot, mesh-conn handshakes through the embedded
-coordinator, Consul forms its cluster. A small `cluster-init` job
-(also a Terraform resource) materialises the intentions in Consul.
-Re-running `apply` after a code change updates the existing CVMs in
-place; volumes survive.
+Operators write **one `cluster.tf`**: a `phala_app` per role
+(`coordinator`, `consul_server`, `worker`) with `replicas: N`. All
+replicas of an app share an `app_id` → all derive identical
+cluster-wide secrets via `getKey()` (gossip key, TURN secret,
+Connect-CA seed). Each replica reads its **per-instance UUID** from
+its persisted disk on boot (writes on first boot). It registers
+itself with Consul as a service tagged with its identity-port set;
+mesh-conn discovers peers from the catalog instead of from a baked-in
+`PEERS_JSON`. `terraform apply` does the deploys; rolling updates run
+through a small `rollout.sh` that shells out to workload-aware drain
+verbs (consul transfer-leader, etc.) before bumping each replica.
+A bootstrap-secrets init container is the only piece that holds key
+material in plaintext, and it does so entirely inside the TEE.
+
+## Why one `phala_app` per role + replicas
+
+dstack's native shape is **app → instance**, where each instance:
+- has its own persisted disk that survives in-place compose updates,
+- carries identity baked into its disk (per the dstack architecture
+  the user described),
+- shares its parent app's `app_id` (so cluster-wide `getKey()`
+  agrees across instances).
+
+This maps 1:1 to GCP MIG / k8s StatefulSet — one resource definition,
+N stateful instances under it. Concretely:
+
+```
+phala_app.coordinator    replicas = 1   (the embedded coturn + signaling
+                                         + Consul server seed; later 3 for HA)
+phala_app.consul_server  replicas = 3   (the quorum)
+phala_app.worker         replicas = N   (services, can scale freely)
+```
+
+vs revision 1 which proposed:
+
+```
+phala_app.ctrl   replicas = 1
+phala_app.w1     replicas = 1
+phala_app.w2     replicas = 1
+phala_app.w3     replicas = 1
+```
+
+(rev-1 needed each peer to be a separate Terraform resource because
+each one needed a different `PEER_ID` env var. Rev-2 doesn't, because
+peer identity comes from on-disk UUID.)
 
 ## `cluster.tf` skeleton
 
-Single source of truth for the cluster. Pure HCL.
-
 ```hcl
 terraform {
-  required_version = ">= 1.6"
+  required_version = ">= 1.5"
   required_providers {
     phala = {
       source  = "phala-network/phala"
-      version = ">= 0.2"
+      version = "0.2.0-beta.2"   # pin exactly; >= excludes pre-release
     }
     consul = {
       source  = "hashicorp/consul"
@@ -57,115 +92,72 @@ terraform {
 
 provider "phala" {}
 
-# ---------- Cluster-wide knobs ----------
+# ---------- Shared cluster knobs ----------
 
 locals {
   cluster_name = "demo"
 
-  # Ordered protocol slots used by mesh-conn.
-  # Index `i` is the same protocol across peers; the per-peer port for
-  # protocol[i] is `base + peer_index`.
-  protocols = [
-    { name = "serf_lan",       base = 18000 },
-    { name = "server_rpc",     base = 18100 },
-    { name = "http_api",       base = 18200 },
-    { name = "grpc",           base = 18300 },
-    { name = "webdemo",        base = 18500 },
-    { name = "sidecar_public", base = 18600 },
-  ]
-
-  peers = [
-    { id = "ctrl", role = "server", index = 0 },
-    { id = "w1",   role = "client", index = 1 },
-    { id = "w2",   role = "client", index = 2 },
-    { id = "w3",   role = "client", index = 3 },
-  ]
-
-  # PEERS_JSON is identical on every peer (validated at mesh-conn
-  # startup; digest must match across all peers' logs).
-  peers_json = jsonencode([
-    for p in local.peers : {
-      id    = p.id
-      ports = [for proto in local.protocols : proto.base + p.index]
-    }
-  ])
-
-  # AppAuth shared across every peer in this cluster: same app-id =>
-  # every peer's getKey() returns the same value. Computed
-  # deterministically from a per-cluster nonce so re-applies are
-  # reproducible.
-  cluster_nonce = 1   # bump to rotate the entire cluster's identity
+  # Protocol slot ports: index i is the same protocol across all
+  # instances; the per-instance port is computed at runtime by
+  # bootstrap-secrets reading the on-disk UUID and looking up its
+  # ordinal in Consul (or, for the very first server, using ordinal 0).
+  protocol_slots = ["serf_lan", "server_rpc", "http_api", "grpc",
+                    "webdemo", "sidecar_public"]
 }
 
-# ---------- Bootstrap coordinator (embedded mode) ----------
+# ---------- Coordinator (= initial Consul server + coturn + signaling) ----------
 
-# The "ctrl" peer doubles as the rendezvous: it runs Consul server +
-# coturn + signaling. Its compose template is different from workers'
-# — see compose/control.yaml.
-resource "phala_app" "ctrl" {
-  name           = "${local.cluster_name}-ctrl"
-  size           = "tdx.small"
-  region         = "US-WEST-1"
-  custom_app_id  = local.cluster_app_id
-  nonce          = local.cluster_nonce
-  docker_compose = file("${path.module}/compose/control.yaml")
+resource "phala_app" "coordinator" {
+  name       = "${local.cluster_name}-coordinator"
+  size       = "tdx.small"
+  region     = "US-WEST-1"
+  disk_size  = 20
+  replicas   = 1                  # bump to 3 in the multi-server stage
+  storage_fs = "zfs"              # MUST pin (provider gotcha #5)
 
-  # Non-secret env. Secrets are derived inside the TEE via getKey().
+  docker_compose = file("${path.module}/compose/coordinator.yaml")
+
   env = {
-    PEER_ID            = "ctrl"
-    ROLE               = "server"
-    PEERS_JSON         = local.peers_json
-    SERF_LAN_PORT      = 18000
-    SERVER_PORT        = 18100
-    HTTP_PORT          = 18200
-    GRPC_PORT          = 18300
-    SIDECAR_PORT       = 18600
-    CTRL_SERF_LAN_PORT = 18000
+    CLUSTER_NAME    = local.cluster_name
+    ROLE            = "coordinator"
+    PROTOCOL_SLOTS  = jsonencode(local.protocol_slots)
   }
 
   wait_for_ready = true
 }
 
-# ---------- Worker peers ----------
+# ---------- Workers ----------
 
 resource "phala_app" "worker" {
-  for_each = { for p in local.peers : p.id => p if p.role == "client" }
+  name       = "${local.cluster_name}-worker"
+  size       = "tdx.small"
+  region     = "US-WEST-1"
+  disk_size  = 20
+  replicas   = 3
+  storage_fs = "zfs"
 
-  name           = "${local.cluster_name}-${each.value.id}"
-  size           = "tdx.small"
-  region         = "US-WEST-1"
-  custom_app_id  = local.cluster_app_id
-  nonce          = local.cluster_nonce
   docker_compose = file("${path.module}/compose/worker.yaml")
 
   env = {
-    PEER_ID             = each.value.id
-    ROLE                = "client"
-    PEERS_JSON          = local.peers_json
-    SERF_LAN_PORT       = 18000 + each.value.index
-    SERVER_PORT         = 18100 + each.value.index
-    HTTP_PORT           = 18200 + each.value.index
-    GRPC_PORT           = 18300 + each.value.index
-    WEBDEMO_PORT        = 18500 + each.value.index
-    SIDECAR_PORT        = 18600 + each.value.index
-    CTRL_SERF_LAN_PORT  = 18000
+    CLUSTER_NAME      = local.cluster_name
+    ROLE              = "worker"
+    PROTOCOL_SLOTS    = jsonencode(local.protocol_slots)
 
-    # Bootstrap-only: the gateway URL of ctrl's signaling broker.
-    # Once Consul catalog is populated, mesh-conn re-resolves the
-    # coordinator endpoints from there.
-    SIGNALING_URL = "http://${phala_app.ctrl.app_id}.${var.gateway_domain}:7000"
-    TURN_HOST     = "${phala_app.ctrl.app_id}.${var.gateway_domain}"
+    # The ONLY bootstrap address — every worker reaches the
+    # coordinator's gateway URL, learns the live cluster from
+    # Consul, then keeps the coordinator list refreshed from the
+    # catalog itself. Adding a second coordinator in the future is a
+    # `replicas` bump, not a cluster.tf rewrite.
+    BOOTSTRAP_COORDINATOR = "${phala_app.coordinator.app_id}.${var.gateway_domain}"
   }
 
-  depends_on = [phala_app.ctrl]
+  depends_on = [phala_app.coordinator]
 }
 
 # ---------- Network policy ----------
 
 provider "consul" {
-  # Reach the cluster's Consul HTTP API through the dstack gateway,
-  # using a Connect-CA-issued client cert (see compose/control.yaml).
-  address = "${phala_app.ctrl.app_id}-18200s.${var.gateway_domain}:443"
+  address = "${phala_app.coordinator.app_id}-18200s.${var.gateway_domain}:443"
   scheme  = "https"
 }
 
@@ -173,217 +165,225 @@ resource "consul_intention" "webdemo_to_webdemo" {
   source_name      = "webdemo"
   destination_name = "webdemo"
   action           = "allow"
-
-  depends_on = [phala_app.ctrl, phala_app.worker]
 }
 ```
 
-The whole topology is **declarative**. To add a peer: append to
-`local.peers`, `terraform apply`. To add an intention: drop another
-`consul_intention` resource. To rotate cluster identity: bump
-`cluster_nonce`, `terraform apply` (CVMs get new app_id, KMS keys
-rotate).
+That's the **whole** topology. Adding a worker is a `replicas` bump
+and re-apply.
 
 ## TEE-only secrets via `getKey()`
 
-The deploy host (and Terraform state) **never** see the gossip key or
-TURN shared secret. They are derived inside each TEE at startup:
+Unchanged from rev-1, except that the bootstrap-secrets init container
+now also handles **per-instance identity**:
 
 ```
-+---------------------------+
-|  CVM (TEE)                |
-|                           |
-|  init container           |
-|   ├── reads /var/run/     |
-|   │       dstack.sock     |
-|   ├── derives secrets:    |
-|   │     gossip = getKey("dstack-mesh:gossip")
-|   │     turn   = getKey("dstack-mesh:turn")
-|   │     ca-pwd = getKey("dstack-mesh:connect-ca")
-|   ├── writes to tmpfs:    |
-|   │     /run/secrets/*    |
-|   └── exits               |
-|                           |
-|  consul, mesh-conn, sidecar
-|  read /run/secrets/* on   |
-|  startup                  |
-+---------------------------+
++----------------------------------------------------------+
+|  CVM (TEE) — every instance, all roles                  |
+|                                                          |
+|  bootstrap-secrets init container                       |
+|   ├── reads /var/run/dstack.sock                        |
+|   │                                                      |
+|   ├── derives cluster-wide secrets (same across every   |
+|   │   instance of an app, because shared app_id):       |
+|   │     gossip = getKey("dstack-mesh:gossip")           |
+|   │     turn   = getKey("dstack-mesh:turn")             |
+|   │     ca-pwd = getKey("dstack-mesh:connect-ca")       |
+|   │                                                      |
+|   ├── reads /var/lib/dstack/instance-id (persisted disk)|
+|   │     - if file exists: load existing UUID            |
+|   │     - if absent (first boot): write a fresh UUID    |
+|   │                                                      |
+|   ├── decides this instance's port slots:               |
+|   │     - asks Consul for current peers tagged          |
+|   │       cluster=<CLUSTER_NAME>;                       |
+|   │     - claims the lowest unused ordinal (atomic via  |
+|   │       Consul KV CAS);                               |
+|   │     - writes the ordinal back to disk so it sticks  |
+|   │       across reboots                                |
+|   │                                                      |
+|   ├── writes derived state to tmpfs:                    |
+|   │     /run/secrets/gossip                             |
+|   │     /run/secrets/turn                               |
+|   │     /run/secrets/ca-seed                            |
+|   │     /run/instance/uuid                              |
+|   │     /run/instance/ordinal                           |
+|   │     /run/instance/ports.json                        |
+|   │                                                      |
+|   └── exits                                             |
+|                                                          |
+|  consul agent + mesh-conn + sidecar + webdemo            |
+|  read /run/secrets/* and /run/instance/* at startup     |
++----------------------------------------------------------+
 ```
 
-Both peers in a cluster share the same `app_id` (via `custom_app_id`
-+ deterministic nonce), so `getKey()` returns the same bytes on every
-peer for the same input string. No coordination needed; no shared
-secret is ever transmitted.
+**Key property: the deploy host (and Terraform state) never see any
+secret material**, never see any per-instance identity. The init
+container is the keystone.
 
-The init container is a tiny Go program (~100 LoC). Adds one new
-service to each compose:
+## Peer discovery via Consul (no `PEERS_JSON` env)
 
-```yaml
-services:
-  bootstrap-secrets:
-    image: ${BOOTSTRAP_IMAGE}
-    network_mode: host
-    volumes:
-      - /var/run/dstack.sock:/var/run/dstack.sock:ro
-      - run-secrets:/run/secrets
-    restart: "no"          # one-shot; tmpfs persists for sibling services
-  consul:
-    # ...
-    volumes:
-      - run-secrets:/run/secrets:ro
-    environment:
-      - GOSSIP_KEY_FILE=/run/secrets/gossip   # consul agent supports
-                                              # reading -encrypt from a
-                                              # file; same for TLS keys
-volumes:
-  run-secrets:
-    driver: local
-    driver_opts:
-      type: tmpfs
-      device: tmpfs
+Each instance registers itself with the local Consul agent on boot:
+
+```json
+{
+  "Name": "mesh-peer",
+  "ID": "mesh-peer-${UUID}",
+  "Tags": [
+    "cluster=demo",
+    "role=worker",
+    "ordinal=2",
+    "ports=18002,18102,18202,18302,18502,18602"
+  ],
+  "Port": 18002
+}
 ```
 
-(Consul agent has `-encrypt` flag — but reading from a file is
-supported via `-encrypt-key-file` or HCL `encrypt = "@/run/secrets/gossip"`.)
+mesh-conn polls `/v1/health/service/mesh-peer?passing=true`, parses
+the tags into the peers list, opens / tears down ICE+yamux pairs as
+peers come and go. No baked-in `PEERS_JSON`. **Adding a peer is just
+a `replicas` bump — no cluster.tf rewrite.**
 
-The bootstrap container also generates the **Consul Connect CA root
-seed** the same way — so the mTLS CA is itself rooted in a TEE-derived
-secret, not in a Terraform-provided value.
+The PEERS_JSON validation we shipped in punch-list #4 still applies,
+just at runtime against the Consul-fetched view rather than env JSON.
 
-## Multi-server Consul as the next stage (and what it unlocks)
+## Rolling updates without per-instance resources
 
-When we add servers (next stage), the `phala_app.ctrl` resource gets
-`replicas = 3`, or we split into three named control resources. All
-three share the same compose hash and `app_id`, so KMS-derived
-secrets remain identical and Connect CA still bootstraps from
-`getKey("dstack-mesh:connect-ca")` on any one of them and replicates
-via Raft.
+Until phala-cloud#243 lands `phala_app_instance` + `update_policy`,
+in-place updates touch all replicas in unspecified order. That's
+fine for stateless workers, dangerous for the Consul quorum. The
+workaround:
 
-That gives us a **self-discovering control plane**:
+`rollout.sh` lives next to `cluster.tf`:
 
-1. Each control CVM registers itself with the cluster as a service:
-   - service `mesh-coordinator`, address `127.0.0.1:7000` (signaling)
-   - service `mesh-turn`, address `127.0.0.1:3478`
-2. New peers booting up know **one** initial control endpoint
-   (hardcoded in cluster.tf bootstrap env). After their mesh-conn
-   joins via that endpoint and Consul has gossiped, they call
-   `consul.health.service("mesh-coordinator", passing_only: true)`
-   and update their own coordinator list to **all** healthy control
-   nodes. From then on, mesh-conn rotates coordinators on its own.
-3. Adding/removing a control node is a Terraform diff on
-   `replicas`. New peers immediately discover it via Consul; existing
-   peers learn through gossip-propagated catalog updates.
+```
+1. terraform plan -refresh-only         # see what would change
+2. for app in worker, coordinator (last):
+     for each replica:
+         (a) drain workload-aware:
+                 worker:      consul services deregister  + drain Envoy
+                 coordinator: consul operator raft transfer-leader (if leader)
+         (b) take snapshot for rollback
+                 consul snapshot save snap-${app}-${replica}.snap
+         (c) bump that single replica's image / env via the API
+                 (today: opaque app-level update; we wait for Phala's
+                  per-instance API or use `phala cvms restart <id>`
+                  in a controlled order)
+         (d) wait for green:
+                 consul members | check this replica is alive
+                 raft commit_index advancing
+                 sidecar ready listeners loaded
+         (e) min-ready: 30s of green before next replica
+3. terraform apply                       # converge state
+```
 
-The structural payoff: **the topology of the rendezvous infra is
-itself a service-mesh-managed concern.** No external configuration,
-no client-side hardcoding beyond the bootstrap.
+Until #243 lands the `update_policy` block, this rollout is the
+gating layer. Once #243 lands, most of step 2 collapses into the
+`update_policy` declarative form.
 
-## In-place updates that preserve data
+## Compose templates
 
-Phala apps' disk volumes survive compose updates (this is what
-"upgrade an existing CVM" is for in `phala deploy --cvm-id`). The
-provider exposes this through Terraform's standard update path — a
-diff in `docker_compose` or `env` triggers an in-place patch, NOT a
-recreate.
+Two templates, frozen between revisions (compose hash is the audit
+surface):
 
-Concretely:
+- **`compose/coordinator.yaml`**: bootstrap-secrets, mesh-conn,
+  consul (server, `-bootstrap-expect=1` initially; `-expect=3` when
+  multi-server), coturn, signaling, optional webdemo for symmetry.
+- **`compose/worker.yaml`**: bootstrap-secrets, mesh-conn, consul
+  (client), webdemo, sidecar (Envoy), tester (development only).
 
-- `phala_app.ctrl` and each `phala_app.worker` keep a stable
-  identity across `terraform apply` cycles unless something
-  identity-bound changes (`custom_app_id`, `nonce`, `kms`, ...). The
-  underlying CVM's disk volumes — Consul Raft state, KV, sidecar
-  certs, future Patroni WAL — are untouched.
-- Compose / env changes propagate by stopping the affected
-  containers, swapping to the new image / env, restarting. The
-  container's volumes (`consul-data`, etc.) are remounted unchanged.
-- For **rolling control-plane updates** (when we have 3 servers
-  next stage), Terraform's `create_before_destroy` lifecycle on the
-  set of control resources, combined with an explicit `terraform
-  apply -target=phala_app.ctrl[N]` per node, gives a per-node
-  rollout. `consul info` health-checks gate each step.
+A revision bumps the file path AND `cluster_nonce` together so the
+change is intentional.
 
-What this rules out:
+## `bootstrap-secrets` init container — design sketch
 
-- **Bumping `custom_app_id` or `nonce`** rotates the cluster's
-  identity. KMS keys change; Connect CA re-roots; gossip key
-  changes. Useful for incident response, but disruptive — should
-  always be a deliberate operator action, not an accidental side
-  effect of editing the file.
-- **Changing the compose template structure** (e.g., new services,
-  different volumes) is fine for env / image bumps but a fundamental
-  rewrite is closer to a fresh deploy than an update.
+A small Go program (~150 LoC) that:
 
-## Compose template story
+1. Imports `github.com/Dstack-TEE/dstack-sdk-go` for `getKey()`.
+2. On startup:
+   - Derives `gossip`, `turn`, `ca-seed` keys (32 bytes each, KDF'd
+     from `getKey("dstack-mesh:" + role)`).
+   - Writes them to `/run/secrets/{name}` (mode 0400, tmpfs).
+3. Reads or creates `/var/lib/dstack/instance-id`:
+   - If file exists: load UUID, log "instance %s rejoining".
+   - Else: generate UUID v7, write atomically, log "instance %s
+     fresh".
+4. Bootstraps cluster joining (worker only):
+   - Connects to local Consul agent (which is up because consul
+     starts before bootstrap-secrets via `depends_on` — though it
+     blocks on bootstrap-secrets's tmpfs being ready... so an
+     ordering puzzle: probably Consul should start FIRST without
+     gossip-key, bootstrap-secrets writes the key, Consul reads
+     the key on next startup. Or Consul reads the key from a
+     file and we delay Consul's start with a depends_on healthcheck.
+     Defer the resolution to implementation.).
+   - Asks Consul for current `cluster=<X>` peers; claims lowest
+     unused ordinal via CAS on `cluster/<X>/ordinals`.
+   - Writes ordinal + computed ports to `/run/instance/`.
+5. Exits cleanly so siblings can start.
 
-Two templates:
+## Compose-hash stability
 
-- `compose/control.yaml` — runs `mesh-conn`, `consul agent -server`,
-  `coturn`, `signaling`, `bootstrap-secrets`, plus the `webdemo` if
-  we want symmetry with workers.
-- `compose/worker.yaml` — runs `mesh-conn`, `consul agent` (client),
-  `webdemo`, `sidecar` (Envoy), `bootstrap-secrets`.
+`custom_app_id` + `nonce` aren't strictly necessary for our use case
+(KMS auto-issues an `app_id` we reference via `phala_app.x.app_id`),
+but pinning them ensures **the same `app_id` across `terraform
+destroy` + recreate cycles** — useful for incident replay /
+identity rotation control. cluster.tf exposes a `cluster_nonce`
+variable; bumping it explicitly rotates the entire cluster's TEE
+identity.
 
-Templates are **frozen** between revisions. Their compose hash is
-the audit surface for what runs in the TEE. A revision bumps the
-template path and `cluster_nonce` together so the change is
-intentional.
+## Open items to verify before code lands
 
-## "Embedded vs external" coordinator — still in the plan
+Carrying forward from rev-1, plus new ones:
 
-The `compose/control.yaml` includes `coturn` + `signaling`. That's
-embedded mode. Requires Phala admin to enable UDP ingress on the
-control app (3478/UDP, 49152-49999/UDP — ports configurable).
+- [ ] **Disk persistence across in-place updates** — the keystone of
+  this whole design. Test in `stage4-experiments/disk-persistence/`
+  before any stage-4 code lands. (In progress now.)
+- [ ] **Container ordering**: Consul reads gossip key from a file
+  written by bootstrap-secrets; need a clean way to gate Consul's
+  start until bootstrap-secrets has finished. Compose `depends_on`
+  with `condition: service_completed_successfully` is the right
+  shape (bootstrap-secrets is `restart: "no"`).
+- [ ] **Consul KV CAS for ordinal claim** — verify the API behaviour
+  for the lowest-unused-ordinal pattern; or consider per-instance
+  fixed ordinals derived from instance UUID hash modulo replica
+  count (less drift-prone, no CAS needed).
+- [ ] **`encrypted_env`** in the Phala provider — does it
+  client-side-encrypt? Even though our env contains no secrets in
+  rev-2, knowing the answer matters for at-rest visibility.
+- [ ] **Phala admin enables UDP ingress** on the coordinator app
+  for embedded mode. Until enabled, default coordinator is
+  external-host mode (separate compose template).
 
-Until that switch is flipped (or for clusters that prefer external
-infra), an alternate `compose/control-external.yaml` strips the
-coturn + signaling services and the operator brings up a coordinator
-host themselves. cluster.tf chooses which to mount via a
-`coordinator_mode` variable. No code changes elsewhere.
+## Punch-list status (from ROBUSTNESS.md)
 
-## Punch-list mapping
-
-The original ROBUSTNESS.md punch list folds into stage 4 cleanly:
-
-- ✅ #1 (reconnect bug) — already shipped pre-stage-4.
-- ✅ #2 gossip key — already shipped, but stage 4 moves it to
-   TEE-derived (no human in path).
-- ⏳ #3 multi-server Consul — explicit next-stage after #4.
-- ✅ #4 PEERS_JSON validation — already shipped.
+- ✅ #1 reconnect bug — shipped.
+- ✅ #2 gossip key — shipped (env-passed); rev-2 moves to TEE-derived.
+- ⏳ #3 multi-server Consul — explicit "next-stage-after-stage-4".
+- ✅ #4 PEERS_JSON validation — shipped (becomes runtime catalog
+  validation in rev-2).
 - ⏳ #5 real registry — stage 4 default (no more `ttl.sh`).
 - ⏳ #6 two coordinators + signed signalling — covered by
-   self-discovery once multi-server lands.
+  multi-server self-discovery.
 - ⏳ #7 mesh-conn integration test — stage 4 CI.
 - ⏳ #8 metrics — stage 4 follow-up.
 
-## What's actually being built in stage 4
+## Migration
 
-In rough order:
+Stages 0–3b stay as historical reference (each demonstrates one
+idea in isolation). Stage 4 is the integrated product:
 
-1. `compose/control.yaml` and `compose/worker.yaml` — frozen
-   templates, replacing the per-stage forks (stage1/stage2/stage3a/
-   stage3b composes become reference-only).
-2. `bootstrap-secrets` init container (~100 LoC Go, mounts
-   dstack.sock, derives keys, writes tmpfs).
-3. `cluster.tf` example pinned to one specific cluster ("demo"),
-   plus a Terraform module so other clusters reuse the topology
-   logic without copy-paste.
-4. CI: a Terraform-plan + `mesh-conn` integration test running
-   peers in containers locally (no CVMs needed for everything below
-   the network).
-5. Migration note in repo README: "stages 0–3b are the
-   step-by-step build-up; stage 4 is the integrated product."
-6. **Smoke test**: `terraform apply` on a fresh AWS-style account,
-   wait for `consul members` to be all-alive, hit `/all` from a
-   worker — same checks we've been running by hand.
-
-## Open items
-
-- The Phala Terraform provider is at `0.2.0-beta.1` as of the
-  March 2026 release we found. Need to confirm `replicas`,
-  `encrypted_env`, in-place env update, and `custom_app_id` work
-  the way the schema implies before betting the dev-ex on it.
-- Embedded coturn + UDP ingress is admin-gated on Phala. Until
-  enabled, default cluster.tf uses external coordinator mode.
-- The "self-discovering coordinator" loop in mesh-conn (peer asks
-  Consul for the live coordinator list) is a small mesh-conn
-  addition (~80 LoC) — fits in the multi-server stage, not stage 4.
+```
+consul-postgres-ha/
+  stage0-3b/                 # historical reference, frozen
+  stage4/
+    cluster.tf               # the example deployment
+    compose/
+      coordinator.yaml
+      worker.yaml
+    bootstrap-secrets/       # init container source
+    rollout.sh               # workload-aware update driver
+    README.md
+  stage4-experiments/        # one-off shakedowns
+    tf-shakedown/
+    disk-persistence/        # in-progress
+```
