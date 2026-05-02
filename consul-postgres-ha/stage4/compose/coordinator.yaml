@@ -1,0 +1,139 @@
+# Stage 4 — coordinator compose template.
+#
+# A "coordinator" CVM bundles:
+#   - bootstrap-secrets (init container, runs once, populates tmpfs)
+#   - mesh-conn         (UDP+TCP port-forwarder over ICE+yamux)
+#   - consul agent      (server, -bootstrap-expect=1 initially)
+#   - signaling         (HTTP broker for ICE candidate exchange)
+#   - coturn            (STUN+TURN, requires Phala UDP ingress)
+#
+# Identity flow: bootstrap-secrets reads dstack SDK Info(),
+# derives cluster-wide secrets via getKey(), writes to /run/secrets
+# tmpfs. Sibling services depend on it via service_completed_successfully.
+#
+# Per-CVM secrets policy: nothing on the persisted disk holds secret
+# material. /run/secrets/* is tmpfs (gone on reboot, re-derived on
+# next boot). /consul/data IS persisted but only contains catalog,
+# KV, and Raft state (not the gossip key).
+
+services:
+  bootstrap-secrets:
+    image: ${BOOTSTRAP_SECRETS_IMAGE}
+    network_mode: host
+    restart: "no"
+    environment:
+      - CLUSTER_NAME=${CLUSTER_NAME}
+      - ROLE=coordinator
+      - PROTOCOL_BASES=${PROTOCOL_BASES}
+      # CONSUL_HTTP_ADDR omitted — coordinator skips ordinal claim
+      # because it IS the Consul server (chicken-and-egg).
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      - run-secrets:/run/secrets
+      - run-instance:/run/instance
+
+  mesh-conn:
+    image: ${MESH_CONN_IMAGE}
+    network_mode: host
+    restart: on-failure
+    environment:
+      - PEERS_JSON=${PEERS_JSON}
+      - SIGNALING_URL=http://127.0.0.1:7000
+      - TURN_HOST=127.0.0.1
+      # TURN_SHARED_SECRET read from /run/secrets/turn (file)
+    volumes:
+      - run-secrets:/run/secrets:ro
+      - run-instance:/run/instance:ro
+    depends_on:
+      bootstrap-secrets:
+        condition: service_completed_successfully
+
+  signaling:
+    image: ${SIGNALING_IMAGE}
+    network_mode: host
+    restart: unless-stopped
+    command: ["-mode=signaling", "-addr=:7000"]
+    depends_on:
+      bootstrap-secrets:
+        condition: service_completed_successfully
+
+  coturn:
+    image: coturn/coturn:4.6
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        TURN_SECRET=$$(cat /run/secrets/turn)
+        exec turnserver -n \
+          --realm=${CLUSTER_NAME} \
+          --listening-port=3478 \
+          --tls-listening-port=5349 \
+          --min-port=49152 --max-port=49999 \
+          --use-auth-secret \
+          --static-auth-secret=$$TURN_SECRET \
+          --no-cli --no-multicast-peers \
+          --log-file=stdout --simple-log --fingerprint
+    volumes:
+      - run-secrets:/run/secrets:ro
+    depends_on:
+      bootstrap-secrets:
+        condition: service_completed_successfully
+
+  consul:
+    image: hashicorp/consul:1.19
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        # Ports come from /run/instance/info.json (computed by
+        # bootstrap-secrets from PROTOCOL_BASES + ordinal).
+        SERF=$$(jq -r '.ports.serf_lan'   /run/instance/info.json)
+        RPC=$$(jq -r  '.ports.server_rpc' /run/instance/info.json)
+        HTTP=$$(jq -r '.ports.http_api'   /run/instance/info.json)
+        GRPC=$$(jq -r '.ports.grpc'       /run/instance/info.json)
+        exec consul agent \
+          -server -bootstrap-expect=1 -ui \
+          -node=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json) \
+          -datacenter=${CLUSTER_NAME} \
+          -bind=127.0.0.1 -advertise=127.0.0.1 -client=127.0.0.1 \
+          -serf-lan-port=$$SERF \
+          -server-port=$$RPC \
+          -http-port=$$HTTP \
+          -grpc-port=$$GRPC \
+          -dns-port=-1 \
+          -encrypt-key-file=/run/secrets/gossip \
+          -data-dir=/consul/data \
+          -hcl='connect { enabled = true }' \
+          -log-level=INFO
+    volumes:
+      - consul-data:/consul/data
+      - run-secrets:/run/secrets:ro
+      - run-instance:/run/instance:ro
+    depends_on:
+      bootstrap-secrets:
+        condition: service_completed_successfully
+
+  tester:
+    image: nicolaka/netshoot:latest
+    network_mode: host
+    command: ["sleep", "infinity"]
+    depends_on: [consul, mesh-conn]
+
+volumes:
+  consul-data:
+  # tmpfs volumes for derived state — gone on reboot, re-derived
+  # by bootstrap-secrets on next boot. Never on the persisted disk.
+  run-secrets:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,mode=0700"
+  run-instance:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,mode=0755"

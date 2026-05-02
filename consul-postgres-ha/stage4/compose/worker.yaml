@@ -1,0 +1,138 @@
+# Stage 4 — worker compose template.
+#
+# A "worker" CVM bundles:
+#   - bootstrap-secrets  (init container)
+#   - mesh-conn          (UDP+TCP port-forwarder)
+#   - consul agent       (client, joins via mesh-conn → coordinator)
+#   - webdemo            (the actual workload — example service)
+#   - sidecar            (Envoy, for Consul Connect mTLS)
+#   - tester             (netshoot)
+
+services:
+  bootstrap-secrets:
+    image: ${BOOTSTRAP_SECRETS_IMAGE}
+    network_mode: host
+    restart: "no"
+    environment:
+      - CLUSTER_NAME=${CLUSTER_NAME}
+      - ROLE=worker
+      - PROTOCOL_BASES=${PROTOCOL_BASES}
+      - EXPECTED_REPLICAS=${EXPECTED_REPLICAS}
+      - CONSUL_HTTP_ADDR=127.0.0.1:${COORDINATOR_HTTP_PORT}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      - run-secrets:/run/secrets
+      - run-instance:/run/instance
+
+  mesh-conn:
+    image: ${MESH_CONN_IMAGE}
+    network_mode: host
+    restart: on-failure
+    environment:
+      - PEERS_JSON=${PEERS_JSON}
+      - SIGNALING_URL=http://${COORDINATOR_HOST}:7000
+      - TURN_HOST=${COORDINATOR_HOST}
+    volumes:
+      - run-secrets:/run/secrets:ro
+      - run-instance:/run/instance:ro
+    depends_on:
+      bootstrap-secrets:
+        condition: service_completed_successfully
+
+  consul:
+    image: hashicorp/consul:1.19
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        SERF=$$(jq -r '.ports.serf_lan'   /run/instance/info.json)
+        RPC=$$(jq -r  '.ports.server_rpc' /run/instance/info.json)
+        HTTP=$$(jq -r '.ports.http_api'   /run/instance/info.json)
+        GRPC=$$(jq -r '.ports.grpc'       /run/instance/info.json)
+        exec consul agent \
+          -node=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json) \
+          -datacenter=${CLUSTER_NAME} \
+          -bind=127.0.0.1 -advertise=127.0.0.1 -client=127.0.0.1 \
+          -serf-lan-port=$$SERF \
+          -server-port=$$RPC \
+          -http-port=$$HTTP \
+          -grpc-port=$$GRPC \
+          -dns-port=-1 \
+          -encrypt-key-file=/run/secrets/gossip \
+          -retry-join=127.0.0.1:${COORDINATOR_SERF_PORT} \
+          -data-dir=/consul/data \
+          -hcl='connect { enabled = true }' \
+          -log-level=INFO
+    volumes:
+      - consul-data:/consul/data
+      - run-secrets:/run/secrets:ro
+      - run-instance:/run/instance:ro
+    depends_on:
+      bootstrap-secrets:
+        condition: service_completed_successfully
+      mesh-conn:
+        condition: service_started
+
+  webdemo:
+    image: ${WEBDEMO_IMAGE}
+    network_mode: host
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        export PEER_ID=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json)
+        export WEBDEMO_PORT=$$(jq -r '.ports.webdemo'         /run/instance/info.json)
+        export SIDECAR_PORT=$$(jq -r '.ports.sidecar_public'  /run/instance/info.json)
+        export CONSUL_HTTP_ADDR=127.0.0.1:$$(jq -r '.ports.http_api' /run/instance/info.json)
+        exec webdemo
+    volumes:
+      - run-instance:/run/instance:ro
+    depends_on: [consul]
+
+  sidecar:
+    image: ${SIDECAR_IMAGE}
+    network_mode: host
+    restart: on-failure
+    command:
+      - |
+        set -e
+        PEER_ID=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json)
+        HTTP_PORT=$$(jq -r '.ports.http_api' /run/instance/info.json)
+        GRPC_PORT=$$(jq -r '.ports.grpc'    /run/instance/info.json)
+        ORDINAL=$$(jq -r '.ordinal'         /run/instance/info.json)
+        ADMIN_PORT=$$((19100 + ORDINAL))
+        until consul connect envoy \
+                -sidecar-for=webdemo-$$PEER_ID \
+                -admin-bind=127.0.0.1:$$ADMIN_PORT \
+                -bootstrap \
+                -http-addr=127.0.0.1:$$HTTP_PORT \
+                -grpc-addr=127.0.0.1:$$GRPC_PORT \
+                > /tmp/envoy-bootstrap.json 2>/dev/null; do
+          echo "waiting for sidecar registration..."; sleep 3
+        done
+        exec envoy -c /tmp/envoy-bootstrap.json -l info
+    volumes:
+      - run-instance:/run/instance:ro
+    depends_on: [webdemo]
+
+  tester:
+    image: nicolaka/netshoot:latest
+    network_mode: host
+    command: ["sleep", "infinity"]
+    depends_on: [mesh-conn, consul, webdemo]
+
+volumes:
+  consul-data:
+  run-secrets:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,mode=0700"
+  run-instance:
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m,mode=0755"

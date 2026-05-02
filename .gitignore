@@ -1,17 +1,21 @@
+
 *~
 .claude/
-consul-postgres-ha/.local/
-
 # compiled go binaries
+consul-postgres-ha/.local/
 consul-postgres-ha/phase0/icetest/icetest
 consul-postgres-ha/stage1/mesh-conn/mesh-conn
 consul-postgres-ha/stage3a/webdemo/webdemo
 consul-postgres-ha/stage3b/webdemo/webdemo
-
-# terraform local state
+consul-postgres-ha/stage4/bootstrap-secrets/bootstrap-secrets
+consul-postgres-ha/stage4/cluster-example/.terraform/
+consul-postgres-ha/stage4/cluster-example/.terraform.lock.hcl
+consul-postgres-ha/stage4/cluster-example/terraform.tfstate*
+consul-postgres-ha/stage4/cluster-example/terraform.tfvars
 consul-postgres-ha/stage4-experiments/**/.terraform/
 consul-postgres-ha/stage4-experiments/**/.terraform.lock.hcl
 consul-postgres-ha/stage4-experiments/**/terraform.tfstate
 consul-postgres-ha/stage4-experiments/**/terraform.tfstate.backup
 consul-postgres-ha/stage4-experiments/**/terraform.tfvars
-consul-postgres-ha/stage4/bootstrap-secrets/bootstrap-secrets
+consul-postgres-ha/stage4/mesh-conn/mesh-conn
+# terraform local state

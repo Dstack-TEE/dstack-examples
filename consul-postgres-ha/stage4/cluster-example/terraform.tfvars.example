@@ -1,0 +1,13 @@
+# Copy to terraform.tfvars and fill in.
+
+cluster_name           = "demo"
+worker_replicas        = 3
+gateway_domain         = "dstack-pha-prod5.phala.network"
+
+# Image refs. For experiments use ttl.sh; for production use a
+# permanent registry (GHCR, Phala internal, etc.).
+bootstrap_secrets_image = "ttl.sh/dstack-bootstrap-secrets-XXXXXXXX:24h"
+mesh_conn_image         = "ttl.sh/dstack-mesh-conn-XXXXXXXX:24h"
+signaling_image         = "ttl.sh/dstack-icetest-XXXXXXXX:24h"   # signaling mode
+webdemo_image           = "ttl.sh/dstack-webdemo3b-XXXXXXXX:24h"
+sidecar_image           = "ttl.sh/dstack-consul-sidecar-XXXXXXXX:24h"
