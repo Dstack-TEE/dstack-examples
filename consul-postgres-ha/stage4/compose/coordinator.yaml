@@ -39,9 +39,12 @@ services:
     restart: on-failure
     environment:
       - PEERS_JSON=${PEERS_JSON}
-      - SIGNALING_URL=http://127.0.0.1:7000
-      - TURN_HOST=127.0.0.1
-      # TURN_SHARED_SECRET read from /run/secrets/turn (file)
+      # External coordinator path — coordinator's mesh-conn uses the
+      # same Vultr coturn + signaling that workers do, so peer-pair
+      # ICE rendezvous happens in a single shared place.
+      - SIGNALING_URL=${SIGNALING_URL}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
     volumes:
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
       - /tmp/dstack-runtime/instance:/run/instance:ro
@@ -106,7 +109,6 @@ services:
           -http-port=$$HTTP \
           -grpc-port=$$GRPC \
           -dns-port=-1 \
-          -encrypt=$$(cat /run/secrets/gossip) \
           -data-dir=/consul/data \
           -hcl='connect { enabled = true }' \
           -log-level=INFO

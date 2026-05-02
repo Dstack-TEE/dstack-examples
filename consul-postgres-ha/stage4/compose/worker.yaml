@@ -42,8 +42,9 @@ services:
     restart: on-failure
     environment:
       - PEERS_JSON=${PEERS_JSON}
-      - SIGNALING_URL=http://${COORDINATOR_HOST}:7000
-      - TURN_HOST=${COORDINATOR_HOST}
+      - SIGNALING_URL=${SIGNALING_URL}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
     volumes:
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
       - /tmp/dstack-runtime/instance:/run/instance:ro
@@ -72,7 +73,6 @@ services:
           -http-port=$$HTTP \
           -grpc-port=$$GRPC \
           -dns-port=-1 \
-          -encrypt=$$(cat /run/secrets/gossip) \
           -retry-join=127.0.0.1:${COORDINATOR_SERF_PORT} \
           -data-dir=/consul/data \
           -hcl='connect { enabled = true }' \

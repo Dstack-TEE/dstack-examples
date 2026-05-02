@@ -45,6 +45,16 @@ variable "signaling_image"         { type = string }
 variable "webdemo_image"           { type = string }
 variable "sidecar_image"           { type = string }
 
+# External coordinator (Vultr coturn + signaling box) used until
+# Phala admin enables UDP ingress on dstack apps. coordinator's own
+# coturn + signaling services in compose still run but are unused.
+variable "external_coordinator_host" { type = string }
+variable "external_signaling_url"    { type = string }
+variable "external_turn_secret" {
+  type      = string
+  sensitive = true
+}
+
 # ---------- Protocol port plan ----------
 
 locals {
@@ -106,6 +116,9 @@ resource "phala_app" "coordinator" {
     CLUSTER_NAME             = var.cluster_name
     PROTOCOL_BASES           = local.protocol_bases_json
     PEERS_JSON               = local.peers_json
+    SIGNALING_URL            = var.external_signaling_url
+    TURN_HOST                = var.external_coordinator_host
+    TURN_SHARED_SECRET       = var.external_turn_secret
     BOOTSTRAP_SECRETS_IMAGE  = var.bootstrap_secrets_image
     MESH_CONN_IMAGE          = var.mesh_conn_image
     SIGNALING_IMAGE          = var.signaling_image
@@ -150,9 +163,11 @@ resource "phala_app" "worker" {
     PEERS_JSON               = local.peers_json
     WORKER_ORDINAL           = tostring(each.value)
     EXPECTED_REPLICAS        = var.worker_replicas + 1
-    COORDINATOR_HOST         = "${phala_app.coordinator.app_id}.${var.gateway_domain}"
     COORDINATOR_SERF_PORT    = local.coordinator_serf_port
     COORDINATOR_HTTP_PORT    = local.coordinator_http_port
+    SIGNALING_URL            = var.external_signaling_url
+    TURN_HOST                = var.external_coordinator_host
+    TURN_SHARED_SECRET       = var.external_turn_secret
     BOOTSTRAP_SECRETS_IMAGE  = var.bootstrap_secrets_image
     MESH_CONN_IMAGE          = var.mesh_conn_image
     WEBDEMO_IMAGE            = var.webdemo_image

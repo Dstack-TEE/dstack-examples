@@ -127,10 +127,23 @@ func readSelfID() string {
 	return mustEnv("PEER_ID")
 }
 
-// readTurnSecret prefers /run/secrets/turn (stage-4 TEE-derived) over
-// TURN_SHARED_SECRET env (stage-1 compat). The file content is a hex
-// string written by bootstrap-secrets.
+// readTurnSecret resolves the TURN shared secret in priority order:
+//
+//   1. TURN_SHARED_SECRET env (set when using an external coturn whose
+//      static-auth-secret was configured out-of-band — e.g. the Vultr
+//      coordinator path). When this is present it MUST win, because
+//      the local TEE-derived value won't match what coturn is checking
+//      against.
+//   2. /run/secrets/turn (stage-4 TEE-derived path; matches the
+//      embedded coordinator's coturn which reads the same file).
+//
+// Order matters: env beats file so that "use external coturn" can be
+// configured purely at the cluster.tf layer.
 func readTurnSecret() string {
+	if v := os.Getenv("TURN_SHARED_SECRET"); v != "" {
+		log.Printf("turn shared secret loaded from TURN_SHARED_SECRET env (%d bytes)", len(v))
+		return v
+	}
 	if b, err := os.ReadFile("/run/secrets/turn"); err == nil {
 		s := strings.TrimSpace(string(b))
 		if s != "" {
@@ -138,7 +151,7 @@ func readTurnSecret() string {
 			return s
 		}
 	}
-	return os.Getenv("TURN_SHARED_SECRET")
+	return ""
 }
 
 // validatePeers fails fast on any silent mis-configuration that would
@@ -617,45 +630,72 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 	// pollLoop will deliver messages here from now on.
 	sess := installSession(remoteID, agent)
 
+	// dialCtx is cancelled either by ICE state Failed/Closed (terminal
+	// pion/ice states; agent.Dial/Accept won't recover from them on its
+	// own and would otherwise block forever) or by the 60s deadline below.
+	// runPeerLink retries the whole dialAndPump after we return — without
+	// the cancel, a single ICE failure wedges this peer slot indefinitely.
+	dialCtx, cancelDial := context.WithCancel(context.Background())
+	defer cancelDial()
+
+	closeAgent := func() {
+		// pion's Close is idempotent; safe in defers and callbacks both.
+		_ = agent.Close()
+	}
+
 	if err := agent.OnCandidate(func(c ice.Candidate) {
 		if c == nil {
 			return
 		}
 		publish(cfg, remoteID, "candidate", c.Marshal())
 	}); err != nil {
+		closeAgent()
 		return nil, err
 	}
 	if err := agent.OnConnectionStateChange(func(s ice.ConnectionState) {
 		log.Printf("[%s] ice state: %s", remoteID, s)
+		if s == ice.ConnectionStateFailed || s == ice.ConnectionStateClosed {
+			cancelDial()
+		}
 	}); err != nil {
+		closeAgent()
 		return nil, err
 	}
 
 	localUfrag, localPwd, err := agent.GetLocalUserCredentials()
 	if err != nil {
+		closeAgent()
 		return nil, err
 	}
 	publish(cfg, remoteID, "auth", localUfrag+":"+localPwd)
 
 	if err := agent.GatherCandidates(); err != nil {
+		closeAgent()
 		return nil, err
 	}
 
 	var remote [2]string
 	select {
 	case remote = <-sess.authCh:
-	case <-time.After(10 * time.Minute):
+	case <-time.After(60 * time.Second):
+		closeAgent()
 		return nil, fmt.Errorf("timeout waiting for remote auth from %s", remoteID)
 	}
 
-	ctx := context.Background()
+	// 60s is comfortably longer than pion's default 30s connectivity-check
+	// window. If Dial/Accept hasn't succeeded by then, ICE has already
+	// transitioned to Failed and the state callback above cancelled the ctx.
+	dialTimer := time.AfterFunc(60*time.Second, cancelDial)
+	defer dialTimer.Stop()
+
 	var conn *ice.Conn
 	if cfg.SelfID < remoteID {
-		conn, err = agent.Dial(ctx, remote[0], remote[1])
+		conn, err = agent.Dial(dialCtx, remote[0], remote[1])
 	} else {
-		conn, err = agent.Accept(ctx, remote[0], remote[1])
+		conn, err = agent.Accept(dialCtx, remote[0], remote[1])
 	}
 	if err != nil {
+		closeAgent()
 		return nil, err
 	}
 

@@ -5,7 +5,7 @@
 FROM hashicorp/consul:1.19 AS consul-bin
 
 FROM envoyproxy/envoy:contrib-v1.30-latest
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl jq && \
     rm -rf /var/lib/apt/lists/*
 COPY --from=consul-bin /bin/consul /usr/local/bin/consul
 ENTRYPOINT ["/bin/sh", "-c"]
