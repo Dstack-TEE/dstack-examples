@@ -14,3 +14,4 @@ consul-postgres-ha/stage4-experiments/**/.terraform.lock.hcl
 consul-postgres-ha/stage4-experiments/**/terraform.tfstate
 consul-postgres-ha/stage4-experiments/**/terraform.tfstate.backup
 consul-postgres-ha/stage4-experiments/**/terraform.tfvars
+consul-postgres-ha/stage4/bootstrap-secrets/bootstrap-secrets
