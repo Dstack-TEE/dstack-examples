@@ -147,6 +147,13 @@ The runtime stack is solid; what's left is operational polish:
   Workaround during dev is hot-patching containers via `docker
   compose --env-file /dstack/.host-shared/.decrypted-env -p dstack
   up -d <svc>`.
+- [`Phala-Network/phala-cloud#247`](https://github.com/Phala-Network/phala-cloud/issues/247)
+  — `phala_app` create returns `400 "configuration parameters not
+  compatible"` under concurrent creates against the same workspace.
+  Affects every `terraform apply` that fans out more than ~1
+  `phala_app` in parallel (default `-parallelism=10` reliably hits
+  it). **Workaround**: `terraform apply -parallelism=1`. Adds
+  ~5 min × N to bring-up time but always succeeds.
 - [`Phala-Network/phala-cloud#242`](https://github.com/Phala-Network/phala-cloud/issues/242)
   — `phala cvms list` collapses replicas to one entry.
 - [`Phala-Network/phala-cloud#243`](https://github.com/Phala-Network/phala-cloud/issues/243)
