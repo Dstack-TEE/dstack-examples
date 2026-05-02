@@ -79,6 +79,28 @@ func newMailbox() *mailbox {
 func (m *mailbox) push(to string, msg Message) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// A new auth from a sender invalidates everything that sender
+	// previously published in this recipient's queue. Without this
+	// drop, the recipient would consume stale candidates from the
+	// sender's prior ICE attempt — pion's connectivity check would
+	// then dial against addresses whose UDP sockets are gone, ICE
+	// would Fail, both sides would retry, and the retry would
+	// consume another stale message from the same backlog.
+	//
+	// Because mesh-conn always publishes auth BEFORE its candidates
+	// (auth comes from agent.GetLocalUserCredentials, candidates
+	// from agent.OnCandidate after GatherCandidates), an auth
+	// arriving here marks the start of a fresh epoch from that
+	// sender, and any stale messages in queue can be safely dropped.
+	if msg.Type == "auth" {
+		filtered := m.queues[to][:0]
+		for _, prev := range m.queues[to] {
+			if prev.From != msg.From {
+				filtered = append(filtered, prev)
+			}
+		}
+		m.queues[to] = filtered
+	}
 	m.queues[to] = append(m.queues[to], msg)
 	if w, ok := m.waiters[to]; ok {
 		close(w)
