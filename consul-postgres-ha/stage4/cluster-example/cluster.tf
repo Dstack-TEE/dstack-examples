@@ -96,7 +96,9 @@ locals {
     ],
     [
       for i in range(var.worker_replicas) : {
-        id      = "worker-${i + 1}"
+        # ID must match mesh-conn's self_id, which is `role-ordinal`,
+        # NOT slot. Workers occupy ordinals C..C+W-1.
+        id      = "worker-${i + var.coordinator_replicas}"
         ordinal = i + var.coordinator_replicas
         role    = "worker"
       }
