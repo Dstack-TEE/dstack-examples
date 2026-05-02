@@ -88,10 +88,121 @@ func loadConfig() *Config {
 	if err := json.Unmarshal([]byte(mustEnv("PEERS_JSON")), &cfg.Peers); err != nil {
 		log.Fatalf("PEERS_JSON: %v", err)
 	}
-	if cfg.peerByID(cfg.SelfID) == nil {
-		log.Fatalf("PEER_ID %q not in PEERS_JSON", cfg.SelfID)
+	if err := validatePeers(cfg); err != nil {
+		log.Fatalf("PEERS_JSON: %v", err)
 	}
 	return cfg
+}
+
+// validatePeers fails fast on any silent mis-configuration that would
+// otherwise manifest as confusing runtime failures: collided ports,
+// missing self, mismatched port-list lengths, etc. Bound at startup
+// because a peer's PEERS_JSON is shared with every other peer's
+// configuration and must round-trip identically across the cluster.
+func validatePeers(cfg *Config) error {
+	if len(cfg.Peers) < 2 {
+		return fmt.Errorf("need at least 2 peers in PEERS_JSON, got %d", len(cfg.Peers))
+	}
+
+	seenIDs := map[string]bool{}
+	allPorts := map[int]string{} // port -> peer.ID owning it (for collision detection)
+	expectedPortCount := -1
+	selfFound := false
+
+	for i, p := range cfg.Peers {
+		if p.ID == "" {
+			return fmt.Errorf("peer[%d] has empty id", i)
+		}
+		if seenIDs[p.ID] {
+			return fmt.Errorf("peer id %q appears twice in PEERS_JSON", p.ID)
+		}
+		seenIDs[p.ID] = true
+		if p.ID == cfg.SelfID {
+			selfFound = true
+		}
+
+		if len(p.Ports) == 0 {
+			return fmt.Errorf("peer %q has empty Ports list", p.ID)
+		}
+		if expectedPortCount < 0 {
+			expectedPortCount = len(p.Ports)
+		} else if len(p.Ports) != expectedPortCount {
+			return fmt.Errorf("peer %q has %d ports, expected %d (every peer's port-list must have the same length — index i is the same protocol slot across peers)",
+				p.ID, len(p.Ports), expectedPortCount)
+		}
+
+		// Each port must be unique cluster-wide: mesh-conn binds OTHER
+		// peers' ports on 127.0.0.1, so two peers can't share a port
+		// number or one would shadow the other.
+		seenSelf := map[int]bool{}
+		for j, port := range p.Ports {
+			if port <= 0 || port > 65535 {
+				return fmt.Errorf("peer %q ports[%d]=%d is out of range", p.ID, j, port)
+			}
+			if seenSelf[port] {
+				return fmt.Errorf("peer %q has duplicate port %d in its own Ports list", p.ID, port)
+			}
+			seenSelf[port] = true
+			if owner, ok := allPorts[port]; ok {
+				return fmt.Errorf("port %d is claimed by both peer %q and peer %q — every identity port must be globally unique",
+					port, owner, p.ID)
+			}
+			allPorts[port] = p.ID
+		}
+	}
+
+	if !selfFound {
+		return fmt.Errorf("PEER_ID %q not in PEERS_JSON (peers: %v)", cfg.SelfID, knownIDs(cfg.Peers))
+	}
+
+	// Log a digest of the validated config so operators can check that
+	// every peer in the cluster sees the same PEERS_JSON. Differences
+	// across peers would indicate a deploy-script discrepancy.
+	digest := peersDigest(cfg.Peers)
+	log.Printf("PEERS_JSON validated: %d peers, %d ports each, digest=%s",
+		len(cfg.Peers), expectedPortCount, digest)
+	return nil
+}
+
+func knownIDs(peers []Peer) []string {
+	ids := make([]string, 0, len(peers))
+	for _, p := range peers {
+		ids = append(ids, p.ID)
+	}
+	return ids
+}
+
+// peersDigest is a short stable hash of the canonical PEERS_JSON used
+// only to make config-drift diagnosable across peers' logs.
+func peersDigest(peers []Peer) string {
+	keys := make([]string, len(peers))
+	for i, p := range peers {
+		keys[i] = p.ID
+	}
+	// Stable sort by ID so a re-ordered PEERS_JSON gives the same digest.
+	// Then encode as a deterministic string.
+	for i := 1; i < len(keys); i++ {
+		for j := i; j > 0 && keys[j] < keys[j-1]; j-- {
+			keys[j], keys[j-1] = keys[j-1], keys[j]
+		}
+	}
+	var buf strings.Builder
+	for _, id := range keys {
+		buf.WriteString(id)
+		buf.WriteByte(':')
+		// find peer
+		for _, p := range peers {
+			if p.ID == id {
+				for _, port := range p.Ports {
+					fmt.Fprintf(&buf, "%d,", port)
+				}
+				break
+			}
+		}
+		buf.WriteByte('|')
+	}
+	h := sha1.Sum([]byte(buf.String()))
+	return base64.RawStdEncoding.EncodeToString(h[:])[:12]
 }
 
 func (c *Config) peerByID(id string) *Peer {
@@ -395,6 +506,10 @@ func pumpUDPStreamToSock(s *yamux.Stream, sock *net.UDPConn, dst *net.UDPAddr) e
 // ICE — one agent per peer pair
 // =============================================================================
 
+// peerSession is the shared state between dialICE (the current attempt
+// to handshake) and pollLoop (delivering signalling messages). It is
+// replaced wholesale on every reconnect so stale state from a previous
+// failed attempt can't poison the next one.
 type peerSession struct {
 	agent  *ice.Agent
 	authCh chan [2]string
@@ -405,26 +520,28 @@ var (
 	sessions   = map[string]*peerSession{} // key = remote peer id
 )
 
-func getOrMakeSession(cfg *Config, remoteID string) (*peerSession, bool) {
+// currentSession returns the active session for remoteID, or nil if
+// none exists yet. Used by pollLoop to find the right authCh /
+// agent for incoming messages.
+func currentSession(remoteID string) *peerSession {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
-	if s, ok := sessions[remoteID]; ok {
-		return s, false
-	}
-	s := &peerSession{authCh: make(chan [2]string, 1)}
-	sessions[remoteID] = s
-	return s, true
+	return sessions[remoteID]
 }
 
-func clearSession(remoteID string) {
+// installSession atomically replaces any previous session for
+// remoteID. Called from dialICE on each new attempt, so any stale
+// auth/candidate that pollLoop wrote to the *old* channel is left
+// behind unreferenced and the new attempt starts from clean state.
+func installSession(remoteID string, agent *ice.Agent) *peerSession {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
-	delete(sessions, remoteID)
+	s := &peerSession{agent: agent, authCh: make(chan [2]string, 1)}
+	sessions[remoteID] = s
+	return s
 }
 
 func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
-	sess, _ := getOrMakeSession(cfg, remoteID)
-
 	var urls []*stun.URI
 	if cfg.TurnHost != "" {
 		user, pass := turnCreds(cfg.TurnSecret, time.Hour)
@@ -448,7 +565,10 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("NewAgent: %w", err)
 	}
-	sess.agent = agent
+	// Install fresh session BEFORE doing any signalling so any partner
+	// auth/candidate we publish only ever resolves against this attempt.
+	// pollLoop will deliver messages here from now on.
+	sess := installSession(remoteID, agent)
 
 	if err := agent.OnCandidate(func(c ice.Candidate) {
 		if c == nil {
@@ -489,7 +609,6 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 		conn, err = agent.Accept(ctx, remote[0], remote[1])
 	}
 	if err != nil {
-		clearSession(remoteID)
 		return nil, err
 	}
 
@@ -546,7 +665,14 @@ func pollLoop(cfg *Config) {
 		}
 		resp.Body.Close()
 		for _, m := range msgs {
-			sess, _ := getOrMakeSession(cfg, m.From)
+			sess := currentSession(m.From)
+			if sess == nil {
+				// No active dialICE attempt for this remote yet; drop.
+				// On reconnect both sides re-enter dialICE and publish
+				// fresh auth/candidates, so dropping stale messages from
+				// before our local attempt is what we want.
+				continue
+			}
 			switch m.Type {
 			case "auth":
 				parts := strings.SplitN(m.Data, ":", 2)
@@ -557,11 +683,10 @@ func pollLoop(cfg *Config) {
 				select {
 				case sess.authCh <- [2]string{parts[0], parts[1]}:
 				default:
-					// already delivered for this attempt
+					// channel already has a pending auth for this attempt
 				}
 			case "candidate":
 				if sess.agent == nil {
-					// agent not yet created; drop — peer will retry candidates
 					continue
 				}
 				cand, err := ice.UnmarshalCandidate(m.Data)

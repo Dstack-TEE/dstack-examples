@@ -53,6 +53,7 @@ services:
           -http-port=$$HTTP_PORT \
           -grpc-port=$$GRPC_PORT \
           -dns-port=-1 \
+          -encrypt=$$GOSSIP_KEY \
           -data-dir=/consul/data \
           -log-level=INFO \
           $$MODE_FLAGS
@@ -64,6 +65,7 @@ services:
       - HTTP_PORT=${HTTP_PORT}
       - GRPC_PORT=${GRPC_PORT}
       - CTRL_SERF_LAN_PORT=${CTRL_SERF_LAN_PORT}
+      - GOSSIP_KEY=${GOSSIP_KEY}
     volumes:
       - consul-data:/consul/data
     depends_on:

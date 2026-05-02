@@ -43,6 +43,8 @@ services:
         # NOTE: -client binds the HTTP/RPC/gRPC client interfaces. We bind to
         # 127.0.0.1 only — apps on this host reach the local agent there;
         # peer agents reach this agent's RPC/HTTP via the overlay.
+        # Gossip key encrypts serf-lan UDP+TCP gossip end-to-end. Same
+        # key on every agent. Generated at deploy time via `consul keygen`.
         exec consul agent \
           -node=$$PEER_ID \
           -datacenter=dstack-mesh \
@@ -54,6 +56,7 @@ services:
           -http-port=$$HTTP_PORT \
           -grpc-port=$$GRPC_PORT \
           -dns-port=-1 \
+          -encrypt=$$GOSSIP_KEY \
           -data-dir=/consul/data \
           -log-level=INFO \
           $$MODE_FLAGS
@@ -65,6 +68,7 @@ services:
       - HTTP_PORT=${HTTP_PORT}
       - GRPC_PORT=${GRPC_PORT}
       - CTRL_SERF_LAN_PORT=${CTRL_SERF_LAN_PORT}
+      - GOSSIP_KEY=${GOSSIP_KEY}
     volumes:
       - consul-data:/consul/data
     depends_on:
