@@ -767,11 +767,17 @@ func pollLoop(cfg *Config) {
 					log.Printf("[%s] bad auth %q", m.From, m.Data)
 					continue
 				}
+				// Always keep the LATEST auth. select-default would drop
+				// the new one — and if the buffered one was stale (from
+				// before the peer's last bounce), dialICE would consume
+				// that stale auth, Dial against the wrong ufrag, ICE
+				// would Fail, and we'd repeat forever. Drain-then-push
+				// ensures the channel always holds the most-recent auth.
 				select {
-				case sess.authCh <- [2]string{parts[0], parts[1]}:
+				case <-sess.authCh:
 				default:
-					// channel already has a pending auth for this attempt
 				}
+				sess.authCh <- [2]string{parts[0], parts[1]}
 			case "candidate":
 				if sess.agent == nil {
 					continue
