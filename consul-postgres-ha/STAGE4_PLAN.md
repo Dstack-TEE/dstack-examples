@@ -171,10 +171,101 @@ resource "consul_intention" "webdemo_to_webdemo" {
 That's the **whole** topology. Adding a worker is a `replicas` bump
 and re-apply.
 
-## TEE-only secrets via `getKey()`
+## TEE-only secrets + identity via the dstack Go SDK
 
-Unchanged from rev-1, except that the bootstrap-secrets init container
-now also handles **per-instance identity**:
+The dstack Go SDK
+([`github.com/Dstack-TEE/dstack/sdk/go/dstack`](https://github.com/Dstack-TEE/dstack/tree/master/sdk/go))
+gives us everything we need:
+
+```go
+client := dstack.NewDstackClient()
+ctx    := context.Background()
+
+info, _ := client.Info(ctx)
+// info.AppID       — shared across replicas of one phala_app
+// info.InstanceID  — UNIQUE PER CVM, stable across restarts
+// info.DeviceID    — hardware identity
+// info.ComposeHash — compose-template fingerprint
+// info.MrAggregated — TDX attestation measurement
+
+seed, _ := client.GetKey(ctx, "dstack-mesh/gossip", "cluster", "secp256k1")
+gossipKey, _ := seed.DecodeKey()   // 32 deterministic bytes
+```
+
+Two things this changes vs the previous draft of this section:
+
+### 1. **`InstanceID` is canonical — no on-disk UUID writing**
+
+The previous draft had bootstrap-secrets generate a UUID on first
+boot and persist it to `/var/lib/dstack/instance-id`. That's
+redundant: dstack already provides a stable per-instance identifier
+through `client.Info(ctx).InstanceID`, rooted in the platform itself
+rather than a file we wrote. Use it directly.
+
+### 2. **`GetKey` signature is `(path, purpose, algorithm)`**
+
+The actual API takes three strings and returns a hex-encoded
+secp256k1 (or other) private key. Our gossip key, TURN secret, and
+Connect-CA seed aren't secp256k1 keys — but the 32-byte raw output
+is fine to use as a uniformly random seed:
+
+```go
+gossipKey, _   := mustGetKey(ctx, client, "dstack-mesh/gossip",  "cluster")
+turnSecret, _  := mustGetKey(ctx, client, "dstack-mesh/turn",    "cluster")
+connectCaSeed, _ := mustGetKey(ctx, client, "dstack-mesh/connect-ca", "cluster")
+// each returns 32 bytes deterministic from the cluster's app_id
+```
+
+Where `mustGetKey` is a thin wrapper over `client.GetKey` that pulls
+`DecodeKey()`. If we ever need more entropy than 32 bytes, HKDF the
+result with a domain-separator label.
+
+### 3. **bootstrap-secrets simplifies considerably**
+
+```
++----------------------------------------------------------+
+|  CVM (TEE) — every instance, all roles                  |
+|                                                          |
+|  bootstrap-secrets init container (~80 LoC Go)          |
+|   ├── client := dstack.NewDstackClient()                |
+|   │   info   := client.Info(ctx)                        |
+|   │                                                      |
+|   ├── derives cluster-wide secrets (same across every   |
+|   │   instance of an app, because shared app_id):       |
+|   │     gossip = GetKey("dstack-mesh/gossip",  "cluster")
+|   │     turn   = GetKey("dstack-mesh/turn",    "cluster")
+|   │     ca-seed= GetKey("dstack-mesh/connect-ca", "cluster")
+|   │                                                      |
+|   ├── per-instance identity straight from the SDK:      |
+|   │     instanceID = info.InstanceID                    |
+|   │     appID      = info.AppID                         |
+|   │                                                      |
+|   ├── claims an ordinal via Consul KV CAS               |
+|   │   (key: cluster/<name>/ordinals/<instanceID>)       |
+|   │   so peers have stable port slots                   |
+|   │                                                      |
+|   ├── writes derived state to tmpfs (NOT the disk):     |
+|   │     /run/secrets/gossip                             |
+|   │     /run/secrets/turn                               |
+|   │     /run/secrets/ca-seed                            |
+|   │     /run/instance/info.json   (id, ordinal, ports)  |
+|   │                                                      |
+|   └── exits cleanly                                     |
+|                                                          |
+|  consul agent + mesh-conn + sidecar + webdemo            |
+|  read /run/secrets/* and /run/instance/* at startup     |
++----------------------------------------------------------+
+```
+
+(Compose `depends_on: { bootstrap-secrets: { condition:
+service_completed_successfully } }` gates the dependent services on
+bootstrap-secrets having exited successfully.)
+
+**Key property: nothing on the persisted disk is needed for the
+bootstrap path.** Everything is derived fresh on each boot from
+`Info()` + `GetKey()`, both rooted in the platform. The persisted
+disk is for *application* state (Consul Raft log, KV, Patroni WAL,
+etc.) — the SDK handles the identity layer.
 
 ```
 +----------------------------------------------------------+
@@ -331,22 +422,45 @@ identity rotation control. cluster.tf exposes a `cluster_nonce`
 variable; bumping it explicitly rotates the entire cluster's TEE
 identity.
 
+## Bonus — attestation-gated mesh join now fits cleanly
+
+The same SDK exposes `Sign()`, `Verify()`, and `GetQuote()`. That
+means the deferred "stage 2: attestation-gated overlay" work
+slots into stage 4 without any new tooling:
+
+- Each peer's mesh-conn signs its `auth` message via
+  `client.Sign(ctx, "secp256k1", authBytes)`. The signature chains
+  back to the KMS, which is rooted in dstack's AppAuth.
+- The coordinator's signaling broker calls `Verify()` on incoming
+  signatures and rejects messages from app_ids that don't match the
+  cluster's allowed set.
+- `GetQuote()` lets us include the peer's mesh-conn public key in a
+  TDX quote; the coordinator verifies the quote chain back to Intel
+  before treating the peer as a valid cluster member.
+
+We don't need this for the stage-4 first cut, but flagging it
+because the API shape we'd build against is the same one used for
+secrets above. The threat model upgrade (attestation gating) is
+purely additive.
+
 ## Open items to verify before code lands
 
 Carrying forward from rev-1, plus new ones:
 
-- [ ] **Disk persistence across in-place updates** — the keystone of
-  this whole design. Test in `stage4-experiments/disk-persistence/`
-  before any stage-4 code lands. (In progress now.)
-- [ ] **Container ordering**: Consul reads gossip key from a file
-  written by bootstrap-secrets; need a clean way to gate Consul's
-  start until bootstrap-secrets has finished. Compose `depends_on`
-  with `condition: service_completed_successfully` is the right
-  shape (bootstrap-secrets is `restart: "no"`).
+- [x] **Disk persistence across in-place updates** — verified, see
+  `stage4-experiments/disk-persistence/RESULTS.md`.
+- [x] **dstack Go SDK exists with the API we need** — verified,
+  `Info()` + `GetKey()` + `Sign()` are all there.
+- [ ] **Container ordering**: bootstrap-secrets must `restart: "no"`
+  and exit successfully; consul + mesh-conn + sidecar gate on
+  `depends_on: { bootstrap-secrets: { condition:
+  service_completed_successfully } }`. Need to confirm dstack
+  honors that compose feature.
 - [ ] **Consul KV CAS for ordinal claim** — verify the API behaviour
   for the lowest-unused-ordinal pattern; or consider per-instance
-  fixed ordinals derived from instance UUID hash modulo replica
-  count (less drift-prone, no CAS needed).
+  fixed ordinals derived from `InstanceID` hash modulo replica
+  count (less drift-prone, no CAS needed). Probably go with the
+  hash approach — simpler, no race window.
 - [ ] **`encrypted_env`** in the Phala provider — does it
   client-side-encrypt? Even though our env contains no secrets in
   rev-2, knowing the answer matters for at-rest visibility.
