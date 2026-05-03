@@ -19,6 +19,19 @@ hypotheses worth fresh eyes — **without** committing to a fix direction.
   `MESH_CONN_TCP_ONLY=1`) — neither helps with the current bug, but
   they're useful for ruling more things out.
 
+> **State note (2026-05-03):** the working tree under
+> `stage4/mesh-conn/main.go` has been edited to swap yamux for
+> QUIC (`github.com/quic-go/quic-go`) on top of the same pion/ice
+> packet conn — see lines 350-420 for the new transport. There is
+> also a sibling experimental directory `stage4/quic-on-ice/` with
+> its own `go.mod` / `main.go`. Neither is committed and neither
+> binary has been rebuilt + rolled, so the live cluster still runs
+> the yamux build (image `ttl.sh/dstack-mesh-conn-1777773892:24h`).
+> When picking back up: first decide whether to (a) ship the QUIC
+> version (rebuild + roll), (b) keep yamux and chase one of the open
+> hypotheses below, or (c) explore via the standalone
+> `stage4/quic-on-ice/` testbed first.
+
 ## Live cluster (left running)
 
 Phala dstack-pha-prod5, region US-WEST-1, all `tdx.small`. SSH gateway
