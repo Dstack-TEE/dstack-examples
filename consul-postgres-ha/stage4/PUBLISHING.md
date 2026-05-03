@@ -87,11 +87,14 @@ real CI workflow.
 
 ## 3. Hot-patch on a live cluster — debugging without a redeploy
 
-Sometimes you need to swap a binary on a running CVM right now,
-without re-applying terraform (because `terraform-provider-phala` has
-a known bug where `env`-block in-place updates silently no-op — see
-`Phala-Network/phala-cloud#246` — and you don't want to recreate CVMs
-just to roll a new image).
+Sometimes you need to swap a binary on a running CVM right now —
+faster than re-running `terraform apply` (which propagates env updates
+correctly as of provider `0.2.0-beta.3`, but still goes per-CVM and
+takes a minute), useful for testing a fix on one CVM before rolling it
+cluster-wide, and the only option on clusters running the older
+`0.2.0-beta.2` provider where in-place env updates silently no-op'd
+(Phala-Network/phala-cloud#246; fixed by
+Phala-Network/terraform-provider-phala#8).
 
 ```bash
 GW=dstack-pha-prod5.phala.network

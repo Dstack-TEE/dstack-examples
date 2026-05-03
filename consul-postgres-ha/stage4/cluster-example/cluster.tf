@@ -14,8 +14,12 @@ terraform {
   required_version = ">= 1.5"
   required_providers {
     phala = {
-      source  = "phala-network/phala"
-      version = "0.2.0-beta.2"
+      source = "phala-network/phala"
+      # >= 0.2.0-beta.3 is required for in-place env-block updates to
+      # actually take effect — earlier versions silently no-op'd them
+      # (Phala-Network/phala-cloud#246, fixed in
+      # Phala-Network/terraform-provider-phala#8).
+      version = ">= 0.2.0-beta.3"
     }
   }
 }
