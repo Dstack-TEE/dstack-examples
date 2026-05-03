@@ -172,6 +172,38 @@ signals.
   new timeline. No pg_basebackup, no multi-MB re-copy through
   mesh-conn.
 
+## Disk-loss rejoin (full pg_basebackup variant)
+
+A replica whose pgdata is wiped goes through Patroni's bootstrap path
+and pulls a full pg_basebackup from the leader, all over mesh-conn's
+QUIC tunnel. Recipe (run on a non-leader CVM):
+
+```bash
+docker stop -t 5 dstack-patroni-1
+rm -rf /var/lib/docker/volumes/dstack_patroni-pgdata/_data/*
+docker start dstack-patroni-1
+```
+
+### Measured timeline (run from 2026-05-03)
+
+```
+T_wipe         21:13:41   docker stop + rm -rf pgdata on worker-5
+T_restart      21:13:42   docker start
+T_basebackup   21:13:47   "trying to bootstrap from leader 'worker-4'"
+T_complete     21:13:54   "replica has been created using basebackup"  +7s
+T_streaming    21:13:58   service registered, streaming WAL              +16s total
+```
+
+5.2 MB pgdata transferred in ~7 seconds end-to-end. Note the dataset
+is small enough that handshake/startup overhead dominates — for a
+realistic throughput number, see the soft-kill section's pg_basebackup
+trace at ~25 MB/s sustained on the QUIC path.
+
+The path itself is the proof point: Patroni correctly detects empty
+pgdata, picks `bootstrap from leader` (not WAL replay), pulls the full
+backup over mesh-conn, transitions to streaming on the current
+timeline. No operator intervention.
+
 ## What this demo does NOT cover
 
 * **CVM reboot or kernel panic** — `reboot`/`poweroff` from inside
@@ -182,8 +214,3 @@ signals.
 * **Network partition**: split-brain isolation between coordinators
   vs workers. Patroni + Consul should handle it, but worth a separate
   test before claiming partition-tolerance.
-* **Disk loss on rejoin**: if the ex-leader's pgdata is wiped, rejoin
-  WILL trigger a full pg_basebackup through mesh-conn. The
-  ~25 MB/s throughput and the QUIC transport mean even a 10 GB
-  rebuild takes ~7 minutes (acceptable), but it's a different code
-  path than the cheap rejoin shown above.

@@ -15,11 +15,13 @@ terraform {
   required_providers {
     phala = {
       source = "phala-network/phala"
-      # >= 0.2.0-beta.3 is required for in-place env-block updates to
-      # actually take effect — earlier versions silently no-op'd them
-      # (Phala-Network/phala-cloud#246, fixed in
-      # Phala-Network/terraform-provider-phala#8).
-      version = ">= 0.2.0-beta.3"
+      # 0.2.0-beta.3 is the first version where in-place env-block
+      # updates actually take effect — earlier betas silently no-op'd
+      # them (Phala-Network/phala-cloud#246, fixed in
+      # Phala-Network/terraform-provider-phala#8). Pin exactly because
+      # Terraform's `>=` operator doesn't include later prerelease
+      # versions; bump this line by hand when a newer beta ships.
+      version = "0.2.0-beta.3"
     }
   }
 }
