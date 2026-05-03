@@ -1,0 +1,126 @@
+name: Publish consul-postgres-ha images
+
+# Builds and publishes the six container images that the stage-4
+# consul-postgres-ha example needs (mesh-conn, bootstrap-secrets,
+# signaling, webdemo, sidecar, patroni). On push to main, images are
+# tagged with the commit SHA *and* `latest`, pushed to GHCR, and
+# attested with Sigstore-backed GitHub Build Provenance so consumers
+# can verify "this image came from this commit of this repo" without
+# us managing any keys. PRs build to verify but do not push or attest.
+#
+# Why six images on one workflow: the example needs all of them in
+# lockstep — bumping mesh-conn alone but leaving the rest stale leads
+# to mixed-version clusters that are hard to reason about. One workflow
+# means one set of tags moves together.
+#
+# Verifying a published image (consumer side):
+#
+#   gh attestation verify \
+#     oci://ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-conn:latest \
+#     --repo Dstack-TEE/dstack-examples
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'consul-postgres-ha/stage4/mesh-conn/**'
+      - 'consul-postgres-ha/stage4/bootstrap-secrets/**'
+      - 'consul-postgres-ha/stage4/patroni/**'
+      - 'consul-postgres-ha/stage3b/webdemo/**'
+      - 'consul-postgres-ha/stage3b/sidecar/**'
+      - 'consul-postgres-ha/phase0/icetest/**'
+      - '.github/workflows/consul-postgres-ha-publish.yml'
+  pull_request:
+    paths:
+      - 'consul-postgres-ha/stage4/mesh-conn/**'
+      - 'consul-postgres-ha/stage4/bootstrap-secrets/**'
+      - 'consul-postgres-ha/stage4/patroni/**'
+      - 'consul-postgres-ha/stage3b/webdemo/**'
+      - 'consul-postgres-ha/stage3b/sidecar/**'
+      - 'consul-postgres-ha/phase0/icetest/**'
+      - '.github/workflows/consul-postgres-ha-publish.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      # id-token + attestations are required for Sigstore-backed
+      # GitHub Build Provenance via actions/attest-build-provenance.
+      id-token: write
+      attestations: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: mesh-conn
+            context: consul-postgres-ha/stage4/mesh-conn
+          - name: bootstrap-secrets
+            context: consul-postgres-ha/stage4/bootstrap-secrets
+          - name: patroni
+            context: consul-postgres-ha/stage4/patroni
+          - name: signaling
+            context: consul-postgres-ha/phase0/icetest
+          - name: webdemo
+            context: consul-postgres-ha/stage3b/webdemo
+          - name: sidecar
+            context: consul-postgres-ha/stage3b/sidecar
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Image namespace lives one level under the repo so all six
+          # images sit side-by-side: ghcr.io/<owner>/<repo>/consul-postgres-ha-<name>
+          images: ${{ env.REGISTRY }}/${{ github.repository }}/consul-postgres-ha-${{ matrix.name }}
+          tags: |
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=ref,event=pr
+
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=consul-postgres-ha-${{ matrix.name }}
+          cache-to: type=gha,scope=consul-postgres-ha-${{ matrix.name }},mode=max
+
+      # Sigstore-backed build provenance. Binds {image digest, repo,
+      # workflow, commit SHA, runner identity} into an attestation
+      # signed with a short-lived Sigstore cert obtained via this
+      # workflow's GitHub OIDC token — no keys we have to rotate. The
+      # attestation is uploaded to GitHub *and* (via push-to-registry)
+      # written next to the image on GHCR so `gh attestation verify
+      # oci://...` and `cosign verify-attestation` both work.
+      - name: Attest build provenance
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ github.repository }}/consul-postgres-ha-${{ matrix.name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
