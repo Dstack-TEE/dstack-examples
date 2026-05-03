@@ -435,7 +435,7 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 	// the underlying ice.Conn (i.e. wire bytes including QUIC overhead).
 	// QUIC's StreamCount isn't directly exposed, so we report just bytes.
 	stopStats := make(chan struct{})
-	go reportLinkStats(peer.ID, counted, qconn, stopStats)
+	go reportLinkStats(peer.ID, counted, stopStats)
 	defer close(stopStats)
 
 	// 3. Bind localhost UDP+TCP listeners for every one of peer's ports.
@@ -640,8 +640,8 @@ func pumpUDPStreamToSock(s *quic.Stream, sock *net.UDPConn, dst *net.UDPAddr) er
 // =============================================================================
 // Per-link instrumentation: count bytes through the ICE conn (i.e. the
 // raw wire bytes including QUIC framing/encryption overhead) and log
-// every 10s. Useful for diagnosing whether a link drop happens after
-// 0 bytes, 1KB, or 100MB.
+// a periodic summary. Useful for diagnosing whether a link drop happens
+// after 0 bytes, 1KB, or 100MB.
 // =============================================================================
 
 type countingConn struct {
@@ -703,8 +703,12 @@ func (p *iceConnPacketConn) SetDeadline(_ time.Time) error      { return nil }
 func (p *iceConnPacketConn) SetReadDeadline(_ time.Time) error  { return nil }
 func (p *iceConnPacketConn) SetWriteDeadline(_ time.Time) error { return nil }
 
-func reportLinkStats(peerID string, conn *countingConn, qconn *quic.Conn, stop <-chan struct{}) {
-	t := time.NewTicker(10 * time.Second)
+// reportLinkStats logs a periodic summary per peer link. Once a minute,
+// and only when bytes actually moved since the last tick, so an idle
+// mesh stays quiet. Always logs the final summary on stop, regardless
+// of activity, since that's what postmortems read.
+func reportLinkStats(peerID string, conn *countingConn, stop <-chan struct{}) {
+	t := time.NewTicker(60 * time.Second)
 	defer t.Stop()
 	var lastIn, lastOut uint64
 	for {
@@ -716,7 +720,10 @@ func reportLinkStats(peerID string, conn *countingConn, qconn *quic.Conn, stop <
 			return
 		case <-t.C:
 			in, out := conn.bytesIn.Load(), conn.bytesOut.Load()
-			log.Printf("[%s] link: in=%d (+%d B/10s) out=%d (+%d B/10s) reads=%d writes=%d",
+			if in == lastIn && out == lastOut {
+				continue
+			}
+			log.Printf("[%s] link: in=%d (+%d B/min) out=%d (+%d B/min) reads=%d writes=%d",
 				peerID, in, in-lastIn, out, out-lastOut,
 				conn.reads.Load(), conn.writes.Load())
 			lastIn, lastOut = in, out
@@ -831,27 +838,9 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 	if os.Getenv("MESH_CONN_RELAY_ONLY") == "1" {
 		candidateTypes = []ice.CandidateType{ice.CandidateTypeRelay}
 	}
-	// MESH_CONN_TCP_ONLY=1 restricts ICE to TCP NetworkTypes AND drops
-	// UDP-transport TURN URLs (pion's NetworkTypes only filters HOST
-	// candidates; Relay candidates inherit transport from their TURN
-	// URL's Proto, regardless of NetworkTypes). Without dropping UDP
-	// URLs, pion still picks `relay ... (proto=udp)` and we get the
-	// same UDP-loss behavior that kills yamux keepalives.
-	netTypes := []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4}
-	if os.Getenv("MESH_CONN_TCP_ONLY") == "1" {
-		netTypes = []ice.NetworkType{ice.NetworkTypeTCP4}
-		var tcpURLs []*stun.URI
-		for _, u := range urls {
-			if u.Proto == stun.ProtoTypeTCP {
-				tcpURLs = append(tcpURLs, u)
-			}
-		}
-		urls = tcpURLs
-		log.Printf("[%s] TCP-only mode: %d URLs after UDP filter", remoteID, len(urls))
-	}
 	agent, err := ice.NewAgent(&ice.AgentConfig{
 		Urls:           urls,
-		NetworkTypes:   netTypes,
+		NetworkTypes:   []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
 		CandidateTypes: candidateTypes,
 	})
 	if err != nil {

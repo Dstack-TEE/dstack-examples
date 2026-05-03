@@ -50,17 +50,12 @@ services:
       - TURN_HOST=${TURN_HOST}
       - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
       # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay candidates,
-      # routing all peer traffic through the coturn server. Trade-off:
-      # adds the Vultr round-trip to every peer hop, but avoids the
-      # direct-pair connectivity-check failures we hit between dstack
-      # workers (host/srflx/prflx pairs never establish, while relay
-      # always works). Set when DIRECT_FAILS_FOR_THIS_DEPLOYMENT.
+      # routing all peer traffic through the coturn server. Default off
+      # because coordinator-to-worker direct candidates do work; flip on
+      # if you hit a deployment where worker-to-worker direct pairs fail
+      # (host/srflx/prflx never establish, only relay does), trading some
+      # latency through coturn for guaranteed reachability.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
-      # MESH_CONN_TCP_ONLY=1 restricts ICE to TCP candidates only. The
-      # underlying conn becomes a TCP byte stream that yamux can survive
-      # on (UDP loss kills yamux keepalives — proven by trace at
-      # 268KB pg_basebackup transfers).
-      - MESH_CONN_TCP_ONLY=${MESH_CONN_TCP_ONLY:-}
     volumes:
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
       - /tmp/dstack-runtime/instance:/run/instance:ro
