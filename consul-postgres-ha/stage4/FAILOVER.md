@@ -114,15 +114,76 @@ Consul KV:
 A common production setting is `ttl=20, loop_wait=5, retry_timeout=5`
 for ~10–15s RTO. Don't go below `ttl >= 2 * loop_wait` (Patroni rejects).
 
+## Hard-kill variant (whole-userspace failure)
+
+Same outline, but instead of stopping just `dstack-patroni-1`, simulate
+a "host crashed but recovered" scenario by killing all containers on
+the leader at once:
+
+```bash
+ssh ... root@${LEADER}-22.${GW} "docker stop -t 0 \$(docker ps -q)"
+```
+
+This kills patroni, postgres, mesh-conn, consul, sidecar, webdemo, and
+the keepalive — everything that produces signal for the rest of the
+cluster. Bring the host back via:
+
+```bash
+ssh ... root@${LEADER}-22.${GW} \
+  "cd /tapp && docker compose --env-file /dstack/.host-shared/.decrypted-env \
+     -p dstack -f /tapp/docker-compose.yaml up -d"
+```
+
+`docker compose up -d` respects the dependency order
+(bootstrap-secrets → mesh-conn → consul → patroni).
+
+### Measured timeline (run from 2026-05-03)
+
+```
+T_kill           07:26:42   docker stop -t 0 ALL 7 containers on worker-4
+T_new_leader     07:27:13   worker-3 promoted (timeline 16 → 17)        +31s
+T_first_write    07:27:15   INSERT succeeds on worker-3                 +33s  ← RTO
+T_restart_W4     07:27:46   docker compose up -d on worker-4
+T_W4_rejoined    07:28:34   worker-4 streaming, lag=0                   +48s after restart
+```
+
+**Hard-kill RTO ≈ 33 seconds**, ~9 seconds longer than the soft-kill
+above. That extra cost is Consul gossip-failure detection: with
+soft-kill only the Patroni leader-key TTL expires, while with hard-kill
+the entire Consul agent is gone, so the surviving peers see *both*
+signals.
+
+### Things confirmed by the hard-kill that the soft-kill didn't exercise
+
+- **Best-replica selection under uneven lag.** Going into the kill,
+  worker-3 was timeline=16, lag=0 while worker-5 was timeline=15 with
+  measurable lag. Patroni picked worker-3 (the up-to-date one), not
+  the alphabetically-earlier one. The promote-best-replica heuristic
+  works.
+- **mesh-conn QUIC ICE redial after a peer's userspace evaporates.**
+  Other peers' QUIC links to worker-4 hit `MaxIdleTimeout=60s` and
+  tore down; once worker-4's containers came back, the new mesh-conn
+  established fresh ICE pairs and replication resumed without
+  intervention. The earlier yamux build had a pathology where
+  redial-after-stress would loop forever; QUIC is clean.
+- **Cheap rejoin survives hard-kill.** worker-4's pgdata was
+  untouched (the kernel never died, just userspace), so on bring-up
+  Patroni replayed local WAL and joined as a streaming replica on the
+  new timeline. No pg_basebackup, no multi-MB re-copy through
+  mesh-conn.
+
 ## What this demo does NOT cover
 
-* **Hard CVM kill** (whole VM down, not just the patroni container).
-  RTO should be similar but exercises dstack/CVM-level recovery; mesh-conn
-  ICE will need to redial when the old CVM comes back.
+* **CVM reboot or kernel panic** — `reboot`/`poweroff` from inside
+  the CVM. This involves the dstack platform's CVM lifecycle and is
+  qualitatively different from container-level kills. Consider
+  separately if/when you need to claim "host hardware failure"
+  resilience.
 * **Network partition**: split-brain isolation between coordinators
   vs workers. Patroni + Consul should handle it, but worth a separate
   test before claiming partition-tolerance.
 * **Disk loss on rejoin**: if the ex-leader's pgdata is wiped, rejoin
   WILL trigger a full pg_basebackup through mesh-conn. The
-  ~25 MB/s throughput and the QUIC transport mean that even a 10 GB
-  rebuild takes ~7 minutes (acceptable), but it's a different code path.
+  ~25 MB/s throughput and the QUIC transport mean even a 10 GB
+  rebuild takes ~7 minutes (acceptable), but it's a different code
+  path than the cheap rejoin shown above.
