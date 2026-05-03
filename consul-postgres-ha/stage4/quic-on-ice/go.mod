@@ -1,24 +1,22 @@
-module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/stage4/mesh-conn
+module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/stage4/quic-on-ice
 
 go 1.24
-
-require (
-	github.com/pion/ice/v2 v2.3.25
-	github.com/pion/stun v0.6.1
-	github.com/quic-go/quic-go v0.59.0
-)
 
 require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/uuid v1.3.1 // indirect
 	github.com/pion/dtls/v2 v2.2.7 // indirect
+	github.com/pion/ice/v2 v2.3.38 // indirect
 	github.com/pion/logging v0.2.2 // indirect
 	github.com/pion/mdns v0.0.12 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/transport/v2 v2.2.2 // indirect
+	github.com/pion/stun v0.6.1 // indirect
+	github.com/pion/transport/v2 v2.2.10 // indirect
 	github.com/pion/turn/v2 v2.1.3 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/quic-go/quic-go v0.59.0 // indirect
 	github.com/stretchr/testify v1.11.1 // indirect
+	github.com/wlynxg/anet v0.0.3 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
 	golang.org/x/net v0.43.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect

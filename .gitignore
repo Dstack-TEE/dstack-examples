@@ -18,4 +18,5 @@ consul-postgres-ha/stage4-experiments/**/terraform.tfstate
 consul-postgres-ha/stage4-experiments/**/terraform.tfstate.backup
 consul-postgres-ha/stage4-experiments/**/terraform.tfvars
 consul-postgres-ha/stage4/mesh-conn/mesh-conn
+consul-postgres-ha/stage4/quic-on-ice/quic-on-ice
 # terraform local state

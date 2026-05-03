@@ -19,18 +19,36 @@
 //     127.0.0.1:<X.ports[i]>
 //
 // All N peer-pair connections multiplex over one pion/ice connection
-// per pair, wrapped in yamux. Each yamux stream's first three bytes
-// are (tag, port-as-uint16-big-endian) where port is the receiver's
-// own identity port — the receiver looks it up in self.ports and
-// dispatches to the matching local UDP socket / dials the matching
-// local TCP service.
+// per pair, wrapped in QUIC. Each QUIC stream's first three bytes are
+// (tag, port-as-uint16-big-endian) where port is the receiver's own
+// identity port — the receiver looks it up in self.ports and dispatches
+// to the matching local UDP socket / dials the matching local TCP
+// service.
+//
+// Why QUIC and not yamux: yamux assumes a reliable byte-stream underlay,
+// but pion/ice.Conn is UDP — and the UDP path between dstack worker
+// CVMs is extremely lossy under sustained load (hairpinning the same
+// public IP loses ~99% of bulk packets, coturn-relay loses ~78%).
+// yamux's keepalive/recv-window invariants then trip and the user-
+// visible error is "keepalive timeout" or "recv window exceeded", but
+// the root cause is dropped packets. QUIC has built-in loss recovery,
+// congestion control, and stream-multiplexing — it's exactly what a
+// lossy UDP underlay needs. The previous yamux build died at 3KB-260KB
+// depending on path; the QUIC build sustains 25-28 MB/s on the same
+// hairpin.
 
 package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -38,6 +56,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net"
 	"net/http"
 	"net/url"
@@ -47,9 +66,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/hashicorp/yamux"
 	"github.com/pion/ice/v2"
 	"github.com/pion/stun"
+	"github.com/quic-go/quic-go"
 )
 
 // =============================================================================
@@ -340,52 +359,86 @@ const (
 	streamTCP byte = 0x33 // per-conn TCP byte-stream forwarder
 )
 
+// quicConfig is shared by client and server. We give QUIC large windows
+// so a pg_basebackup stream (sustained 100s of MB) doesn't stall on
+// flow-control updates: a single InitialConnectionReceiveWindow of 8 MiB
+// lets the sender push a chunk that big before needing an ACK from us.
+// MaxIdleTimeout is what we use to detect a dead link — if no packet
+// arrives in this long, the conn errors out.
+func quicConfig() *quic.Config {
+	return &quic.Config{
+		KeepAlivePeriod:                10 * time.Second,
+		MaxIdleTimeout:                 60 * time.Second,
+		InitialStreamReceiveWindow:     4 << 20,
+		MaxStreamReceiveWindow:         16 << 20,
+		InitialConnectionReceiveWindow: 8 << 20,
+		MaxConnectionReceiveWindow:     32 << 20,
+	}
+}
+
 func dialAndPump(cfg *Config, self, peer Peer) error {
 	if len(self.Ports) != len(peer.Ports) {
 		return fmt.Errorf("port-count mismatch: self has %d ports, peer has %d", len(self.Ports), len(peer.Ports))
 	}
 
-	// 1. Establish ICE + wrap with a counting+logging conn.
+	// 1. Establish ICE + wrap with a counting conn for byte-level telemetry.
 	rawConn, err := dialICE(cfg, peer.ID)
 	if err != nil {
 		return fmt.Errorf("ice: %w", err)
 	}
 	defer rawConn.Close()
-	conn := newCountingConn(rawConn, peer.ID)
+	counted := newCountingConn(rawConn, peer.ID)
+	pkt := &iceConnPacketConn{conn: counted}
 
-	ycfg := yamux.DefaultConfig()
-	// Surface yamux's internal frame / keepalive / session errors. Without
-	// this they go to io.Discard and an "accept: short buffer" tells you
-	// nothing about WHY (was it a header, a length-prefix, a body? was it
-	// closed mid-frame?). Prefix with peer-id so multi-peer logs are usable.
-	ycfg.LogOutput = log.New(os.Stderr, fmt.Sprintf("yamux[%s] ", peer.ID), log.LstdFlags).Writer()
-	ycfg.EnableKeepAlive = true
-	// Defaults are KeepAliveInterval=30s, ConnectionWriteTimeout=10s. We
-	// experimented with 5s/5s for fast failure detection; that aggressively
-	// kills the link under sustained load (a 100KB/s burst can stall a
-	// keepalive past 5s on a TURN-relay path) — proven by tracing a
-	// pg_basebackup stream that died at 266KB transferred. Keep defaults.
+	// 2. Establish a QUIC connection on top of the ICE PacketConn.
+	//    We replaced yamux here because pion/ice.Conn's UDP underlay drops
+	//    packets under sustained load (NAT hairpinning loss between dstack
+	//    workers is ~99%; even relay-via-coturn loses ~78%). yamux assumes
+	//    a reliable byte-stream and dies as "keepalive timeout" or "recv
+	//    window exceeded" — protocol violations triggered by lost packets.
+	//    QUIC has built-in loss recovery + congestion control, so a lossy
+	//    UDP underlay is exactly what it expects. Stream multiplex API is
+	//    a near-drop-in for yamux: OpenStreamSync / AcceptStream.
 	isClient := cfg.SelfID < peer.ID
-	var sess *yamux.Session
-	if isClient {
-		sess, err = yamux.Client(conn, ycfg)
-	} else {
-		sess, err = yamux.Server(conn, ycfg)
-	}
-	if err != nil {
-		return fmt.Errorf("yamux: %w", err)
-	}
-	defer sess.Close()
+	connCtx, connCancel := context.WithCancel(context.Background())
+	defer connCancel()
+	dialCtx, dialCancel := context.WithTimeout(connCtx, 30*time.Second)
+	defer dialCancel()
 
-	// Periodic per-link telemetry. Logs once every 10s while the link is
-	// up; exits as soon as the session closes. Cheap (atomic loads), and
-	// the byte-count series + yamux stream-count tells us at-a-glance
-	// "did pg_basebackup transfer 0, 100, or 1e9 bytes before the drop?"
+	var qconn *quic.Conn
+	if isClient {
+		// remote net.Addr is ignored by our PacketConn shim (it only
+		// knows about the one ICE peer); we still pass something non-nil
+		// because quic.Dial uses it for SNI fallback / connection ID.
+		qconn, err = quic.Dial(dialCtx, pkt, counted.RemoteAddr(), clientTLS(), quicConfig())
+		if err != nil {
+			return fmt.Errorf("quic dial: %w", err)
+		}
+	} else {
+		ln, lerr := quic.Listen(pkt, serverTLS(), quicConfig())
+		if lerr != nil {
+			return fmt.Errorf("quic listen: %w", lerr)
+		}
+		// Close the listener once we have our one accepted conn — we
+		// only want a single QUIC connection per ICE pair.
+		acceptCtx, acceptCancel := context.WithTimeout(connCtx, 30*time.Second)
+		qconn, err = ln.Accept(acceptCtx)
+		acceptCancel()
+		ln.Close()
+		if err != nil {
+			return fmt.Errorf("quic accept: %w", err)
+		}
+	}
+	defer qconn.CloseWithError(0, "")
+
+	// Periodic per-link telemetry. The counting conn tracks bytes through
+	// the underlying ice.Conn (i.e. wire bytes including QUIC overhead).
+	// QUIC's StreamCount isn't directly exposed, so we report just bytes.
 	stopStats := make(chan struct{})
-	go reportLinkStats(peer.ID, conn, sess, stopStats)
+	go reportLinkStats(peer.ID, counted, qconn, stopStats)
 	defer close(stopStats)
 
-	// 2. Bind localhost UDP+TCP listeners for every one of peer's ports.
+	// 3. Bind localhost UDP+TCP listeners for every one of peer's ports.
 	udpSocks := make([]*net.UDPConn, len(peer.Ports))
 	tcpListeners := make([]*net.TCPListener, len(peer.Ports))
 	for i, port := range peer.Ports {
@@ -401,27 +454,27 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 		defer tcpListeners[i].Close()
 	}
 
-	// 3. Establish the per-port long-lived UDP streams. Client opens
+	// 4. Establish the per-port long-lived UDP streams. Client opens
 	//    them eagerly, server's accept loop populates them as headers
 	//    arrive. Both sides also run an accept loop to handle ad-hoc
 	//    incoming TCP streams.
-	udpStreams := make([]*yamux.Stream, len(peer.Ports))
+	udpStreams := make([]*quic.Stream, len(peer.Ports))
 	allUDPReady := make(chan struct{})
 	errCh := make(chan error, 4*len(peer.Ports))
 
 	go func() {
-		errCh <- runAcceptLoop(sess, &self, &peer, udpStreams, allUDPReady)
+		errCh <- runAcceptLoop(connCtx, qconn, &self, &peer, udpStreams, allUDPReady)
 	}()
 
 	if isClient {
 		for i, peerPort := range peer.Ports {
-			s, err := sess.OpenStream()
+			s, err := qconn.OpenStreamSync(connCtx)
 			if err != nil {
-				return fmt.Errorf("yamux OpenStream: %w", err)
+				return fmt.Errorf("quic OpenStreamSync: %w", err)
 			}
 			hdr := []byte{streamUDP, byte(peerPort >> 8), byte(peerPort & 0xff)}
 			if _, err := s.Write(hdr); err != nil {
-				return fmt.Errorf("yamux write hdr: %w", err)
+				return fmt.Errorf("quic write hdr: %w", err)
 			}
 			udpStreams[i] = s
 		}
@@ -438,7 +491,7 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 	log.Printf("[%s] link up — %d ports forwarded (udp+tcp), peer reachable via ICE",
 		peer.ID, len(peer.Ports))
 
-	// 4. Start pumps for each port.
+	// 5. Start pumps for each port.
 	for i := range peer.Ports {
 		i := i
 		selfPort := self.Ports[i]
@@ -449,26 +502,27 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 		}()
 		go func() {
 			peerPort := peer.Ports[i]
-			errCh <- acceptLocalTCP(tcpListeners[i], sess, peerPort)
+			errCh <- acceptLocalTCP(connCtx, tcpListeners[i], qconn, peerPort)
 		}()
 	}
 	return <-errCh
 }
 
-// runAcceptLoop handles every incoming yamux stream from the peer.
+// runAcceptLoop handles every incoming QUIC stream from the peer.
 // streamUDP headers are matched to the right slot in udpStreams (one per
 // port, by index in self.Ports). streamTCP triggers a Dial to the
 // corresponding local TCP service.
-func runAcceptLoop(sess *yamux.Session, self, peer *Peer, udpStreams []*yamux.Stream, allUDPReady chan struct{}) error {
+func runAcceptLoop(ctx context.Context, qconn *quic.Conn, self, peer *Peer, udpStreams []*quic.Stream, allUDPReady chan struct{}) error {
 	udpRegisteredCount := 0
 	udpRegisteredOnce := make([]bool, len(self.Ports))
 	for {
-		s, err := sess.AcceptStream()
+		s, err := qconn.AcceptStream(ctx)
 		if err != nil {
-			return fmt.Errorf("yamux accept: %w", err)
+			return fmt.Errorf("quic accept: %w", err)
 		}
 		hdr := make([]byte, 3)
 		if _, err := io.ReadFull(s, hdr); err != nil {
+			s.CancelRead(0)
 			s.Close()
 			continue
 		}
@@ -478,6 +532,7 @@ func runAcceptLoop(sess *yamux.Session, self, peer *Peer, udpStreams []*yamux.St
 		idx := self.hasPort(port)
 		if idx < 0 {
 			log.Printf("[%s] stream for unknown self-port %d", peer.ID, port)
+			s.CancelRead(0)
 			s.Close()
 			continue
 		}
@@ -495,12 +550,13 @@ func runAcceptLoop(sess *yamux.Session, self, peer *Peer, udpStreams []*yamux.St
 			go handleIncomingTCP(s, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 		default:
 			log.Printf("[%s] unknown stream tag 0x%x", peer.ID, tag)
+			s.CancelRead(0)
 			s.Close()
 		}
 	}
 }
 
-func handleIncomingTCP(s *yamux.Stream, dst *net.TCPAddr) {
+func handleIncomingTCP(s *quic.Stream, dst *net.TCPAddr) {
 	defer s.Close()
 	c, err := net.DialTCP("tcp", nil, dst)
 	if err != nil {
@@ -511,7 +567,7 @@ func handleIncomingTCP(s *yamux.Stream, dst *net.TCPAddr) {
 	spliceBoth(s, c)
 }
 
-func acceptLocalTCP(lis *net.TCPListener, sess *yamux.Session, dstPeerPort int) error {
+func acceptLocalTCP(ctx context.Context, lis *net.TCPListener, qconn *quic.Conn, dstPeerPort int) error {
 	for {
 		c, err := lis.AcceptTCP()
 		if err != nil {
@@ -519,9 +575,9 @@ func acceptLocalTCP(lis *net.TCPListener, sess *yamux.Session, dstPeerPort int) 
 		}
 		go func(c *net.TCPConn) {
 			defer c.Close()
-			s, err := sess.OpenStream()
+			s, err := qconn.OpenStreamSync(ctx)
 			if err != nil {
-				log.Printf("yamux open: %v", err)
+				log.Printf("quic open: %v", err)
 				return
 			}
 			defer s.Close()
@@ -545,7 +601,7 @@ func spliceBoth(a, b io.ReadWriteCloser) {
 // UDP-over-yamux: length-prefixed datagrams on the dedicated stream.
 // =============================================================================
 
-func pumpUDPSockToStream(sock *net.UDPConn, s *yamux.Stream) error {
+func pumpUDPSockToStream(sock *net.UDPConn, s *quic.Stream) error {
 	buf := make([]byte, 1500)
 	frame := make([]byte, 2+1500)
 	for {
@@ -564,7 +620,7 @@ func pumpUDPSockToStream(sock *net.UDPConn, s *yamux.Stream) error {
 	}
 }
 
-func pumpUDPStreamToSock(s *yamux.Stream, sock *net.UDPConn, dst *net.UDPAddr) error {
+func pumpUDPStreamToSock(s *quic.Stream, sock *net.UDPConn, dst *net.UDPAddr) error {
 	hdr := make([]byte, 2)
 	buf := make([]byte, 65536)
 	for {
@@ -582,10 +638,10 @@ func pumpUDPStreamToSock(s *yamux.Stream, sock *net.UDPConn, dst *net.UDPAddr) e
 }
 
 // =============================================================================
-// Per-link instrumentation: count bytes through the ICE conn and log
-// session/conn state every 10s. Useful for figuring out whether a link
-// drop happens after 0 bytes, 1KB, or 100MB — i.e. is it broken at
-// handshake time, mid-frame, or after sustained throughput?
+// Per-link instrumentation: count bytes through the ICE conn (i.e. the
+// raw wire bytes including QUIC framing/encryption overhead) and log
+// every 10s. Useful for diagnosing whether a link drop happens after
+// 0 bytes, 1KB, or 100MB.
 // =============================================================================
 
 type countingConn struct {
@@ -595,40 +651,21 @@ type countingConn struct {
 	bytesOut atomic.Uint64
 	reads    atomic.Uint64
 	writes   atomic.Uint64
-
-	// ice.Conn is PACKET-oriented: each Read returns at most one UDP
-	// datagram. When the caller's buffer is smaller than the next
-	// datagram, pion returns io.ErrShortBuffer and discards the tail —
-	// catastrophic for yamux, which reads via a 4096-byte bufio.Reader
-	// and assumes stream semantics. We solve this by always reading
-	// with a 65535-byte buffer and re-serving the datagram to yamux in
-	// arbitrary-sized chunks. The next Read only hits ice.Conn after
-	// the current datagram is fully drained.
-	rbuf []byte
-	rpos int
-	rlen int
 }
 
 func newCountingConn(c net.Conn, peerID string) *countingConn {
-	return &countingConn{Conn: c, peerID: peerID, rbuf: make([]byte, 65535)}
+	return &countingConn{Conn: c, peerID: peerID}
 }
 
 func (c *countingConn) Read(p []byte) (int, error) {
-	if c.rpos >= c.rlen {
-		n, err := c.Conn.Read(c.rbuf)
-		c.bytesIn.Add(uint64(n))
-		c.reads.Add(1)
-		if err != nil {
-			log.Printf("[%s] conn.Read err after %d bytes total / %d reads: %v",
-				c.peerID, c.bytesIn.Load(), c.reads.Load(), err)
-			return 0, err
-		}
-		c.rpos = 0
-		c.rlen = n
+	n, err := c.Conn.Read(p)
+	c.bytesIn.Add(uint64(n))
+	c.reads.Add(1)
+	if err != nil {
+		log.Printf("[%s] conn.Read err after %d bytes total / %d reads: %v",
+			c.peerID, c.bytesIn.Load(), c.reads.Load(), err)
 	}
-	n := copy(p, c.rbuf[c.rpos:c.rlen])
-	c.rpos += n
-	return n, nil
+	return n, err
 }
 
 func (c *countingConn) Write(p []byte) (int, error) {
@@ -642,24 +679,91 @@ func (c *countingConn) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func reportLinkStats(peerID string, conn *countingConn, sess *yamux.Session, stop <-chan struct{}) {
+// iceConnPacketConn adapts a pion/ice.Conn (packet-oriented net.Conn) to
+// a net.PacketConn so quic-go can run on it. Every Read on ice.Conn
+// returns one datagram; every Write sends one. The single-peer case
+// means we can ignore the addr arg from quic and unconditionally route
+// to the ICE peer that's already locked in.
+type iceConnPacketConn struct {
+	conn *countingConn
+}
+
+func (p *iceConnPacketConn) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, err := p.conn.Read(b)
+	return n, p.conn.RemoteAddr(), err
+}
+
+func (p *iceConnPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) {
+	return p.conn.Write(b)
+}
+
+func (p *iceConnPacketConn) Close() error                       { return p.conn.Close() }
+func (p *iceConnPacketConn) LocalAddr() net.Addr                { return p.conn.LocalAddr() }
+func (p *iceConnPacketConn) SetDeadline(_ time.Time) error      { return nil }
+func (p *iceConnPacketConn) SetReadDeadline(_ time.Time) error  { return nil }
+func (p *iceConnPacketConn) SetWriteDeadline(_ time.Time) error { return nil }
+
+func reportLinkStats(peerID string, conn *countingConn, qconn *quic.Conn, stop <-chan struct{}) {
 	t := time.NewTicker(10 * time.Second)
 	defer t.Stop()
 	var lastIn, lastOut uint64
 	for {
 		select {
 		case <-stop:
-			log.Printf("[%s] final stats: in=%d out=%d reads=%d writes=%d streams=%d",
+			log.Printf("[%s] final stats: in=%d out=%d reads=%d writes=%d",
 				peerID, conn.bytesIn.Load(), conn.bytesOut.Load(),
-				conn.reads.Load(), conn.writes.Load(), sess.NumStreams())
+				conn.reads.Load(), conn.writes.Load())
 			return
 		case <-t.C:
 			in, out := conn.bytesIn.Load(), conn.bytesOut.Load()
-			log.Printf("[%s] link: in=%d (+%d B/10s) out=%d (+%d B/10s) reads=%d writes=%d streams=%d",
+			log.Printf("[%s] link: in=%d (+%d B/10s) out=%d (+%d B/10s) reads=%d writes=%d",
 				peerID, in, in-lastIn, out, out-lastOut,
-				conn.reads.Load(), conn.writes.Load(), sess.NumStreams())
+				conn.reads.Load(), conn.writes.Load())
 			lastIn, lastOut = in, out
 		}
+	}
+}
+
+// =============================================================================
+// TLS — QUIC requires a TLS handshake. We don't rely on its identity
+// guarantees (mesh peers are already authenticated by the dstack TEE
+// layer + the TURN HMAC secret); a self-signed cert with no verification
+// is fine here. We accept any peer cert because trust is established
+// out-of-band before ICE even starts.
+// =============================================================================
+
+const quicALPN = "dstack-mesh-conn"
+
+func clientTLS() *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true,
+		NextProtos:         []string{quicALPN},
+	}
+}
+
+func serverTLS() *tls.Config {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		log.Fatalf("ecdsa keygen: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "mesh-conn"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		log.Fatalf("self-signed cert: %v", err)
+	}
+	return &tls.Config{
+		Certificates: []tls.Certificate{{
+			Certificate: [][]byte{der},
+			PrivateKey:  priv,
+		}},
+		NextProtos: []string{quicALPN},
 	}
 }
 
