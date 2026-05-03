@@ -100,6 +100,64 @@ needed) rotates the cluster's TEE identity → new app_id → new
 KMS-derived keys → new gossip key → new Connect CA root. **Always
 deliberate, never an accidental side-effect**.
 
+## Known limitation: worker↔worker mesh-conn instability under load
+
+Patroni leader election works (validated end-to-end: write+read on the
+elected primary). Patroni replication does **not** — `pg_basebackup`
+from leader to either replica fails reliably mid-transfer because the
+worker↔worker mesh-conn link drops within seconds of `link up`.
+
+**Symptoms (from a stuck-link debug session):**
+- ICE selects `srflx <-> prflx` and reports `Connected`
+- yamux throws `accept: short buffer` 5–60 s later
+- `runPeerLink` retries cleanly (the ICE-Failed cancel and
+  drain-then-push pollLoop fixes do their job), but the next link
+  has the same problem
+- `pg_basebackup`'s 18703 forwarder gets bound, accepts a connection,
+  starts streaming, then dies — Patroni rolls back the data dir and
+  retries indefinitely
+
+**What works:**
+- Coord↔coord, coord↔worker links: stable. Consul Raft (3 servers)
+  + 6-member catalog stays up indefinitely.
+- The worker↔worker pair *can* reach each other through ICE — this
+  isn't a "no path exists" problem. The path exists but is lossy
+  enough that yamux's framing breaks.
+
+**What didn't help (already tried):**
+- `MESH_CONN_RELAY_ONLY=1` (force pion to gather only Relay
+  candidates). Made things worse — pion's relay-only path doesn't
+  establish relay-relay pairs reliably under load (TURN allocation
+  churn is observable on the coturn side). The flag stays in the
+  code as an escape hatch but is off by default.
+- Sequenced bounces, signaling broker stale-message drop, mesh-conn
+  drain-then-push auth, ICE-Failed cancel. These all fix
+  *secondary* failure modes; the primary "yamux short buffer
+  shortly after link up" is untouched.
+
+**What probably is the root cause:**
+- The path pion picks (`srflx <-> prflx`, peer-reflexive) goes
+  through whichever NAT mapping discovered itself during the
+  connectivity check. Those mappings are short-lived on dstack's
+  worker NAT (we never see TURN-relay selected when host/srflx is
+  available). UDP packet loss on that path then truncates yamux
+  frames, and yamux has no per-frame integrity check — it just
+  errors on `accept: short buffer`.
+
+**Where to dig next (active follow-up):**
+- Instrument mesh-conn for per-link bytes-in / bytes-out / frame
+  errors / RTT. Log selected ICE pair + STUN/TURN candidate types
+  at link establishment and on every drop.
+- Cap yamux `MaxStreamWindowSize` to one-UDP-packet so partial
+  frames are impossible. (Lossy losses become "stream stall" instead
+  of "session abort".)
+- Or: replace pion+yamux with QUIC over the same coturn. QUIC has
+  per-packet integrity, retries, and connection migration — designed
+  for exactly this NAT-traversal-then-stream workload.
+- Or: switch to WireGuard between workers, using the coturn box for
+  key-exchange rendezvous only. Trades the "mesh-conn we wrote"
+  story for a battle-tested data plane.
+
 ## What was deferred from punch-list
 
 The runtime stack is solid; what's left is operational polish:
@@ -108,7 +166,7 @@ The runtime stack is solid; what's left is operational polish:
   change to cluster.tf, but pulls the "stale slot cleanup" question
   forward (a permanently-retired instance leaves a KV slot owned by
   a dead InstanceID; production wants Consul Sessions with TTL
-  instead of unconditional CAS-claim).
+  instead of unconditional CAS-claim). **Done in commit `17f4642`.**
 - **Real registry** instead of `ttl.sh` for the images.
 - **`encrypted_env`** in the Phala provider for env-passed image
   refs (low risk today; nice to have).

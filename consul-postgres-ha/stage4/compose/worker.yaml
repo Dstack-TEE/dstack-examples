@@ -49,6 +49,13 @@ services:
       - SIGNALING_URL=${SIGNALING_URL}
       - TURN_HOST=${TURN_HOST}
       - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
+      # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay candidates,
+      # routing all peer traffic through the coturn server. Trade-off:
+      # adds the Vultr round-trip to every peer hop, but avoids the
+      # direct-pair connectivity-check failures we hit between dstack
+      # workers (host/srflx/prflx pairs never establish, while relay
+      # always works). Set when DIRECT_FAILS_FOR_THIS_DEPLOYMENT.
+      - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
     volumes:
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
       - /tmp/dstack-runtime/instance:/run/instance:ro

@@ -612,15 +612,24 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 		}
 	}
 
+	// MESH_CONN_RELAY_ONLY=1 restricts candidate gathering to Relay only.
+	// Use when direct (host/srflx/prflx) connectivity is unreliable — e.g.
+	// dstack worker-to-worker pairs where pion's connectivity check fails
+	// for every direct pair and the agent never gets to relay before
+	// timing out. Trades latency for guaranteed reachability via coturn.
+	candidateTypes := []ice.CandidateType{
+		ice.CandidateTypeHost,
+		ice.CandidateTypeServerReflexive,
+		ice.CandidateTypePeerReflexive,
+		ice.CandidateTypeRelay,
+	}
+	if os.Getenv("MESH_CONN_RELAY_ONLY") == "1" {
+		candidateTypes = []ice.CandidateType{ice.CandidateTypeRelay}
+	}
 	agent, err := ice.NewAgent(&ice.AgentConfig{
-		Urls:         urls,
-		NetworkTypes: []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
-		CandidateTypes: []ice.CandidateType{
-			ice.CandidateTypeHost,
-			ice.CandidateTypeServerReflexive,
-			ice.CandidateTypePeerReflexive,
-			ice.CandidateTypeRelay,
-		},
+		Urls:           urls,
+		NetworkTypes:   []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
+		CandidateTypes: candidateTypes,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("NewAgent: %w", err)
