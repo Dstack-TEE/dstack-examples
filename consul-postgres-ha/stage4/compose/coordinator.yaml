@@ -49,6 +49,7 @@ services:
       - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
       # See worker.yaml for the rationale on MESH_CONN_RELAY_ONLY.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
+      - MESH_CONN_TCP_ONLY=${MESH_CONN_TCP_ONLY:-}
     volumes:
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
       - /tmp/dstack-runtime/instance:/run/instance:ro

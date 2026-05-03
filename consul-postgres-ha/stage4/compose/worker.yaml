@@ -56,6 +56,11 @@ services:
       # workers (host/srflx/prflx pairs never establish, while relay
       # always works). Set when DIRECT_FAILS_FOR_THIS_DEPLOYMENT.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
+      # MESH_CONN_TCP_ONLY=1 restricts ICE to TCP candidates only. The
+      # underlying conn becomes a TCP byte stream that yamux can survive
+      # on (UDP loss kills yamux keepalives — proven by trace at
+      # 268KB pg_basebackup transfers).
+      - MESH_CONN_TCP_ONLY=${MESH_CONN_TCP_ONLY:-}
     volumes:
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
       - /tmp/dstack-runtime/instance:/run/instance:ro

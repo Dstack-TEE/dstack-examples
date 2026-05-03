@@ -44,6 +44,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -344,16 +345,26 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 		return fmt.Errorf("port-count mismatch: self has %d ports, peer has %d", len(self.Ports), len(peer.Ports))
 	}
 
-	// 1. Establish ICE + wrap with yamux.
-	conn, err := dialICE(cfg, peer.ID)
+	// 1. Establish ICE + wrap with a counting+logging conn.
+	rawConn, err := dialICE(cfg, peer.ID)
 	if err != nil {
 		return fmt.Errorf("ice: %w", err)
 	}
-	defer conn.Close()
+	defer rawConn.Close()
+	conn := newCountingConn(rawConn, peer.ID)
 
 	ycfg := yamux.DefaultConfig()
-	ycfg.LogOutput = io.Discard
+	// Surface yamux's internal frame / keepalive / session errors. Without
+	// this they go to io.Discard and an "accept: short buffer" tells you
+	// nothing about WHY (was it a header, a length-prefix, a body? was it
+	// closed mid-frame?). Prefix with peer-id so multi-peer logs are usable.
+	ycfg.LogOutput = log.New(os.Stderr, fmt.Sprintf("yamux[%s] ", peer.ID), log.LstdFlags).Writer()
 	ycfg.EnableKeepAlive = true
+	// Defaults are KeepAliveInterval=30s, ConnectionWriteTimeout=10s. We
+	// experimented with 5s/5s for fast failure detection; that aggressively
+	// kills the link under sustained load (a 100KB/s burst can stall a
+	// keepalive past 5s on a TURN-relay path) — proven by tracing a
+	// pg_basebackup stream that died at 266KB transferred. Keep defaults.
 	isClient := cfg.SelfID < peer.ID
 	var sess *yamux.Session
 	if isClient {
@@ -365,6 +376,14 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 		return fmt.Errorf("yamux: %w", err)
 	}
 	defer sess.Close()
+
+	// Periodic per-link telemetry. Logs once every 10s while the link is
+	// up; exits as soon as the session closes. Cheap (atomic loads), and
+	// the byte-count series + yamux stream-count tells us at-a-glance
+	// "did pg_basebackup transfer 0, 100, or 1e9 bytes before the drop?"
+	stopStats := make(chan struct{})
+	go reportLinkStats(peer.ID, conn, sess, stopStats)
+	defer close(stopStats)
 
 	// 2. Bind localhost UDP+TCP listeners for every one of peer's ports.
 	udpSocks := make([]*net.UDPConn, len(peer.Ports))
@@ -563,6 +582,88 @@ func pumpUDPStreamToSock(s *yamux.Stream, sock *net.UDPConn, dst *net.UDPAddr) e
 }
 
 // =============================================================================
+// Per-link instrumentation: count bytes through the ICE conn and log
+// session/conn state every 10s. Useful for figuring out whether a link
+// drop happens after 0 bytes, 1KB, or 100MB — i.e. is it broken at
+// handshake time, mid-frame, or after sustained throughput?
+// =============================================================================
+
+type countingConn struct {
+	net.Conn
+	peerID   string
+	bytesIn  atomic.Uint64
+	bytesOut atomic.Uint64
+	reads    atomic.Uint64
+	writes   atomic.Uint64
+
+	// ice.Conn is PACKET-oriented: each Read returns at most one UDP
+	// datagram. When the caller's buffer is smaller than the next
+	// datagram, pion returns io.ErrShortBuffer and discards the tail —
+	// catastrophic for yamux, which reads via a 4096-byte bufio.Reader
+	// and assumes stream semantics. We solve this by always reading
+	// with a 65535-byte buffer and re-serving the datagram to yamux in
+	// arbitrary-sized chunks. The next Read only hits ice.Conn after
+	// the current datagram is fully drained.
+	rbuf []byte
+	rpos int
+	rlen int
+}
+
+func newCountingConn(c net.Conn, peerID string) *countingConn {
+	return &countingConn{Conn: c, peerID: peerID, rbuf: make([]byte, 65535)}
+}
+
+func (c *countingConn) Read(p []byte) (int, error) {
+	if c.rpos >= c.rlen {
+		n, err := c.Conn.Read(c.rbuf)
+		c.bytesIn.Add(uint64(n))
+		c.reads.Add(1)
+		if err != nil {
+			log.Printf("[%s] conn.Read err after %d bytes total / %d reads: %v",
+				c.peerID, c.bytesIn.Load(), c.reads.Load(), err)
+			return 0, err
+		}
+		c.rpos = 0
+		c.rlen = n
+	}
+	n := copy(p, c.rbuf[c.rpos:c.rlen])
+	c.rpos += n
+	return n, nil
+}
+
+func (c *countingConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	c.bytesOut.Add(uint64(n))
+	c.writes.Add(1)
+	if err != nil {
+		log.Printf("[%s] conn.Write err after %d bytes total / %d writes: %v",
+			c.peerID, c.bytesOut.Load(), c.writes.Load(), err)
+	}
+	return n, err
+}
+
+func reportLinkStats(peerID string, conn *countingConn, sess *yamux.Session, stop <-chan struct{}) {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	var lastIn, lastOut uint64
+	for {
+		select {
+		case <-stop:
+			log.Printf("[%s] final stats: in=%d out=%d reads=%d writes=%d streams=%d",
+				peerID, conn.bytesIn.Load(), conn.bytesOut.Load(),
+				conn.reads.Load(), conn.writes.Load(), sess.NumStreams())
+			return
+		case <-t.C:
+			in, out := conn.bytesIn.Load(), conn.bytesOut.Load()
+			log.Printf("[%s] link: in=%d (+%d B/10s) out=%d (+%d B/10s) reads=%d writes=%d streams=%d",
+				peerID, in, in-lastIn, out, out-lastOut,
+				conn.reads.Load(), conn.writes.Load(), sess.NumStreams())
+			lastIn, lastOut = in, out
+		}
+	}
+}
+
+// =============================================================================
 // ICE — one agent per peer pair
 // =============================================================================
 
@@ -626,9 +727,27 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 	if os.Getenv("MESH_CONN_RELAY_ONLY") == "1" {
 		candidateTypes = []ice.CandidateType{ice.CandidateTypeRelay}
 	}
+	// MESH_CONN_TCP_ONLY=1 restricts ICE to TCP NetworkTypes AND drops
+	// UDP-transport TURN URLs (pion's NetworkTypes only filters HOST
+	// candidates; Relay candidates inherit transport from their TURN
+	// URL's Proto, regardless of NetworkTypes). Without dropping UDP
+	// URLs, pion still picks `relay ... (proto=udp)` and we get the
+	// same UDP-loss behavior that kills yamux keepalives.
+	netTypes := []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4}
+	if os.Getenv("MESH_CONN_TCP_ONLY") == "1" {
+		netTypes = []ice.NetworkType{ice.NetworkTypeTCP4}
+		var tcpURLs []*stun.URI
+		for _, u := range urls {
+			if u.Proto == stun.ProtoTypeTCP {
+				tcpURLs = append(tcpURLs, u)
+			}
+		}
+		urls = tcpURLs
+		log.Printf("[%s] TCP-only mode: %d URLs after UDP filter", remoteID, len(urls))
+	}
 	agent, err := ice.NewAgent(&ice.AgentConfig{
 		Urls:           urls,
-		NetworkTypes:   []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
+		NetworkTypes:   netTypes,
 		CandidateTypes: candidateTypes,
 	})
 	if err != nil {
@@ -709,7 +828,13 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 	}
 
 	if pair, perr := agent.GetSelectedCandidatePair(); perr == nil && pair != nil {
-		log.Printf("[%s] selected pair: %s <-> %s", remoteID, pair.Local.Type(), pair.Remote.Type())
+		// Log full addresses + types so we can correlate stuck links against
+		// specific NAT mappings / TURN allocations on coturn.
+		log.Printf("[%s] selected pair: %s %s:%d <-> %s %s:%d (proto=%s)",
+			remoteID,
+			pair.Local.Type(), pair.Local.Address(), pair.Local.Port(),
+			pair.Remote.Type(), pair.Remote.Address(), pair.Remote.Port(),
+			pair.Local.NetworkType().NetworkShort())
 	}
 	return conn, nil
 }

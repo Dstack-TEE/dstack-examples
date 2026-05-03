@@ -144,19 +144,54 @@ worker↔worker mesh-conn link drops within seconds of `link up`.
   frames, and yamux has no per-frame integrity check — it just
   errors on `accept: short buffer`.
 
-**Where to dig next (active follow-up):**
-- Instrument mesh-conn for per-link bytes-in / bytes-out / frame
-  errors / RTT. Log selected ICE pair + STUN/TURN candidate types
-  at link establishment and on every drop.
-- Cap yamux `MaxStreamWindowSize` to one-UDP-packet so partial
-  frames are impossible. (Lossy losses become "stream stall" instead
-  of "session abort".)
-- Or: replace pion+yamux with QUIC over the same coturn. QUIC has
-  per-packet integrity, retries, and connection migration — designed
-  for exactly this NAT-traversal-then-stream workload.
-- Or: switch to WireGuard between workers, using the coturn box for
-  key-exchange rendezvous only. Trades the "mesh-conn we wrote"
-  story for a battle-tested data plane.
+**What an instrumentation pass actually found:**
+A trace with byte counters + yamux logging surfaced two distinct bugs
+on top of the network instability — both fixed:
+
+1. **`ice.Conn.Read` returned `io.ErrShortBuffer`.** pion's
+   `ice.Conn` is packet-oriented: each `Read` returns at most one
+   UDP datagram, and if the caller's buffer is smaller, pion
+   *truncates* the datagram and returns `ErrShortBuffer`. yamux's
+   internal `bufio.Reader` is 4096 B — TURN-encapsulated relayed
+   datagrams routinely exceed that. yamux saw a corrupt frame
+   stream and aborted with "accept: short buffer". Fixed by a
+   65535-byte packetizing adapter (`countingConn`) that always
+   reads full datagrams from `ice.Conn` and re-serves them to
+   yamux as a stream.
+
+2. **My own aggressive 5 s yamux keepalive killed the link.** I'd
+   tried `KeepAliveInterval = 5s` to detect a stuck path quickly,
+   but a single keepalive packet lost on the lossy UDP path under
+   a `pg_basebackup` burst was enough to trigger keepalive timeout
+   and tear the session down. Reverted to 30 s/10 s defaults.
+
+**What still doesn't work (the actual wall):**
+After both fixes, link establishes via `relay <-> relay` through
+the Vultr coturn, transfers ~268 KB of pg_basebackup data cleanly,
+then the next yamux keepalive packet is lost on the UDP relay leg
+and yamux closes the session. yamux assumes a reliable byte stream
+(TCP-like) — it has no retransmit. coturn relays via UDP between
+the two clients regardless of the client→TURN transport.
+
+**TCP-only escape hatch attempted (`MESH_CONN_TCP_ONLY=1`):**
+Restricts pion to TCP NetworkTypes AND filters TURN URLs to
+`Proto=TCP`. pion still picks `relay ... (proto=udp)` because
+relay candidates inherit transport from the *relayed* leg (always
+UDP unless RFC 6062 TCP allocation is requested, which pion's TURN
+client doesn't do).
+
+**Next-step options when this is picked back up:**
+- Replace yamux with QUIC over the same coturn. QUIC has per-packet
+  integrity, retransmit, and connection migration — designed for
+  exactly this NAT-traversal-then-stream workload.
+- Or: bypass mesh-conn entirely between workers — use WireGuard
+  with coturn as a key-exchange rendezvous only. Battle-tested data
+  plane, gives up the "we wrote it" property but solves the
+  reliability problem.
+- Or: get RFC 6062 (TURN-TCP allocation) plumbed end-to-end
+  (worker → coturn over TCP, coturn → coturn local, coturn →
+  worker over TCP). pion's TURN client needs the allocation
+  request; coturn supports it.
 
 ## What was deferred from punch-list
 
