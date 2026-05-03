@@ -180,18 +180,10 @@ relay candidates inherit transport from the *relayed* leg (always
 UDP unless RFC 6062 TCP allocation is requested, which pion's TURN
 client doesn't do).
 
-**Next-step options when this is picked back up:**
-- Replace yamux with QUIC over the same coturn. QUIC has per-packet
-  integrity, retransmit, and connection migration — designed for
-  exactly this NAT-traversal-then-stream workload.
-- Or: bypass mesh-conn entirely between workers — use WireGuard
-  with coturn as a key-exchange rendezvous only. Battle-tested data
-  plane, gives up the "we wrote it" property but solves the
-  reliability problem.
-- Or: get RFC 6062 (TURN-TCP allocation) plumbed end-to-end
-  (worker → coturn over TCP, coturn → coturn local, coturn →
-  worker over TCP). pion's TURN client needs the allocation
-  request; coturn supports it.
+**Pickup guide for the next session:** [`RESUME.md`](RESUME.md) has
+the live cluster's app IDs, the exact reproducer for the stuck-link
+trace, what was already ruled out, and a list of open hypotheses
+that deserve fresh eyes — without prejudging the fix.
 
 ## What was deferred from punch-list
 
