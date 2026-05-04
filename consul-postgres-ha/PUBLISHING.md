@@ -62,7 +62,7 @@ want to round-trip through CI for every byte. Two equivalent shortcuts:
 ```bash
 TS=$(date +%s)
 TAG=ttl.sh/dstack-mesh-conn-${TS}:24h
-docker build -t $TAG consul-postgres-ha/stage4/mesh-conn
+docker build -t $TAG consul-postgres-ha/mesh-conn
 docker push $TAG
 ```
 
@@ -77,7 +77,7 @@ If you want a longer-lived dev image without going through main:
 ```bash
 echo "$GITHUB_TOKEN" | docker login ghcr.io -u <your-user> --password-stdin
 TAG=ghcr.io/<your-user>/consul-postgres-ha-mesh-conn:dev-$(date +%s)
-docker build -t $TAG consul-postgres-ha/stage4/mesh-conn
+docker build -t $TAG consul-postgres-ha/mesh-conn
 docker push $TAG
 ```
 
@@ -127,7 +127,7 @@ cluster:
 1. Decide whether you're pinning to `:latest` (drifts) or to the
    `:sha-...` tag from the new run (recommended). Find the new SHA by
    inspecting the workflow run's output or `gh run view`.
-2. Edit `consul-postgres-ha/stage4/cluster-example/terraform.tfvars`
+2. Edit `consul-postgres-ha/cluster-example/terraform.tfvars`
    to that pin.
 3. `terraform apply`. Per-CVM compose re-renders and the dstack agent
    recreates each service. (Or hot-patch per §3 if you want to verify

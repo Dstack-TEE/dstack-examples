@@ -1,4 +1,4 @@
-module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/stage4/quic-on-ice
+module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/quic-on-ice
 
 go 1.24
 

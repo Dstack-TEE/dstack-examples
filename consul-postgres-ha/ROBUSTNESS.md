@@ -1,7 +1,7 @@
 # Robustness review
 
 We've assembled a tower of clever-ish components: CVMs behind a NAT,
-ICE hole-punch, yamux multiplexer, identity-port forwarding, Consul +
+ICE hole-punch, QUIC stream multiplexer, identity-port forwarding, Consul +
 Envoy mTLS on top. Each layer earns its keep — but that's exactly
 when it's worth being honest about how the whole thing fails.
 
@@ -13,9 +13,9 @@ do we do about it?", and lands on a prioritised punch list.
 ```
   Layer 3   apps         Consul + Envoy + webdemo
                          (HashiCorp / Lyft code, well-trodden)
-  Layer 2   forwarder    mesh-conn ~330 LoC: per-peer port plan,
+  Layer 2   forwarder    mesh-conn ~700 LoC: per-peer port plan,
                          source-port preservation
-  Layer 1   transport    pion/ice + yamux: punched UDP path,
+  Layer 1   transport    pion/ice + QUIC: punched UDP path,
                          stream multiplex, flow control, keepalive
   Layer 0   rendezvous   coturn + signalling broker on a public box;
                          dstack CVMs behind a provider NAT
@@ -74,13 +74,13 @@ whose direct path goes down can't fail over to TURN until it's back".
    AppAuth-rooted signatures on `auth` + `candidate` messages so a
    compromised broker can't impersonate a peer.
 
-## Layer 1 — pion/ice + yamux
+## Layer 1 — pion/ice + QUIC
 
 ### What's there
 
 - one ICE connection per peer-pair (6 in our 4-CVM cluster),
   established via signalling broker + coturn
-- one `yamux.Session` per ICE conn, with `EnableKeepAlive=true`
+- one `QUIC.Session` per ICE conn, with `EnableKeepAlive=true`
 - the streams flowing inside (one long-lived UDP-per-port,
   on-demand TCP-per-conn)
 
@@ -88,12 +88,12 @@ whose direct path goes down can't fail over to TURN until it's back".
 
 | failure                               | impact                                                                | recovery |
 | ---                                   | ---                                                                   | ---      |
-| ICE conn drops (NAT timeout, route change, peer reboot) | yamux session ends. All streams over it break. Pumps return errors. | mesh-conn's `runPeerLink` catches the error and re-runs `dialAndPump` after a 5s sleep. |
-| ICE state stalls without dropping (pion bug) | Streams hang. yamux keep-alive ping eventually fails → session ends → restart loop kicks in. | automatic via keep-alive timeout. |
+| ICE conn drops (NAT timeout, route change, peer reboot) | QUIC session ends. All streams over it break. Pumps return errors. | mesh-conn's `runPeerLink` catches the error and re-runs `dialAndPump` after a 5s sleep. |
+| ICE state stalls without dropping (pion bug) | Streams hang. QUIC keep-alive ping eventually fails → session ends → restart loop kicks in. | automatic via keep-alive timeout. |
 | `pion/ice` panics                     | Whole mesh-conn process crashes; Docker restart policy `on-failure` brings it back. | automatic; ICE re-handshakes on next start. |
-| yamux session can't be created (handshake mismatch) | mesh-conn errors out, retry loop. | automatic. |
+| QUIC session can't be created (handshake mismatch) | mesh-conn errors out, retry loop. | automatic. |
 | **Reconnect deadlock** (real bug, see below) | After ICE drop + reconnect, mesh-conn hangs on `<-sess.authCh` because the channel is buffered with one slot already filled by the previous session's auth. | manual restart for now. **Should fix.** |
-| Resource exhaustion (many TCP streams) | yamux per-session limits kick in (256 streams default); new TCP streams to that peer fail. UDP and existing TCP unaffected. | bump `AcceptBacklog` / `MaxIncomingStreams` if it ever hits us at scale. |
+| Resource exhaustion (many TCP streams) | QUIC per-session limits kick in (256 streams default); new TCP streams to that peer fail. UDP and existing TCP unaffected. | bump `AcceptBacklog` / `MaxIncomingStreams` if it ever hits us at scale. |
 | Head-of-line blocking | A big TCP write on one stream briefly delays a UDP datagram or another TCP stream. Imperceptible at Consul scale. | None needed today. If a future workload becomes jitter-sensitive, split into two ICE conns per pair (UDP-only + TCP-only). |
 
 ### The reconnect deadlock — the one real bug
@@ -137,11 +137,11 @@ drops, but it would bite the first time we did.
 
 1. **Fix the auth-channel reconnect bug.** As above. Highest priority
    single fix in this whole document.
-2. **Set a yamux read deadline on the UDP-stream pumps**, so if a
-   stream silently stalls (yamux keep-alive happens at session
+2. **Set a QUIC read deadline on the UDP-stream pumps**, so if a
+   stream silently stalls (QUIC keep-alive happens at session
    level, not stream level), the pump returns and `runPeerLink`
    restarts.
-3. **Tune yamux `MaxStreamWindowSize`** if we ever need higher
+3. **Tune QUIC `MaxStreamWindowSize`** if we ever need higher
    throughput; default is 256 KB which is fine for now.
 
 ## Layer 2 — mesh-conn forwarder
@@ -160,7 +160,7 @@ drops, but it would bite the first time we did.
 | Two peers configured with the same identity port | mesh-conn's `net.ListenUDP` fails on startup; container retries forever, never succeeds. | catch on deploy: validate PEERS_JSON before deploy. |
 | Peer count mismatch in PEERS_JSON | `len(self.Ports) != len(peer.Ports)` → connection refused with explicit error. | already handled. |
 | Local app binds same port as mesh-conn forwarder for a peer | EADDRINUSE; whichever started second loses. | enforce in compose / startup ordering. |
-| **mesh-conn dies** | All peer-pair links from this CVM drop. yamux + ICE on every other peer notice via keep-alive within ~30 s and tear down. Consul agent gossip-timeouts (~10 s default) drop this CVM from the catalog. Sidecars on other peers stop sending here. | container `restart: on-failure` brings it back; everyone re-handshakes. |
+| **mesh-conn dies** | All peer-pair links from this CVM drop. QUIC + ICE on every other peer notice via keep-alive within ~30 s and tear down. Consul agent gossip-timeouts (~10 s default) drop this CVM from the catalog. Sidecars on other peers stop sending here. | container `restart: on-failure` brings it back; everyone re-handshakes. |
 | **Source-port-preservation breaks** (e.g. someone changes port plan and forgets to update an app) | Receiving Consul agent sees gossip from "wrong" address, labels it as a new node, may try to add it to membership; cluster gets confused. | add an integration test that boots cluster + writes KV from each peer + reads from each peer. |
 | 3-byte header parse confusion | Receiver gets a malformed header, currently logs and closes the stream. Other streams unaffected. | already handled defensively. |
 
@@ -174,7 +174,7 @@ protocol.
 The mitigations are mostly testing discipline:
 
 - a small integration test that brings up 3+ peers in containers
-  locally, runs cross-peer UDP echo + TCP echo + yamux burst, on
+  locally, runs cross-peer UDP echo + TCP echo + QUIC burst, on
   every CI run.
 - a fault-injection mode that randomly kills the ICE conn — to
   exercise the reconnect path (which is where the real bug lives).
@@ -198,16 +198,18 @@ The mitigations are mostly testing discipline:
 
 ### What's there
 
-- single Consul server on `ctrl`, three clients on workers
+- three Consul servers (Raft quorum) on the coordinator CVMs, three
+  clients on the worker CVMs
 - Connect enabled, default CA, allow intention webdemo→webdemo
-- Envoy sidecars front-running each webdemo
+- Envoy sidecars front-running each webdemo and Patroni
 - gossip key NOT set; RPC TLS NOT set
 
 ### What can break
 
 | failure                          | impact                                                              | recovery |
 | ---                              | ---                                                                 | ---      |
-| **`ctrl` (single Consul server) dies** | Cluster has no leader. Workers can still gossip, but: cannot register/deregister services, cannot mint Connect leaf certs, cannot change intentions. Existing Envoy sidecars keep running on cached config; new sidecars block on cert issuance. | bring `ctrl` back. **Or**: run 3 servers across the workers for real HA. |
+| One Consul server CVM dies       | Quorum survives (2 of 3). All cluster ops continue. | dstack recreates the CVM on next `terraform apply`; Consul rejoins, Raft re-replicates. |
+| **Two Consul server CVMs die at once** | No quorum. Workers can still gossip, but: cannot register/deregister services, cannot mint Connect leaf certs, cannot change intentions. Existing Envoy sidecars keep running on cached config; new sidecars block on cert issuance. | bring at least one server back. |
 | Worker's Consul agent dies       | That worker drops out of the catalog. Existing sidecar keeps running on cached config but new connections to it fail. | container `restart: unless-stopped` brings it back; rejoins automatically. |
 | Envoy sidecar dies               | All in-flight mTLS connections through it drop. App's calls to `127.0.0.1:19000` get connection refused. | container restart. ~5 s downtime per peer. |
 | Connect CA root expiry           | All sidecar leaf certs go invalid; whole mesh stops. | `consul connect ca set-config` to rotate root, or default 5-year root won't bite us in this experiment. |
@@ -218,28 +220,35 @@ The mitigations are mostly testing discipline:
 
 ### Risk shape
 
-The single Consul server is the **biggest structural SPOF** in the
-whole stack. It's a perfectly reasonable simplification for an
-experiment, but it would be the very first thing to fix for a real
-deployment.
+The Consul server tier is now redundant (3 servers, Raft, single-CVM
+loss survivable). The remaining structural risk is **all three
+coordinator CVMs failing simultaneously** — same dstack edge, same
+provider — which is rare but not impossible.
 
 The crypto omissions (gossip key, RPC TLS) are **technically wrong
 posture** but practically masked because Layer 3 mTLS already
 protects everything that matters. Still want to fix for defence in
 depth.
 
-### Recommended fixes
+### Recommended fixes (still open)
 
-1. **Three Consul servers** — run on `ctrl`, `w1`, `w2` (`w3`
-   stays a client). `bootstrap_expect=3`. Survives single-CVM loss.
-2. **Set a gossip key** — `consul keygen | base64`, pass to every
+1. **Set a gossip key** — `consul keygen | base64`, pass to every
    agent via env, hardcode in compose.
-3. **Use a real registry**, not ttl.sh. GHCR works; we already
-   have GitHub auth.
-4. **Cluster health endpoint** outside Consul — a separate tiny
+2. **Cluster health endpoint** outside Consul — a separate tiny
    service that polls `/v1/status/leader` and `/v1/health/state/any`
    on each peer and emits red/green. Avoids "we don't know what's
    wrong with the cluster" mode.
+
+### Already shipped
+
+- **Three Consul servers** — landed in commit `17f4642`. The
+  coordinator app deploys with `replicas = 3` and Consul agents on
+  those CVMs run as servers with `bootstrap_expect = 3`. Workers
+  retry-join through every coordinator's serf port via mesh-conn,
+  so the single-coordinator-failure scenario stays operational.
+- **Real registry** — Sigstore-attested GHCR images via
+  `.github/workflows/consul-postgres-ha-publish.yml`. See
+  `PUBLISHING.md`.
 
 ## Cross-layer concerns
 

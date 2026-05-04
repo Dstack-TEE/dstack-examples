@@ -5,89 +5,102 @@ running on top of all of it.
 
 ## Layer 0 — physical / dstack reality
 
-Four dstack CVMs (`ctrl`, `w1`, `w2`, `w3`), TEE-isolated, sitting
+Six dstack CVMs (3 coordinators + 3 workers), TEE-isolated, sitting
 behind Phala's provider NAT. **They cannot reach each other directly**
-on any L3 path. The only thing they share is outbound internet
-egress.
+on any L3 path. Every CVM NATs out to the same public IP, so even a
+"direct" peer-to-peer flow is hairpinned by the provider edge. The
+only thing the CVMs share is outbound internet egress.
 
-Plus one plain Linux box with a public IP (`155.138.146.255`) running
-`coturn` (STUN/TURN) and a tiny HTTP signalling broker. This is
-rendezvous infrastructure only — once peers have ICE-handshaked, no
-data passes through it (in our deployment ICE always picks the direct
-hole-punched path; TURN is the available fallback).
+Plus one plain Linux box with a public IP — the **external
+coordinator** — running `coturn` (STUN/TURN) and a tiny HTTP
+signaling broker. This is rendezvous infrastructure only: once peers
+have ICE-handshaked, no data passes through it (TURN is the fallback
+when direct ICE candidates can't establish).
 
 ```
-                      coturn + signalling
-                      155.138.146.255
+                      coturn + signaling
+                      <external IP>
                               ▲
                 outbound      │ STUN binding
                 UDP+TCP       │ ICE candidate exchange
                               │
-        ┌─────────────────────┼─────────────────────┐
-        │                     │                     │
-   [ctrl CVM]            [w1 CVM]              [w2 CVM]    [w3 CVM]
-                          (no L3 connectivity to each other)
+        ┌─────────────────────┼─────────────────────────────────┐
+        │                     │                                 │
+   [coord-0]  [coord-1]  [coord-2]   [worker-3]  [worker-4]  [worker-5]
+                            (no L3 connectivity to each other)
 ```
 
 ## Layer 1 — mesh-conn pair-wise overlay
 
 For every **pair** of peers, mesh-conn establishes one `pion/ice`
 connection. ICE punches a direct UDP path through the NAT (in our
-deployment NAT-hairpinned to `66.220.6.105`, see
-[deploy/phase0-results.md](deploy/phase0-results.md)) and stays put.
-The signalling broker drops out of the picture once each pair is up.
+deployment NAT-hairpinned via the provider edge) and stays put. The
+signaling broker drops out of the picture once each pair is up.
 
-Per pair we then run **one yamux session** over the ICE conn. Yamux
-multiplexes streams; some are long-lived (one per protocol port,
-carrying length-prefixed UDP datagrams), the rest are ephemeral (one
-per accepted TCP connection).
+Per pair we then run **one QUIC connection** (quic-go) over the
+ICE conn, treating `ice.Conn` as a `net.PacketConn`. QUIC provides
+loss recovery, congestion control, and stream multiplexing on top of
+the lossy UDP underlay. Streams come in two flavours: some are
+long-lived (one per protocol port, carrying length-prefixed UDP
+datagrams), the rest are ephemeral (one per accepted TCP connection).
 
 ```
-            ┌── ICE conn / yamux ──┐
-   ctrl ◄══►│      direct UDP      │◄══►  w1
-            └── (NAT hairpin)      ┘
-   ctrl ◄══►━━━━━━━━━━━━━━━━━━━━━━━◄══►  w2
-   ctrl ◄══►━━━━━━━━━━━━━━━━━━━━━━━◄══►  w3
-   w1   ◄══►━━━━━━━━━━━━━━━━━━━━━━━◄══►  w2
-   w1   ◄══►━━━━━━━━━━━━━━━━━━━━━━━◄══►  w3
-   w2   ◄══►━━━━━━━━━━━━━━━━━━━━━━━◄══►  w3
+              ┌── ICE conn / QUIC ──┐
+   coord-0  ◄═│      direct UDP     │═►  worker-3
+              └── (NAT hairpin)     ┘
+   coord-0  ◄════════════════════════►  worker-4
+   coord-0  ◄════════════════════════►  worker-5
+   coord-0  ◄════════════════════════►  coord-1
+   coord-0  ◄════════════════════════►  coord-2
+   ...                                   (full mesh)
 ```
 
-Six ICE connections in a 4-peer full mesh (4×3/2). Each peer maintains
-three of them.
+A 6-peer full mesh has 15 ICE connections (6×5/2). Each peer
+maintains five of them.
+
+> Why QUIC and not yamux: yamux assumes a reliable byte-stream
+> underlay. `pion/ice.Conn` is UDP, and the path between dstack CVMs
+> is lossy enough (~99% one direction on hairpin, ~78% on coturn
+> relay) that yamux's keepalive and recv-window invariants trip
+> almost immediately under load. QUIC has the loss recovery + flow
+> control that yamux is forced to assume from below it.
 
 ## Layer 2 — identity-port plane
 
 This is the trick that makes the overlay invisible to the applications
 above. Every peer has a unique port for every protocol. mesh-conn
 binds the **other** peers' identity ports on `127.0.0.1` and bridges
-each one to the right ICE+yamux peer link, **preserving source ports**
+each one to the right ICE+QUIC peer link, **preserving source ports**
 so the destination app sees the packet as coming from
 `127.0.0.1:<sender's identity port>` — which is exactly what the app
 uses to identify the sender.
 
 So inside any CVM the entire cluster looks like a single loopback
-host:
+host. Eight protocol ports per peer (serf_lan, server_rpc, http_api,
+grpc, webdemo, sidecar_public, postgres, patroni_rest), spread by
+`base + ordinal`:
 
 ```
-                       inside w1 CVM (network_mode: host)
+                  inside worker-3 CVM (network_mode: host)
    ┌───────────────────────────────────────────────────────────────────┐
-   │ local apps bind their OWN ports:                                  │
+   │ local apps bind their OWN identity ports (base + ordinal=3):      │
    │                                                                   │
-   │   consul agent      ▶  127.0.0.1:18001 (serf)  18101 (rpc)        │
-   │                        18201 (http)   18301 (grpc)                │
-   │   webdemo           ▶  127.0.0.1:18501                            │
-   │   envoy sidecar     ▶  127.0.0.1:18601 (public mTLS)              │
-   │                        127.0.0.1:19000 (upstream → "webdemo")     │
+   │   consul agent      ▶  127.0.0.1:18003 (serf)  18103 (rpc)        │
+   │                        18203 (http)   18303 (grpc)                │
+   │   webdemo           ▶  127.0.0.1:18503                            │
+   │   envoy sidecar     ▶  127.0.0.1:18603 (public mTLS)              │
+   │   patroni / pg      ▶  127.0.0.1:18703 (postgres) 18803 (REST)    │
    │                                                                   │
    │ mesh-conn binds OTHER peers' identity ports on 127.0.0.1:         │
    │                                                                   │
-   │   18000, 18100, 18200, 18300, 18500, 18600  ◄── ctrl              │
-   │   18002, 18102, 18202, 18302, 18502, 18602  ◄── w2                │
-   │   18003, 18103, 18203, 18303, 18503, 18603  ◄── w3                │
+   │   ports[0..7] + 0 ◄── coord-0                                     │
+   │   ports[0..7] + 1 ◄── coord-1                                     │
+   │   ports[0..7] + 2 ◄── coord-2                                     │
+   │   ports[0..7] + 4 ◄── worker-4                                    │
+   │   ports[0..7] + 5 ◄── worker-5                                    │
    │                                                                   │
    │ all UDP/TCP traffic to those ports is shipped through the         │
-   │ matching ICE+yamux session to the corresponding peer.             │
+   │ matching ICE+QUIC connection to the corresponding peer.           │
    └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -96,111 +109,107 @@ peers' ports bound by mesh-conn.
 
 ## Layer 3 — apps
 
-Consul agents, Envoy sidecars, webdemo, anything else. These think
-they're talking to peers on `127.0.0.1`. They never see ICE, yamux,
-TURN, or the public internet. Stock HashiCorp Consul, stock Envoy.
+Consul agents, Envoy sidecars, webdemo, Patroni, anything else. These
+think they're talking to peers on `127.0.0.1`. They never see ICE,
+QUIC, TURN, or the public internet. Stock HashiCorp Consul, stock
+Envoy, stock Patroni.
 
 ## How a single call traverses all four layers
 
-A Connect-style mTLS call from w1's webdemo to w3's webdemo:
+A Connect-style mTLS call from `worker-3`'s webdemo to `worker-4`'s
+webdemo:
 
 ```
-w1 webdemo
+worker-3 webdemo
   GET http://127.0.0.1:19000/hello             ── Layer 3, app on its
   │                                                local sidecar upstream
   ▼
-w1 envoy sidecar
+worker-3 envoy sidecar
   picks endpoint via Consul-supplied EDS
-  opens mTLS to "127.0.0.1:18603" (w3's sidecar — really mesh-conn's listener)
+  opens mTLS to "127.0.0.1:18604" (worker-4's sidecar via mesh-conn)
   │
   ▼
-w1 mesh-conn (port 18603 TCP listener)
+worker-3 mesh-conn (TCP listener on 127.0.0.1:18604)
   reads bytes off the local TCP listener
-  opens a yamux TCP-stream tagged "port=18603"
-  writes through the w1↔w3 ICE session                      ── Layer 2 → 1
+  opens a QUIC stream tagged "port=18604"
+  writes through the worker-3↔worker-4 QUIC connection      ── Layer 2 → 1
   │     ╱
-  │    ╱  here is where Layer 1 (raw bytes over the
-  │   ╱   ICE conn / yamux mux) meets Layer 0 (UDP
-  │  ╱    packets across the public internet, NAT-
-  │ ╱     hairpinned to 66.220.6.105)
+  │    ╱  here Layer 1 (QUIC frames over the ICE conn)
+  │   ╱   meets Layer 0 (UDP packets across the public
+  │  ╱    internet, NAT-hairpinned via the provider edge)
+  │ ╱
   ▼
-w3 mesh-conn (yamux stream accept on the w1 ICE conn)
-  reads stream header → "port=18603"
-  dials TCP to 127.0.0.1:18603 (w3's actual sidecar)
+worker-4 mesh-conn (QUIC stream accept on the worker-3 ICE conn)
+  reads stream header → "port=18604"
+  dials TCP to 127.0.0.1:18604 (worker-4's actual sidecar)
   splices stream ↔ TCP conn                                 ── Layer 1 → 2
   │
   ▼
-w3 envoy sidecar
+worker-4 envoy sidecar
   validates origin's mTLS cert against Connect CA
   checks intention webdemo → webdemo (allow)
-  forwards to local 127.0.0.1:18503 (LocalServicePort)
+  forwards to local 127.0.0.1:18504 (LocalServicePort)
   │
   ▼
-w3 webdemo
-  serves /hello → "hello from w3"                           ── Layer 3
+worker-4 webdemo
+  serves /hello → "hello from worker-4"                     ── Layer 3
 ```
 
 Reply takes the same path in reverse.
 
-## mesh-conn × yamux — how they work together
+## mesh-conn × QUIC — how they work together
 
 The bit that's worth being precise about: mesh-conn is built on top
-of pion/ice and HashiCorp's yamux. The wire layout is small enough to
-write down completely.
+of `pion/ice` and `quic-go`. The wire layout is small enough to write
+down completely.
 
 ### What mesh-conn has after ICE
 
-After the ICE handshake, mesh-conn has one thing per peer-pair:
+After the ICE handshake, mesh-conn has one `*ice.Conn` per peer-pair.
+That's a `net.Conn`-shaped object whose underlying wire is a single
+UDP socket through pion. mesh-conn wraps it as a `net.PacketConn` and
+hands that to `quic-go`, which performs a TLS 1.3 handshake (self-
+signed, since peer trust is bootstrapped from the TURN HMAC + dstack
+TEE layer, not TLS identity) and gives back a `*quic.Conn`.
 
-```go
-conn *ice.Conn   // duplex byte stream over the punched UDP path
-```
+### Why QUIC for the mux
 
-`ice.Conn` is a `net.Conn`-shaped object. The wire underneath is one
-UDP socket, but pion/ice already deals with retransmits and ordering —
-from mesh-conn's perspective, it's a reliable bidirectional byte
-stream. We never write raw datagrams; we use it like a TCP-ish conn.
+We need to carry multiple logical channels over the unreliable UDP
+underlay:
 
-### Why yamux
+- One long-lived stream per identity port (8 of these per peer-pair)
+  carrying length-prefixed UDP datagrams.
+- One ephemeral stream per accepted local TCP connection, opened and
+  closed on demand.
 
-We need to carry **multiple logical channels** over that one byte
-stream:
-
-- one long-lived "UDP pipe" per identity port (4 of these for stage
-  2, 6 for stage 3b — one per protocol)
-- one TCP stream per accepted local TCP connection (open and close
-  on demand, dozens at a time during normal Consul + Connect
-  operation)
-
-Yamux is HashiCorp's stream-multiplexer in pure Go. Takes a `net.Conn`
-and gives back a `Session` that can `OpenStream()` and
-`AcceptStream()`, where each `Stream` is itself a `net.Conn`. Frames
-(12-byte header) interleave on the wire; flow control is per-stream.
+QUIC has all of that built in: streams (`OpenStreamSync` /
+`AcceptStream`), per-stream and per-connection flow control, loss
+recovery, congestion control, and an idle-timeout-driven liveness
+check. Crucially, it does not assume a reliable underlay — *unlike*
+yamux, which we tried first and gave up on. The earlier yamux build
+sustained ~3 KB on the dstack hairpin path before its keepalive /
+recv-window invariants tripped on dropped packets. QUIC sustains
+~25 MB/s on the same path.
 
 ### Client / server roles
 
-Yamux is asymmetric: one side runs `yamux.Client(conn, cfg)`, the
-other runs `yamux.Server(conn, cfg)`. The protocol works in both
-directions equally — either side can `OpenStream()` — but they need
-to disagree on the role.
-
-mesh-conn picks the role from peer IDs in lex-order, the same
-convention used for ICE Dial vs Accept:
+QUIC is asymmetric like yamux: one side `quic.Dial`s, the other
+`quic.Listen`s and `Accept`s. Roles are picked from peer IDs in lex
+order — same convention as ICE Dial / Accept:
 
 ```go
 isClient := cfg.SelfID < peer.ID
 if isClient {
-    sess, err = yamux.Client(conn, ycfg)
+    qconn, err = quic.Dial(ctx, packetConn, remoteAddr, tls, cfg)
 } else {
-    sess, err = yamux.Server(conn, ycfg)
+    ln, _ := quic.Listen(packetConn, tls, cfg)
+    qconn, err = ln.Accept(ctx)
 }
 ```
 
-### Stream protocol (mesh-conn's framing on top of yamux)
+### Stream protocol (mesh-conn's framing on top of QUIC)
 
-When a yamux stream opens, the **first 3 bytes** carry a tiny
-mesh-conn-level header that tells the receiver what to do with the
-stream:
+When a stream opens, the **first 3 bytes** carry a mesh-conn header:
 
 ```
 +------+-----------+-----------+
@@ -218,140 +227,30 @@ protocol slot this stream serves. The receiver looks it up in
 `self.Ports`, finds the index, and pairs the stream with the right
 local socket / dial target.
 
-### What happens at session boot
+UDP-over-stream uses an explicit 2-byte big-endian length prefix per
+datagram, since QUIC streams are byte-oriented (like yamux was) and
+don't preserve the original UDP datagram boundaries on their own.
+TCP forwarding needs no framing — the splice is two `io.Copy`
+goroutines and the underlying app already speaks TCP semantics.
 
-```
-client side                                server side
-─────────────                              ─────────────
-yamux.Client(iceConn)                      yamux.Server(iceConn)
-   │                                          │
-   │  for each port in peer.Ports:            │  acceptLoop():
-   │     OpenStream()                         │     stream := AcceptStream()
-   │     write [0x55, port_hi, port_lo]    ──►│     read 3-byte header
-   │     keep stream as udpStreams[i]         │     match port → self.Ports[idx]
-   │                                          │     udpStreams[idx] = stream
-   │                                          │
-   │  bind UDP+TCP listeners on               │  bind UDP+TCP listeners on
-   │  127.0.0.1:<each peer.Ports[i]>          │  127.0.0.1:<each peer.Ports[i]>
-   │                                          │
-   ▼                                          ▼
-        ─── start the four pumps (next) ───
-```
+### What that gets us
 
-The server's accept loop keeps running for the lifetime of the
-session. After the initial UDP streams are registered, every later
-incoming stream tagged `0x33` is treated as a TCP forward.
+- **Stream multiplexing** — UDP + TCP channels share one ICE conn
+  without interference.
+- **Loss recovery + congestion control** — provided by QUIC, not us.
+  This is the difference between "works under load" and "doesn't".
+- **Per-stream + per-connection flow control** — a slow consumer on
+  one stream doesn't block others; aggregate windows protect the
+  receiver.
+- **Half-close + idle timeout** — TCP-style FIN per stream;
+  connection-level `MaxIdleTimeout` (60s) tears down the conn
+  cleanly when the underlay dies, surfacing errors to our pump
+  goroutines rather than letting them hang.
 
-### The four pumps (per protocol port, on each side)
-
-For every protocol port both sides bind a UDP socket, and four
-goroutines run continuously to shuttle bytes:
-
-```
-  app  ──UDP──► [sock]  ─pump1─►  [udpStream] ─yamux─►  [udpStream]  ─pump2─►  [sock] ──UDP──►  app
-                                       ICE conn
-  app  ◄──UDP── [sock]  ◄─pump2─  [udpStream] ◄─yamux─  [udpStream]  ◄─pump1─  [sock] ◄──UDP──  app
-```
-
-Concretely the pump bodies (UDP path):
-
-```go
-// pump1: take a UDP datagram off the local socket, write it
-// length-prefixed to the udpStream, where yamux frames and ships it.
-func pumpUDPSockToStream(sock *net.UDPConn, s *yamux.Stream) error {
-    buf, frame := make([]byte, 1500), make([]byte, 2+1500)
-    for {
-        n, _, err := sock.ReadFromUDP(buf)
-        if err != nil { return err }
-        binary.BigEndian.PutUint16(frame[:2], uint16(n))
-        copy(frame[2:], buf[:n])
-        s.Write(frame[:2+n])              // yamux Stream.Write
-    }
-}
-
-// pump2: read length-prefixed datagrams off the stream, deliver them
-// to the local socket with `dst` = 127.0.0.1:<self port>.
-// The receiving app sees the packet land on its own identity port,
-// with source = the socket's bound port (= sender's identity port).
-func pumpUDPStreamToSock(s *yamux.Stream, sock *net.UDPConn, dst *net.UDPAddr) error {
-    hdr, buf := make([]byte, 2), make([]byte, 65536)
-    for {
-        if _, err := io.ReadFull(s, hdr); err != nil { return err }
-        n := int(binary.BigEndian.Uint16(hdr))
-        if _, err := io.ReadFull(s, buf[:n]); err != nil { return err }
-        sock.WriteToUDP(buf[:n], dst)
-    }
-}
-```
-
-Important bit: `yamux.Stream` is stream-oriented (like TCP), so we
-**must** length-prefix our UDP datagrams ourselves — otherwise we'd
-lose datagram boundaries. This is the only place mesh-conn does
-explicit framing.
-
-### TCP streams are simpler — no framing needed
-
-```go
-// Local TCP listener: each Accept opens a fresh yamux stream.
-func acceptLocalTCP(lis *net.TCPListener, sess *yamux.Session, dstPeerPort int) error {
-    for {
-        c, _ := lis.AcceptTCP()
-        go func(c *net.TCPConn) {
-            defer c.Close()
-            s, _ := sess.OpenStream()
-            defer s.Close()
-            s.Write([]byte{streamTCP, byte(dstPeerPort >> 8), byte(dstPeerPort)})
-            spliceBoth(s, c)            // io.Copy in both directions
-        }(c)
-    }
-}
-
-// On the receiving side: when a stream opens with streamTCP tag,
-// dial the matching local TCP service and splice.
-func handleIncomingTCP(s *yamux.Stream, dst *net.TCPAddr) {
-    defer s.Close()
-    c, _ := net.DialTCP("tcp", nil, dst)
-    defer c.Close()
-    spliceBoth(s, c)
-}
-```
-
-`spliceBoth` is two `io.Copy` goroutines, exits when either side
-finishes. The TCP path needs no length prefix because both ends are
-stream-oriented — yamux preserves order, the app underneath doesn't
-care about packet boundaries.
-
-### Why this gives us everything we need
-
-Yamux's **flow control + ordered delivery** are exactly the right
-primitives for both kinds of traffic:
-
-- TCP forwarding gets a transparent byte conduit. Envoy's mTLS and
-  Consul's RPC don't even know they're running on yamux instead of a
-  real TCP socket.
-- UDP forwarding: yamux's order-preservation means our length-prefixed
-  datagrams never get torn or reordered between the two pumps. It
-  does add **head-of-line blocking** — a long TCP send can briefly
-  delay a UDP datagram — but for Consul-volume traffic that's
-  invisible.
-
-The whole thing is **one ICE conn per peer-pair, one yamux session per
-ICE conn**, plus a 3-byte header per stream and a 2-byte length prefix
-per UDP datagram. That is the entirety of mesh-conn's wire format.
-
-### What yamux gives us for free
-
-- **Stream multiplexing** — both kinds of traffic and the per-port
-  channels share one ICE conn without interference.
-- **Per-stream flow control** — a slow consumer on one stream doesn't
-  block other streams.
-- **Half-close semantics** — TCP-style FIN on the stream. `io.Copy`
-  exits cleanly when the app on the other side closes its socket.
-- **Keep-alive pings** — `EnableKeepAlive: true` makes yamux send
-  pings; if the ICE conn dies, the session detects it and the pumps
-  return errors instead of hanging.
-
-If we hadn't picked yamux, we'd have written all of those by hand.
+The whole thing is **one ICE conn per peer-pair, one QUIC connection
+per ICE conn**, plus a 3-byte header per stream and a 2-byte length
+prefix per UDP datagram. That is the entirety of mesh-conn's wire
+format.
 
 ## Trust boundaries
 
@@ -377,9 +276,11 @@ If we hadn't picked yamux, we'd have written all of those by hand.
   webdemo all think they're on a flat loopback. Anything that runs
   against Consul today (Vault, Nomad, Boundary, custom apps) drops in
   unchanged.
-- **Layer 1 is a single component (mesh-conn, ~330 LoC Go) and has
-  zero awareness of Consul.** It just bridges ports. It would equally
-  well move Postgres replication, Redis Sentinel, Kafka, etc.
+- **Layer 1 is a single component (mesh-conn, ~700 LoC Go including
+  the QUIC adapter) and has zero awareness of Consul.** It just
+  bridges ports. It would equally well move Postgres replication,
+  Redis Sentinel, Kafka, etc. — and in fact this example uses it for
+  Patroni+Postgres replication.
 - **Layer 0 is dumb infra.** Just a public IP running coturn + a tiny
   broker. Fungible and not in the data path once peers are connected.
 

@@ -1,8 +1,8 @@
 name: Publish consul-postgres-ha images
 
-# Builds and publishes the six container images that the stage-4
-# consul-postgres-ha example needs (mesh-conn, bootstrap-secrets,
-# signaling, webdemo, sidecar, patroni). On push to main, images are
+# Builds and publishes the six container images the consul-postgres-ha
+# example needs (mesh-conn, bootstrap-secrets, signaling, webdemo,
+# sidecar, patroni). On push to main, images are
 # tagged with the commit SHA *and* `latest`, pushed to GHCR, and
 # attested with Sigstore-backed GitHub Build Provenance so consumers
 # can verify "this image came from this commit of this repo" without
@@ -23,21 +23,21 @@ on:
   push:
     branches: [main]
     paths:
-      - 'consul-postgres-ha/stage4/mesh-conn/**'
-      - 'consul-postgres-ha/stage4/bootstrap-secrets/**'
-      - 'consul-postgres-ha/stage4/patroni/**'
-      - 'consul-postgres-ha/stage3b/webdemo/**'
-      - 'consul-postgres-ha/stage3b/sidecar/**'
-      - 'consul-postgres-ha/phase0/icetest/**'
+      - 'consul-postgres-ha/mesh-conn/**'
+      - 'consul-postgres-ha/bootstrap-secrets/**'
+      - 'consul-postgres-ha/patroni/**'
+      - 'consul-postgres-ha/webdemo/**'
+      - 'consul-postgres-ha/sidecar/**'
+      - 'consul-postgres-ha/signaling/**'
       - '.github/workflows/consul-postgres-ha-publish.yml'
   pull_request:
     paths:
-      - 'consul-postgres-ha/stage4/mesh-conn/**'
-      - 'consul-postgres-ha/stage4/bootstrap-secrets/**'
-      - 'consul-postgres-ha/stage4/patroni/**'
-      - 'consul-postgres-ha/stage3b/webdemo/**'
-      - 'consul-postgres-ha/stage3b/sidecar/**'
-      - 'consul-postgres-ha/phase0/icetest/**'
+      - 'consul-postgres-ha/mesh-conn/**'
+      - 'consul-postgres-ha/bootstrap-secrets/**'
+      - 'consul-postgres-ha/patroni/**'
+      - 'consul-postgres-ha/webdemo/**'
+      - 'consul-postgres-ha/sidecar/**'
+      - 'consul-postgres-ha/signaling/**'
       - '.github/workflows/consul-postgres-ha-publish.yml'
   workflow_dispatch:
 
@@ -60,17 +60,17 @@ jobs:
       matrix:
         include:
           - name: mesh-conn
-            context: consul-postgres-ha/stage4/mesh-conn
+            context: consul-postgres-ha/mesh-conn
           - name: bootstrap-secrets
-            context: consul-postgres-ha/stage4/bootstrap-secrets
+            context: consul-postgres-ha/bootstrap-secrets
           - name: patroni
-            context: consul-postgres-ha/stage4/patroni
+            context: consul-postgres-ha/patroni
           - name: signaling
-            context: consul-postgres-ha/phase0/icetest
+            context: consul-postgres-ha/signaling
           - name: webdemo
-            context: consul-postgres-ha/stage3b/webdemo
+            context: consul-postgres-ha/webdemo
           - name: sidecar
-            context: consul-postgres-ha/stage3b/sidecar
+            context: consul-postgres-ha/sidecar
 
     steps:
       - uses: actions/checkout@v4

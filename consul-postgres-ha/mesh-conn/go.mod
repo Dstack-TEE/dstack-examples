@@ -1,4 +1,4 @@
-module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/stage4/mesh-conn
+module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/mesh-conn
 
 go 1.24
 

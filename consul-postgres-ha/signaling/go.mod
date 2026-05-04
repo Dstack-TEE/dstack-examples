@@ -1,4 +1,4 @@
-module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/phase0/icetest
+module github.com/Dstack-TEE/dstack-examples/consul-postgres-ha/signaling
 
 go 1.22
 
