@@ -1,46 +1,47 @@
-# Stage 4 — coordinator compose template.
+# Coordinator compose template — Gap 2 single-sidecar layout.
 #
-# A "coordinator" CVM bundles:
-#   - bootstrap-secrets (init container, runs once, populates tmpfs)
-#   - mesh-conn         (UDP+TCP port-forwarder over ICE+yamux)
-#   - consul agent      (server, -bootstrap-expect=1 initially)
-#   - signaling         (HTTP broker for ICE candidate exchange)
-#   - coturn            (STUN+TURN, requires Phala UDP ingress)
+# A coordinator CVM runs exactly one container: the consolidated
+# `sidecar` image with ROLE=coordinator. Inside it:
 #
-# Identity flow: bootstrap-secrets reads dstack SDK Info(),
-# derives cluster-wide secrets via getKey(), writes to /run/secrets
-# tmpfs. Sibling services depend on it via service_completed_successfully.
+#   bootstrap-secrets  one-shot init — derives per-CVM secrets from
+#                      the dstack KMS, claims COORDINATOR_ORDINAL,
+#                      writes /run/instance/info.json.
+#   mesh-conn          QUIC-on-pion/ICE overlay (same as on workers).
+#   consul             Server agent (`-server -bootstrap-expect=N -ui`),
+#                      joins peer coordinators via mesh-conn-forwarded
+#                      loopback ports. envoy is NOT started here
+#                      (coordinators don't host a Connect-mTLS workload).
+#
+# coturn + signaling that earlier coordinator templates carried have
+# been removed: the cluster uses an external (Vultr) coordinator box
+# for both — see consul-postgres-ha/coordinator/docker-compose.yaml —
+# configured into each peer's mesh-conn via SIGNALING_URL / TURN_HOST /
+# TURN_SHARED_SECRET. The dstack-coordinator's local copies were never
+# reachable from outside (Phala dstack apps don't have UDP ingress
+# yet), so they were dead code burning CPU. When/if UDP ingress lands,
+# re-adding them is one small PR.
 #
 # Per-CVM secrets policy: nothing on the persisted disk holds secret
 # material. /run/secrets/* is tmpfs (gone on reboot, re-derived on
-# next boot). /consul/data IS persisted but only contains catalog,
-# KV, and Raft state (not the gossip key).
+# next boot from getKey()). /consul/data IS persisted but only
+# contains catalog, KV, and Raft state — no gossip key material.
 
 services:
-  bootstrap-secrets:
-    image: ${BOOTSTRAP_SECRETS_IMAGE}
-    network_mode: host
-    restart: "no"
-    environment:
-      - CLUSTER_NAME=${CLUSTER_NAME}
-      - ROLE=coordinator
-      - PROTOCOL_BASES=${PROTOCOL_BASES}
-      # COORDINATOR_ORDINAL is per-CVM (0..N-1); makes bootstrap-secrets
-      # write the right /run/instance/info.json without needing Consul
-      # KV (which is itself on the coordinators — chicken-and-egg).
-      - COORDINATOR_ORDINAL=${COORDINATOR_ORDINAL}
-    volumes:
-      - /var/run/dstack.sock:/var/run/dstack.sock:ro
-      # Bind mounts (NOT named volumes) — see compose footer note
-      - /tmp/dstack-runtime/secrets:/run/secrets
-      - /tmp/dstack-runtime/instance:/run/instance
-
-  mesh-conn:
-    image: ${MESH_CONN_IMAGE}
+  sidecar:
+    image: ${MESH_SIDECAR_IMAGE}
     network_mode: host
     restart: on-failure
     environment:
+      - ROLE=coordinator
+      - CLUSTER_NAME=${CLUSTER_NAME}
+      - PROTOCOL_BASES=${PROTOCOL_BASES}
       - PEERS_JSON=${PEERS_JSON}
+      # COORDINATOR_ORDINAL is per-CVM (0..N-1); makes bootstrap-secrets
+      # write the right /run/instance/info.json without needing Consul
+      # KV (which itself runs on the coordinators — chicken-and-egg).
+      - COORDINATOR_ORDINAL=${COORDINATOR_ORDINAL}
+      - BOOTSTRAP_EXPECT=${BOOTSTRAP_EXPECT}
+      - COORDINATOR_SERF_PORTS=${COORDINATOR_SERF_PORTS}
       # External coordinator path — coordinator's mesh-conn uses the
       # same Vultr coturn + signaling that workers do, so peer-pair
       # ICE rendezvous happens in a single shared place.
@@ -50,104 +51,24 @@ services:
       # See worker.yaml for the rationale on MESH_CONN_RELAY_ONLY.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
     volumes:
-      - /tmp/dstack-runtime/secrets:/run/secrets:ro
-      - /tmp/dstack-runtime/instance:/run/instance:ro
-    depends_on:
-      bootstrap-secrets:
-        condition: service_completed_successfully
-
-  signaling:
-    image: ${SIGNALING_IMAGE}
-    network_mode: host
-    restart: unless-stopped
-    command: ["-mode=signaling", "-addr=:7000"]
-    depends_on:
-      bootstrap-secrets:
-        condition: service_completed_successfully
-
-  coturn:
-    image: coturn/coturn:4.6
-    network_mode: host
-    restart: unless-stopped
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -e
-        TURN_SECRET=$$(cat /run/secrets/turn)
-        exec turnserver -n \
-          --realm=${CLUSTER_NAME} \
-          --listening-port=3478 \
-          --tls-listening-port=5349 \
-          --min-port=49152 --max-port=49999 \
-          --use-auth-secret \
-          --static-auth-secret=$$TURN_SECRET \
-          --no-cli --no-multicast-peers \
-          --log-file=stdout --simple-log --fingerprint
-    volumes:
-      - /tmp/dstack-runtime/secrets:/run/secrets:ro
-    depends_on:
-      bootstrap-secrets:
-        condition: service_completed_successfully
-
-  consul:
-    image: hashicorp/consul:1.19
-    network_mode: host
-    restart: unless-stopped
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -e
-        # Ports come from /run/instance/info.json (computed by
-        # bootstrap-secrets from PROTOCOL_BASES + ordinal).
-        SERF=$$(jq -r '.ports.serf_lan'   /run/instance/info.json)
-        RPC=$$(jq -r  '.ports.server_rpc' /run/instance/info.json)
-        HTTP=$$(jq -r '.ports.http_api'   /run/instance/info.json)
-        GRPC=$$(jq -r '.ports.grpc'       /run/instance/info.json)
-        # Build -retry-join args for every OTHER coordinator (skip self).
-        # COORDINATOR_SERF_PORTS is comma-separated, e.g. "18000,18001,18002".
-        RETRYJOIN=""
-        for p in $$(echo "${COORDINATOR_SERF_PORTS}" | tr ',' ' '); do
-          if [ "$$p" != "$$SERF" ]; then
-            RETRYJOIN="$$RETRYJOIN -retry-join=127.0.0.1:$$p"
-          fi
-        done
-        exec consul agent \
-          -server -bootstrap-expect=${BOOTSTRAP_EXPECT} -ui \
-          -node=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json) \
-          -datacenter=${CLUSTER_NAME} \
-          -bind=127.0.0.1 -advertise=127.0.0.1 -client=127.0.0.1 \
-          -serf-lan-port=$$SERF \
-          -server-port=$$RPC \
-          -http-port=$$HTTP \
-          -grpc-port=$$GRPC \
-          -dns-port=-1 \
-          $$RETRYJOIN \
-          -data-dir=/consul/data \
-          -hcl='connect { enabled = true }' \
-          -log-level=INFO
-    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets
+      - /tmp/dstack-runtime/instance:/run/instance
       - consul-data:/consul/data
-      - /tmp/dstack-runtime/secrets:/run/secrets:ro
-      - /tmp/dstack-runtime/instance:/run/instance:ro
-    depends_on:
-      bootstrap-secrets:
-        condition: service_completed_successfully
-
-  tester:
-    image: nicolaka/netshoot:latest
-    network_mode: host
-    command: ["sleep", "infinity"]
-    depends_on: [consul, mesh-conn]
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/instance/info.json"]
+      interval: 2s
+      timeout: 1s
+      retries: 60
+      start_period: 5s
 
 volumes:
   consul-data:
 
-# NOTE: shared state goes through HOST BIND MOUNTS, not named docker
-# volumes. On the dstack platform we run on, named volumes don't share
-# data across containers — the second container always sees an empty
-# volume even when the first wrote to it (filed as a phala-cloud
-# issue). Bind mounts to the CVM's /tmp work fine.
-#
-# /tmp is ephemeral inside the TEE; secrets are re-derived
-# deterministically from getKey() on every boot, so the on-disk copy
-# is effectively a per-boot cache.
+# Shared state goes through HOST BIND MOUNTS, not named docker volumes
+# — on the dstack platform we run on, named volumes don't share data
+# across containers (the second container always sees an empty volume
+# even after the first wrote to it; filed as a phala-cloud issue).
+# Bind mounts to the CVM's /tmp work fine. /tmp is ephemeral inside
+# the TEE; secrets are re-derived deterministically from getKey() on
+# every boot, so the on-disk copy is effectively a per-boot cache.

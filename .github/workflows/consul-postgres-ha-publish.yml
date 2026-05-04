@@ -1,42 +1,49 @@
 name: Publish consul-postgres-ha images
 
-# Builds and publishes the six container images the consul-postgres-ha
-# example needs (mesh-conn, bootstrap-secrets, signaling, webdemo,
-# sidecar, patroni). On push to main, images are
-# tagged with the commit SHA *and* `latest`, pushed to GHCR, and
-# attested with Sigstore-backed GitHub Build Provenance so consumers
-# can verify "this image came from this commit of this repo" without
-# us managing any keys. PRs build to verify but do not push or attest.
+# Builds and publishes the four container images the consul-postgres-ha
+# example needs (mesh-sidecar, patroni, webdemo, signaling). On push
+# to main, images are tagged with the commit SHA *and* `latest`,
+# pushed to GHCR, and attested with Sigstore-backed GitHub Build
+# Provenance so consumers can verify "this image came from this
+# commit of this repo" without us managing any keys. PRs build to
+# verify but do not push or attest.
 #
-# Why six images on one workflow: the example needs all of them in
-# lockstep — bumping mesh-conn alone but leaving the rest stale leads
-# to mixed-version clusters that are hard to reason about. One workflow
-# means one set of tags moves together.
+# Why one workflow for all four: the example needs them in lockstep —
+# bumping one but leaving the rest stale leads to mixed-version
+# clusters that are hard to reason about. One workflow means one set
+# of tags moves together.
+#
+# `mesh-sidecar` is the consolidated platform-plumbing image (formerly
+# four images: bootstrap-secrets, mesh-conn, the legacy keepalive, and
+# the old envoy-only sidecar). Its build context is the parent
+# consul-postgres-ha/ directory so its Dockerfile can pull the Go
+# sources from sibling subdirs. The other three images build from
+# their own subdirs.
 #
 # Verifying a published image (consumer side):
 #
 #   gh attestation verify \
-#     oci://ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-conn:latest \
+#     oci://ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-sidecar:latest \
 #     --repo Dstack-TEE/dstack-examples
 
 on:
   push:
     branches: [main]
     paths:
-      - 'consul-postgres-ha/mesh-conn/**'
       - 'consul-postgres-ha/bootstrap-secrets/**'
+      - 'consul-postgres-ha/mesh-conn/**'
+      - 'consul-postgres-ha/mesh-sidecar/**'
       - 'consul-postgres-ha/patroni/**'
       - 'consul-postgres-ha/webdemo/**'
-      - 'consul-postgres-ha/sidecar/**'
       - 'consul-postgres-ha/signaling/**'
       - '.github/workflows/consul-postgres-ha-publish.yml'
   pull_request:
     paths:
-      - 'consul-postgres-ha/mesh-conn/**'
       - 'consul-postgres-ha/bootstrap-secrets/**'
+      - 'consul-postgres-ha/mesh-conn/**'
+      - 'consul-postgres-ha/mesh-sidecar/**'
       - 'consul-postgres-ha/patroni/**'
       - 'consul-postgres-ha/webdemo/**'
-      - 'consul-postgres-ha/sidecar/**'
       - 'consul-postgres-ha/signaling/**'
       - '.github/workflows/consul-postgres-ha-publish.yml'
   workflow_dispatch:
@@ -59,18 +66,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: mesh-conn
-            context: consul-postgres-ha/mesh-conn
-          - name: bootstrap-secrets
-            context: consul-postgres-ha/bootstrap-secrets
+          # `mesh-sidecar` builds with the parent dir as context so
+          # its Dockerfile can pull bootstrap-secrets/ and mesh-conn/
+          # Go sources from siblings.
+          - name: mesh-sidecar
+            context: consul-postgres-ha
+            dockerfile: consul-postgres-ha/mesh-sidecar/Dockerfile
           - name: patroni
             context: consul-postgres-ha/patroni
-          - name: signaling
-            context: consul-postgres-ha/signaling
           - name: webdemo
             context: consul-postgres-ha/webdemo
-          - name: sidecar
-            context: consul-postgres-ha/sidecar
+          - name: signaling
+            context: consul-postgres-ha/signaling
 
     steps:
       - uses: actions/checkout@v4
@@ -90,7 +97,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          # Image namespace lives one level under the repo so all six
+          # Image namespace lives one level under the repo so all four
           # images sit side-by-side: ghcr.io/<owner>/<repo>/consul-postgres-ha-<name>
           images: ${{ env.REGISTRY }}/${{ github.repository }}/consul-postgres-ha-${{ matrix.name }}
           tags: |
@@ -103,6 +110,10 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
+          # Most images use the default Dockerfile in the context.
+          # `mesh-sidecar` overrides this to point at
+          # mesh-sidecar/Dockerfile while keeping the parent context.
+          file: ${{ matrix.dockerfile || format('{0}/Dockerfile', matrix.context) }}
           platforms: linux/amd64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}

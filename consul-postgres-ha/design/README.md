@@ -12,7 +12,6 @@ in their face.
 
 | Doc | What |
 |---|---|
-| [`single-sidecar.md`](single-sidecar.md) | Collapse the 5 platform-plumbing containers (`keepalive`, `bootstrap-secrets`, `mesh-conn`, `consul`, `sidecar`/Envoy) into one image with a small shell-init multi-process supervisor. Per-CVM container count: 8 → 3. |
 | [`attestation-admission.md`](attestation-admission.md) | Use dstack TEE attestation as the mesh-conn admission credential, replacing/augmenting the shared TURN HMAC. Phased plan: per-app-id first, Consul-KV-rooted policy later. |
 
 Each doc includes:

@@ -7,7 +7,7 @@
 # came from this repo with:
 #
 #   gh attestation verify \
-#     oci://ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-conn:latest \
+#     oci://ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-sidecar:latest \
 #     --repo Dstack-TEE/dstack-examples
 #
 # For dev iteration, replace any single line with a `ttl.sh/...:24h`
@@ -18,12 +18,9 @@ coordinator_replicas   = 3
 worker_replicas        = 3
 gateway_domain         = "dstack-pha-prod5.phala.network"
 
-bootstrap_secrets_image = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-bootstrap-secrets:latest"
-mesh_conn_image         = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-conn:latest"
-signaling_image         = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-signaling:latest"
-webdemo_image           = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-webdemo:latest"
-sidecar_image           = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-sidecar:latest"
-patroni_image           = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-patroni:latest"
+mesh_sidecar_image = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-sidecar:latest"
+webdemo_image      = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-webdemo:latest"
+patroni_image      = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-patroni:latest"
 
 # external_coordinator_host  = "<vultr-ip>"
 # external_signaling_url     = "http://<vultr-ip>:7000"
