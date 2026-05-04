@@ -100,11 +100,14 @@ func (p *iceConnPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 	return p.conn.Write(b)
 }
 
-func (p *iceConnPacketConn) Close() error                       { return p.conn.Close() }
-func (p *iceConnPacketConn) LocalAddr() net.Addr                { return p.conn.LocalAddr() }
-func (p *iceConnPacketConn) SetDeadline(t time.Time) error      { return nil }
-func (p *iceConnPacketConn) SetReadDeadline(t time.Time) error  { return nil }
-func (p *iceConnPacketConn) SetWriteDeadline(t time.Time) error { return nil }
+func (p *iceConnPacketConn) Close() error        { return p.conn.Close() }
+func (p *iceConnPacketConn) LocalAddr() net.Addr { return p.conn.LocalAddr() }
+
+// Deadlines delegate to the ICE conn so quic-go can interrupt a
+// blocked ReadFrom on context cancel; mirrors mesh-conn/main.go.
+func (p *iceConnPacketConn) SetDeadline(t time.Time) error      { return p.conn.SetDeadline(t) }
+func (p *iceConnPacketConn) SetReadDeadline(t time.Time) error  { return p.conn.SetReadDeadline(t) }
+func (p *iceConnPacketConn) SetWriteDeadline(t time.Time) error { return p.conn.SetWriteDeadline(t) }
 
 // =============================================================================
 // QUIC client / server over the PacketConn

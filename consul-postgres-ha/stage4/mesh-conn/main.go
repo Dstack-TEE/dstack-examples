@@ -697,11 +697,20 @@ func (p *iceConnPacketConn) WriteTo(b []byte, _ net.Addr) (int, error) {
 	return p.conn.Write(b)
 }
 
-func (p *iceConnPacketConn) Close() error                       { return p.conn.Close() }
-func (p *iceConnPacketConn) LocalAddr() net.Addr                { return p.conn.LocalAddr() }
-func (p *iceConnPacketConn) SetDeadline(_ time.Time) error      { return nil }
-func (p *iceConnPacketConn) SetReadDeadline(_ time.Time) error  { return nil }
-func (p *iceConnPacketConn) SetWriteDeadline(_ time.Time) error { return nil }
+func (p *iceConnPacketConn) Close() error        { return p.conn.Close() }
+func (p *iceConnPacketConn) LocalAddr() net.Addr { return p.conn.LocalAddr() }
+
+// Deadline methods delegate to ice.Conn (via the embedded net.Conn on
+// countingConn) instead of being a no-op. quic-go relies on
+// SetReadDeadline to interrupt a blocked ReadFrom when its context
+// cancels — without this delegation, a quic.Dial whose context times
+// out (e.g. because ICE went Failed mid-handshake) would hang forever
+// in our shim, and the surrounding runPeerLink retry loop never gets
+// to retry. Pion's ice.Conn implements the deadline methods, so this
+// is the natural place to wire them through.
+func (p *iceConnPacketConn) SetDeadline(t time.Time) error      { return p.conn.SetDeadline(t) }
+func (p *iceConnPacketConn) SetReadDeadline(t time.Time) error  { return p.conn.SetReadDeadline(t) }
+func (p *iceConnPacketConn) SetWriteDeadline(t time.Time) error { return p.conn.SetWriteDeadline(t) }
 
 // reportLinkStats logs a periodic summary per peer link. Once a minute,
 // and only when bytes actually moved since the last tick, so an idle
