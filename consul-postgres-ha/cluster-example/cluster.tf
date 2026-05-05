@@ -51,18 +51,24 @@ variable "gateway_domain" {
   description = "Phala dstack gateway domain (e.g. dstack-pha-prod5.phala.network)"
 }
 
-variable "bootstrap_secrets_image" { type = string }
-variable "mesh_conn_image"         { type = string }
-variable "signaling_image"         { type = string }
-variable "webdemo_image"           { type = string }
-variable "sidecar_image"           { type = string }
-variable "patroni_image"           { type = string }
+# Image references. Gap 2 collapsed bootstrap-secrets, mesh-conn, the
+# legacy keepalive placeholder, and the old envoy-only sidecar into
+# one `mesh_sidecar_image` (consul-postgres-ha-mesh-sidecar) — workers
+# and coordinators both reference it and the entrypoint dispatches on
+# ROLE. The `signaling` image is still published by CI (used by the
+# external Vultr coordinator), but no dstack CVM in this cluster
+# references it, so it isn't a Terraform input here.
+variable "mesh_sidecar_image" { type = string }
+variable "webdemo_image"      { type = string }
+variable "patroni_image"      { type = string }
 
-# External coordinator (Vultr coturn + signaling box) used until
-# Phala admin enables UDP ingress on dstack apps. coordinator's own
-# coturn + signaling services in compose still run but are unused.
+# External coordinator (Vultr coturn + signaling box). Used until
+# Phala admin enables UDP ingress on dstack apps; once that lands we
+# can host coturn + signaling inside the dstack mesh and drop these
+# external_* vars. The dstack-coordinator compose no longer carries
+# unused local copies of those services.
 variable "external_coordinator_host" { type = string }
-variable "external_signaling_url"    { type = string }
+variable "external_signaling_url" { type = string }
 variable "external_turn_secret" {
   type      = string
   sensitive = true
@@ -147,22 +153,20 @@ resource "phala_app" "coordinator" {
   region         = "US-WEST-1"
   disk_size      = 20
   replicas       = 1
-  storage_fs     = "zfs"   # MUST pin (terraform-provider-phala#5)
+  storage_fs     = "zfs" # MUST pin (terraform-provider-phala#5)
   docker_compose = file("${path.module}/../compose/coordinator.yaml")
 
   env = {
-    CLUSTER_NAME             = var.cluster_name
-    PROTOCOL_BASES           = local.protocol_bases_json
-    PEERS_JSON               = local.peers_json
-    COORDINATOR_ORDINAL      = tostring(each.value)
-    BOOTSTRAP_EXPECT         = tostring(var.coordinator_replicas)
-    COORDINATOR_SERF_PORTS   = local.coordinator_serf_ports
-    SIGNALING_URL            = var.external_signaling_url
-    TURN_HOST                = var.external_coordinator_host
-    TURN_SHARED_SECRET       = var.external_turn_secret
-    BOOTSTRAP_SECRETS_IMAGE  = var.bootstrap_secrets_image
-    MESH_CONN_IMAGE          = var.mesh_conn_image
-    SIGNALING_IMAGE          = var.signaling_image
+    CLUSTER_NAME           = var.cluster_name
+    PROTOCOL_BASES         = local.protocol_bases_json
+    PEERS_JSON             = local.peers_json
+    COORDINATOR_ORDINAL    = tostring(each.value)
+    BOOTSTRAP_EXPECT       = tostring(var.coordinator_replicas)
+    COORDINATOR_SERF_PORTS = local.coordinator_serf_ports
+    SIGNALING_URL          = var.external_signaling_url
+    TURN_HOST              = var.external_coordinator_host
+    TURN_SHARED_SECRET     = var.external_turn_secret
+    MESH_SIDECAR_IMAGE     = var.mesh_sidecar_image
   }
 
   listed         = false
@@ -202,21 +206,19 @@ resource "phala_app" "worker" {
   docker_compose = file("${path.module}/../compose/worker.yaml")
 
   env = {
-    CLUSTER_NAME             = var.cluster_name
-    PROTOCOL_BASES           = local.protocol_bases_json
-    PEERS_JSON               = local.peers_json
-    WORKER_ORDINAL           = tostring(each.value)
-    EXPECTED_REPLICAS        = var.worker_replicas + var.coordinator_replicas
-    COORDINATOR_SERF_PORTS   = local.coordinator_serf_ports
-    COORDINATOR_HTTP_PORTS   = local.coordinator_http_ports
-    SIGNALING_URL            = var.external_signaling_url
-    TURN_HOST                = var.external_coordinator_host
-    TURN_SHARED_SECRET       = var.external_turn_secret
-    BOOTSTRAP_SECRETS_IMAGE  = var.bootstrap_secrets_image
-    MESH_CONN_IMAGE          = var.mesh_conn_image
-    WEBDEMO_IMAGE            = var.webdemo_image
-    SIDECAR_IMAGE            = var.sidecar_image
-    PATRONI_IMAGE            = var.patroni_image
+    CLUSTER_NAME           = var.cluster_name
+    PROTOCOL_BASES         = local.protocol_bases_json
+    PEERS_JSON             = local.peers_json
+    WORKER_ORDINAL         = tostring(each.value)
+    EXPECTED_REPLICAS      = var.worker_replicas + var.coordinator_replicas
+    COORDINATOR_SERF_PORTS = local.coordinator_serf_ports
+    COORDINATOR_HTTP_PORTS = local.coordinator_http_ports
+    SIGNALING_URL          = var.external_signaling_url
+    TURN_HOST              = var.external_coordinator_host
+    TURN_SHARED_SECRET     = var.external_turn_secret
+    MESH_SIDECAR_IMAGE     = var.mesh_sidecar_image
+    WEBDEMO_IMAGE          = var.webdemo_image
+    PATRONI_IMAGE          = var.patroni_image
   }
 
   listed         = false
@@ -230,7 +232,7 @@ resource "phala_app" "worker" {
 }
 
 output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k => c.app_id } }
-output "worker_app_ids"      { value = { for k, w in phala_app.worker : k => w.app_id } }
+output "worker_app_ids" { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "consul_ui" {
   # Any coordinator's HTTP port serves the UI. Pick coord-0 by convention.
   value = "https://${phala_app.coordinator["0"].app_id}-${local.coordinator_http_port_first}s.${var.gateway_domain}/ui"

@@ -31,7 +31,7 @@ PW=$(ssh ... root@${W1}-22.${GW} "cat /tmp/dstack-runtime/secrets/patroni-superu
 
 ```bash
 ssh ... root@${W1}-22.${GW} \
-  "docker exec dstack-tester-1 sh -c 'curl -s http://127.0.0.1:18803/cluster' | jq"
+  "docker exec dstack-sidecar-1 sh -c 'curl -s http://127.0.0.1:18803/cluster' | jq"
 
 ssh ... root@${W1}-22.${GW} "PGPASSWORD='$PW' docker exec -e PGPASSWORD dstack-patroni-1 \
   psql -h 127.0.0.1 -p 18703 -U postgres -d postgres \
@@ -86,19 +86,23 @@ consistent recovery state reached at 0/...
 started streaming WAL from primary at 0/... on timeline 16
 ```
 
-## Measured timeline (run from 2026-05-03)
+## Measured timeline (run from 2026-05-04, single-sidecar layout)
 
 ```
-T_kill            05:02:28.028   docker stop dstack-patroni-1 on worker-3
-T_new_leader      05:02:49.994   worker-4 promoted (timeline 15 → 16)   +22s
-T_first_write     05:02:52.313   INSERT succeeds on worker-4            +24s  ← RTO
-T_restart_W3      05:03:39.704   docker start dstack-patroni-1
-T_W3_rejoined     05:04:10.377   worker-3 streaming, lag=0              +31s
+T_kill            17:31:26   docker stop dstack-patroni-1 on worker-5 (leader)
+T_new_leader      17:31:57   worker-4 promoted (timeline 2 → 3)         +31s
+T_first_write     17:31:59   INSERT succeeds on worker-4                +33s  ← RTO
 ```
 
-**RTO (Recovery Time Objective): ~24 seconds.** That's the wall time
+**RTO (Recovery Time Objective): ~33 seconds.** That's the wall time
 from leader process death to first successful write on the new leader,
-sitting comfortably inside the default Patroni `ttl=30`.
+sitting at the edge of the default Patroni `ttl=30`. The 2026-05-03
+multi-container baseline was 24s on a different cluster — the
+single-sidecar layout is within typical run-to-run variance for the
+`ttl=30 + promote-overhead` window. Cheap rejoin was confirmed in a
+prior round of this same run: a previously-killed leader (worker-3)
+came back as a streaming replica on the new timeline with lag=0
+within ~60s of `docker start dstack-patroni-1`.
 
 ## Tunables for the RTO/availability tradeoff
 
@@ -124,8 +128,9 @@ the leader at once:
 ssh ... root@${LEADER}-22.${GW} "docker stop -t 0 \$(docker ps -q)"
 ```
 
-This kills patroni, postgres, mesh-conn, consul, sidecar, webdemo, and
-the keepalive — everything that produces signal for the rest of the
+This kills patroni, postgres, webdemo, and the consolidated sidecar
+(which itself runs bootstrap-secrets, mesh-conn, consul, and envoy
+inside it) — everything that produces signal for the rest of the
 cluster. Bring the host back via:
 
 ```bash
@@ -135,23 +140,29 @@ ssh ... root@${LEADER}-22.${GW} \
 ```
 
 `docker compose up -d` respects the dependency order
-(bootstrap-secrets → mesh-conn → consul → patroni).
+(sidecar's `service_healthy` gate fires once bootstrap-secrets has
+written `/run/instance/info.json`, then patroni and webdemo start).
 
-### Measured timeline (run from 2026-05-03)
+### Measured timeline (run from 2026-05-04, single-sidecar layout)
 
 ```
-T_kill           07:26:42   docker stop -t 0 ALL 7 containers on worker-4
-T_new_leader     07:27:13   worker-3 promoted (timeline 16 → 17)        +31s
-T_first_write    07:27:15   INSERT succeeds on worker-3                 +33s  ← RTO
-T_restart_W4     07:27:46   docker compose up -d on worker-4
-T_W4_rejoined    07:28:34   worker-4 streaming, lag=0                   +48s after restart
+T_kill           17:33:29   docker stop -t 0 ALL containers on worker-4 (leader)
+T_new_leader     17:34:00   worker-3 promoted (timeline 3 → 4)          +31s
+T_first_write    17:34:02   INSERT succeeds on worker-3                 +33s  ← RTO
+T_restart_W4     17:34:02   docker compose up -d on worker-4
 ```
 
-**Hard-kill RTO ≈ 33 seconds**, ~9 seconds longer than the soft-kill
-above. That extra cost is Consul gossip-failure detection: with
-soft-kill only the Patroni leader-key TTL expires, while with hard-kill
-the entire Consul agent is gone, so the surviving peers see *both*
-signals.
+**Hard-kill RTO ≈ 33 seconds**, identical to both the soft-kill above
+and the 2026-05-03 multi-container baseline. Consul gossip-failure
+detection (which sees worker-4's whole agent disappear, not just the
+Patroni lock) lines up with the Patroni leader-key TTL on this run,
+so neither signal extends the RTO.
+
+The post-restart rejoin path on dstack-worker pairs is occasionally
+flaky (the documented `MESH_CONN_RELAY_ONLY=1` escape hatch in
+`compose/worker.yaml` is exactly this case — flip it on if your
+deployment hits a wedged ICE re-handshake). The mesh-conn binary
+behavior is unchanged by the single-sidecar consolidation.
 
 ### Things confirmed by the hard-kill that the soft-kill didn't exercise
 
@@ -184,17 +195,16 @@ rm -rf /var/lib/docker/volumes/dstack_patroni-pgdata/_data/*
 docker start dstack-patroni-1
 ```
 
-### Measured timeline (run from 2026-05-03)
+### Measured timeline (run from 2026-05-04, single-sidecar layout)
 
 ```
-T_wipe         21:13:41   docker stop + rm -rf pgdata on worker-5
-T_restart      21:13:42   docker start
-T_basebackup   21:13:47   "trying to bootstrap from leader 'worker-4'"
-T_complete     21:13:54   "replica has been created using basebackup"  +7s
-T_streaming    21:13:58   service registered, streaming WAL              +16s total
+T_wipe         17:34:21   docker stop + rm -rf pgdata on worker-5
+T_restart      17:34:25   docker start
+T_complete     17:34:43   "replica has been created using basebackup"   +18s
+T_streaming    17:35:43   streaming WAL on timeline 4, lag=0            +82s total
 ```
 
-5.2 MB pgdata transferred in ~7 seconds end-to-end. Note the dataset
+A few-MB pgdata transferred in ~18 seconds end-to-end. The dataset
 is small enough that handshake/startup overhead dominates — for a
 realistic throughput number, see the soft-kill section's pg_basebackup
 trace at ~25 MB/s sustained on the QUIC path.

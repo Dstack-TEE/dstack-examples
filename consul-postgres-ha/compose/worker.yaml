@@ -1,109 +1,74 @@
-# Stage 4 — worker compose template.
+# Worker compose template — Gap 2 single-sidecar layout.
 #
-# A "worker" CVM bundles:
-#   - bootstrap-secrets  (init container)
-#   - mesh-conn          (UDP+TCP port-forwarder)
-#   - consul agent       (client, joins via mesh-conn → coordinator)
-#   - webdemo            (the actual workload — example service)
-#   - sidecar            (Envoy, for Consul Connect mTLS)
-#   - tester             (netshoot)
+# A "worker" CVM ends up running exactly three containers:
+#
+#   sidecar   bundled platform plumbing — bootstrap-secrets,
+#             mesh-conn, consul (client), and envoy (Connect data
+#             plane). See consul-postgres-ha-sidecar's README.
+#   patroni   the workload — Postgres + Patroni leader/replica.
+#   webdemo   tiny example app sitting on the mesh; swap for your
+#             own service when adapting this template.
+#
+# Coordinator CVMs run their own compose (compose/coordinator.yaml)
+# without patroni/webdemo, since they only host the Consul server
+# quorum.
 
 services:
-  # Keepalive holds the CVM up regardless of bootstrap-secrets / consul /
-  # mesh-conn / sidecar success. Without it, dstack tears the CVM down
-  # the moment any service in the dependency tree fails — and we lose
-  # the ability to SSH in and diagnose. Removable once the stack is
-  # known-good.
-  keepalive:
-    image: alpine:3.19
-    network_mode: host
-    restart: unless-stopped
-    command: ["sh", "-c", "echo KEEPALIVE; sleep infinity"]
-
-  bootstrap-secrets:
-    image: ${BOOTSTRAP_SECRETS_IMAGE}
-    network_mode: host
-    restart: "no"
-    environment:
-      - CLUSTER_NAME=${CLUSTER_NAME}
-      - ROLE=worker
-      - PROTOCOL_BASES=${PROTOCOL_BASES}
-      - WORKER_ORDINAL=${WORKER_ORDINAL}
-      - EXPECTED_REPLICAS=${EXPECTED_REPLICAS}
-      # COORDINATOR_HTTP_PORTS is comma-separated; bootstrap-secrets
-      # picks the first reachable one to talk to Consul KV (only used
-      # if WORKER_ORDINAL is unset, which it isn't with the per-worker
-      # phala_app pattern — kept for the legacy CAS-claim fallback).
-      - COORDINATOR_HTTP_PORTS=${COORDINATOR_HTTP_PORTS}
-    volumes:
-      - /var/run/dstack.sock:/var/run/dstack.sock:ro
-      - /tmp/dstack-runtime/secrets:/run/secrets
-      - /tmp/dstack-runtime/instance:/run/instance
-
-  mesh-conn:
-    image: ${MESH_CONN_IMAGE}
+  sidecar:
+    image: ${MESH_SIDECAR_IMAGE}
     network_mode: host
     restart: on-failure
     environment:
+      - ROLE=worker
+      - CLUSTER_NAME=${CLUSTER_NAME}
+      - PROTOCOL_BASES=${PROTOCOL_BASES}
+      - WORKER_ORDINAL=${WORKER_ORDINAL}
+      - EXPECTED_REPLICAS=${EXPECTED_REPLICAS}
       - PEERS_JSON=${PEERS_JSON}
       - SIGNALING_URL=${SIGNALING_URL}
       - TURN_HOST=${TURN_HOST}
       - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
-      # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay candidates,
-      # routing all peer traffic through the coturn server. Default off
-      # because coordinator-to-worker direct candidates do work; flip on
-      # if you hit a deployment where worker-to-worker direct pairs fail
-      # (host/srflx/prflx never establish, only relay does), trading some
-      # latency through coturn for guaranteed reachability.
+      - COORDINATOR_SERF_PORTS=${COORDINATOR_SERF_PORTS}
+      # COORDINATOR_HTTP_PORTS is comma-separated; bootstrap-secrets
+      # picks the first reachable one to talk to Consul KV — only used
+      # if WORKER_ORDINAL is unset (legacy CAS-claim fallback).
+      - COORDINATOR_HTTP_PORTS=${COORDINATOR_HTTP_PORTS}
+      # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay
+      # candidates, routing all peer traffic through the coturn server.
+      # Default off because direct candidates work; flip on if a
+      # deployment hits worker↔worker direct-pair instability.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
     volumes:
-      - /tmp/dstack-runtime/secrets:/run/secrets:ro
-      - /tmp/dstack-runtime/instance:/run/instance:ro
-    depends_on:
-      bootstrap-secrets:
-        condition: service_completed_successfully
-
-  consul:
-    image: hashicorp/consul:1.19
-    network_mode: host
-    restart: unless-stopped
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        set -e
-        SERF=$$(jq -r '.ports.serf_lan'   /run/instance/info.json)
-        RPC=$$(jq -r  '.ports.server_rpc' /run/instance/info.json)
-        HTTP=$$(jq -r '.ports.http_api'   /run/instance/info.json)
-        GRPC=$$(jq -r '.ports.grpc'       /run/instance/info.json)
-        # Workers retry-join EVERY coordinator's serf port (mesh-conn
-        # forwards each one to its actual coordinator). Consul's serf
-        # gossip then connects via whichever join succeeds first.
-        RETRYJOIN=""
-        for p in $$(echo "${COORDINATOR_SERF_PORTS}" | tr ',' ' '); do
-          RETRYJOIN="$$RETRYJOIN -retry-join=127.0.0.1:$$p"
-        done
-        exec consul agent \
-          -node=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json) \
-          -datacenter=${CLUSTER_NAME} \
-          -bind=127.0.0.1 -advertise=127.0.0.1 -client=127.0.0.1 \
-          -serf-lan-port=$$SERF \
-          -server-port=$$RPC \
-          -http-port=$$HTTP \
-          -grpc-port=$$GRPC \
-          -dns-port=-1 \
-          $$RETRYJOIN \
-          -data-dir=/consul/data \
-          -hcl='connect { enabled = true }' \
-          -log-level=INFO
-    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets
+      - /tmp/dstack-runtime/instance:/run/instance
       - consul-data:/consul/data
-      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+    # Healthy = bootstrap-secrets has finished and info.json is in
+    # place. patroni/webdemo gate on this so they don't FATAL-restart
+    # in a loop while the sidecar is still booting.
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/instance/info.json"]
+      interval: 2s
+      timeout: 1s
+      retries: 60
+      start_period: 5s
+
+  patroni:
+    image: ${PATRONI_IMAGE}
+    network_mode: host
+    restart: on-failure
+    # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
+    # must use the same value to land in the same cluster. The rest
+    # is read from /run/instance/info.json by entrypoint.sh.
+    environment:
+      - CLUSTER_NAME=${CLUSTER_NAME}
+    volumes:
       - /tmp/dstack-runtime/instance:/run/instance:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+      - patroni-pgdata:/var/lib/patroni
     depends_on:
-      bootstrap-secrets:
-        condition: service_completed_successfully
-      mesh-conn:
-        condition: service_started
+      sidecar:
+        condition: service_healthy
 
   webdemo:
     image: ${WEBDEMO_IMAGE}
@@ -120,64 +85,15 @@ services:
         exec webdemo
     volumes:
       - /tmp/dstack-runtime/instance:/run/instance:ro
-    depends_on: [consul]
-
-  sidecar:
-    image: ${SIDECAR_IMAGE}
-    network_mode: host
-    restart: on-failure
-    command:
-      - |
-        set -e
-        PEER_ID=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json)
-        HTTP_PORT=$$(jq -r '.ports.http_api' /run/instance/info.json)
-        GRPC_PORT=$$(jq -r '.ports.grpc'    /run/instance/info.json)
-        ORDINAL=$$(jq -r '.ordinal'         /run/instance/info.json)
-        ADMIN_PORT=$$((19100 + ORDINAL))
-        until consul connect envoy \
-                -sidecar-for=webdemo-$$PEER_ID \
-                -admin-bind=127.0.0.1:$$ADMIN_PORT \
-                -bootstrap \
-                -http-addr=127.0.0.1:$$HTTP_PORT \
-                -grpc-addr=127.0.0.1:$$GRPC_PORT \
-                > /tmp/envoy-bootstrap.json 2>/dev/null; do
-          echo "waiting for sidecar registration..."; sleep 3
-        done
-        exec envoy -c /tmp/envoy-bootstrap.json -l info
-    volumes:
-      - /tmp/dstack-runtime/instance:/run/instance:ro
-    depends_on: [webdemo]
-
-  patroni:
-    image: ${PATRONI_IMAGE}
-    network_mode: host
-    restart: on-failure
-    # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
-    # must use the same value to land in the same cluster. The rest
-    # is read from /run/instance/info.json by entrypoint.sh.
-    environment:
-      - CLUSTER_NAME=${CLUSTER_NAME}
-    volumes:
-      - /tmp/dstack-runtime/instance:/run/instance:ro
-      - /tmp/dstack-runtime/secrets:/run/secrets:ro
-      - patroni-pgdata:/var/lib/patroni
     depends_on:
-      consul:
-        condition: service_started
-      bootstrap-secrets:
-        condition: service_completed_successfully
-
-  tester:
-    image: nicolaka/netshoot:latest
-    network_mode: host
-    command: ["sleep", "infinity"]
-    depends_on: [mesh-conn, consul, webdemo, patroni]
+      sidecar:
+        condition: service_healthy
 
 volumes:
   consul-data:
   patroni-pgdata:
 
 # Shared state goes through HOST BIND MOUNTS, not named docker
-# volumes. See coordinator.yaml for the full note — short version:
+# volumes — see coordinator.yaml for the full note. Short version:
 # named docker volumes don't share data across containers on the
 # dstack platform we run on. Bind mounts to /tmp work fine.

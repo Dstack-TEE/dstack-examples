@@ -36,9 +36,10 @@ Prerequisites:
 
 - A Phala Cloud account with API credentials at `~/.phala-cloud/credentials.json`.
 - A Linux box with a public IP for the external coordinator (coturn + signaling).
-- The six container images either already published to GHCR (via the
-  CI workflow on this repo's main branch) or pushed by you to a
-  registry of your choice. See [`PUBLISHING.md`](PUBLISHING.md).
+- The four container images (`mesh-sidecar`, `patroni`, `webdemo`,
+  `signaling`) either already published to GHCR (via the CI workflow
+  on this repo's main branch) or pushed by you to a registry of your
+  choice. See [`PUBLISHING.md`](PUBLISHING.md).
 
 ```bash
 cd consul-postgres-ha/cluster-example
@@ -72,11 +73,11 @@ consul-postgres-ha/
 ├── compose/              coordinator.yaml + worker.yaml templates
 ├── coordinator/          docker-compose for the external coordinator (coturn + signaling)
 │
-├── mesh-conn/            QUIC-over-pion/ICE overlay (~600 LoC Go)
-├── bootstrap-secrets/    init container — TEE-derives per-CVM secrets
+├── mesh-sidecar/         consolidated platform sidecar image (bootstrap-secrets + mesh-conn + consul + envoy)
+├── bootstrap-secrets/    Go source — TEE-derives per-CVM secrets (built into sidecar)
+├── mesh-conn/            Go source — QUIC-over-pion/ICE overlay (built into sidecar)
 ├── patroni/              Patroni + Postgres image
 ├── webdemo/              example workload sitting on the mesh
-├── sidecar/              Envoy bootstrapper for Consul Connect mTLS
 ├── signaling/            HTTP /publish + /poll broker for ICE auth/candidate exchange
 └── quic-on-ice/          standalone smoke test for the QUIC-over-ICE transport
 ```
@@ -113,8 +114,6 @@ and the Terraform structure as-is.
   in parallel hits
   [`phala-cloud#247`](https://github.com/Phala-Network/phala-cloud/issues/247)
   — use `-parallelism=1` for now (~5 min × N to bring-up).
-* Six container images per CVM is more platform plumbing than ideal.
-  A consolidation pass to a single sidecar container is planned.
 * The mesh-conn admission story is **shared-secret based today**
   (TURN HMAC), not attestation-based. Adding TEE attestation as the
   admission credential is the next architectural step.
