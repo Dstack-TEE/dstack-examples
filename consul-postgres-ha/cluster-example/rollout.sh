@@ -52,7 +52,10 @@ resolve_consul_base() {
     echo "ERROR: terraform output coordinator_app_id failed; run terraform apply at least once" >&2
     exit 1
   fi
-  CONSUL_BASE="https://${coord_id}-${COORDINATOR_HTTP_PORT}s.${GATEWAY_DOMAIN}"
+  # `<port>` (no trailing 's') — gateway terminates TLS, backend is
+  # plain HTTP. The `<port>s` pass-through form is for backends that
+  # speak TLS themselves; Consul's HTTP API does not.
+  CONSUL_BASE="https://${coord_id}-${COORDINATOR_HTTP_PORT}.${GATEWAY_DOMAIN}"
 }
 
 consul_members_alive() {

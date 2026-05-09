@@ -270,5 +270,10 @@ output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k =
 output "worker_app_ids" { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "consul_ui" {
   # Any coordinator's HTTP port serves the UI. Pick coord-0 by convention.
-  value = "https://${phala_app.coordinator["0"].app_id}-${local.coordinator_http_port_first}s.${var.gateway_domain}/ui"
+  # `<port>` (no trailing 's') = gateway terminates TLS using the wildcard
+  # cert and forwards plain HTTP to the backend. Consul HTTP binds plain
+  # HTTP on 127.0.0.1, so this is the right convention. The `<port>s`
+  # form is for TLS pass-through where the backend speaks TLS itself
+  # (e.g. Envoy public mTLS on :21000).
+  value = "https://${phala_app.coordinator["0"].app_id}-${local.coordinator_http_port_first}.${var.gateway_domain}/ui"
 }

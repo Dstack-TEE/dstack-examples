@@ -59,6 +59,21 @@ Once apply finishes, the cluster is HA Postgres on
 through any worker's `127.0.0.1:18703+ordinal` (forwarded by mesh-conn
 to whichever CVM Patroni elected leader).
 
+### dstack gateway URL convention
+
+Two forms, easy to confuse:
+
+| Form | Behavior | Use when |
+|---|---|---|
+| `<app-id>-<port>.<gateway-domain>` | Gateway terminates TLS using a pre-issued wildcard cert and forwards plain HTTP to `<port>` on the CVM. | The backend speaks plain HTTP (Consul HTTP API, Patroni REST, webdemo, etc.). |
+| `<app-id>-<port>s.<gateway-domain>` | Gateway does TLS pass-through — encrypted bytes go straight to `<port>`. | The backend speaks TLS itself (Envoy public mTLS listener on `:21000`). |
+
+Picking the wrong form fails permanently. Plain-HTTP backend with the
+`s` form yields `SSL_ERROR_SYSCALL` early and `wrong version number`
+once routing is live; trivially mistakable for a transient gateway
+provisioning delay. If the URL doesn't work after ~2 min from CVM
+ready, suspect the suffix.
+
 ## What's in this directory
 
 ```
