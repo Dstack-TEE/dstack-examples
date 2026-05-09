@@ -1,16 +1,18 @@
-# Coordinator compose template — Gap 2 single-sidecar layout.
+# Coordinator compose template — peer-VIP / service-VIP layout.
 #
 # A coordinator CVM runs exactly one container: the consolidated
 # `sidecar` image with ROLE=coordinator. Inside it:
 #
 #   bootstrap-secrets  one-shot init — derives per-CVM secrets from
-#                      the dstack KMS, claims COORDINATOR_ORDINAL,
-#                      writes /run/instance/info.json.
-#   mesh-conn          QUIC-on-pion/ICE overlay (same as on workers).
+#                      the dstack KMS, writes /run/instance/info.json
+#                      (identity only — no per-protocol ports).
+#   mesh-conn          QUIC-on-pion/ICE overlay (binds the static
+#                      infra-port allowlist on every other peer's VIP).
 #   consul             Server agent (`-server -bootstrap-expect=N -ui`),
 #                      joins peer coordinators via mesh-conn-forwarded
-#                      loopback ports. envoy is NOT started here
-#                      (coordinators don't host a Connect-mTLS workload).
+#                      VIPs (127.50.0.<coord-vip>:8301). Envoy is NOT
+#                      started here — coordinators don't host any
+#                      Connect-mTLS workload.
 #
 # coturn + signaling that earlier coordinator templates carried have
 # been removed: the cluster uses an external (Vultr) coordinator box
@@ -31,17 +33,22 @@ services:
     image: ${MESH_SIDECAR_IMAGE}
     network_mode: host
     restart: on-failure
+    # NET_ADMIN: required for `ip addr add 127.50.0.<n>/32 dev lo` at
+    # entrypoint. Loopback-only, no external interface touched.
+    cap_add:
+      - NET_ADMIN
     environment:
       - ROLE=coordinator
       - CLUSTER_NAME=${CLUSTER_NAME}
-      - PROTOCOL_BASES=${PROTOCOL_BASES}
       - PEERS_JSON=${PEERS_JSON}
       # COORDINATOR_ORDINAL is per-CVM (0..N-1); makes bootstrap-secrets
       # write the right /run/instance/info.json without needing Consul
       # KV (which itself runs on the coordinators — chicken-and-egg).
       - COORDINATOR_ORDINAL=${COORDINATOR_ORDINAL}
       - BOOTSTRAP_EXPECT=${BOOTSTRAP_EXPECT}
-      - COORDINATOR_SERF_PORTS=${COORDINATOR_SERF_PORTS}
+      # Comma-separated VIPs of all coordinators — entrypoint uses these
+      # for retry-join (skipping self).
+      - COORDINATOR_VIPS=${COORDINATOR_VIPS}
       # External coordinator path — coordinator's mesh-conn uses the
       # same Vultr coturn + signaling that workers do, so peer-pair
       # ICE rendezvous happens in a single shared place.

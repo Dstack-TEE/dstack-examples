@@ -1,14 +1,13 @@
-# Stage 4 — example cluster.
+# Example cluster — peer-VIP / service-VIP layout.
 #
-# This whole HCL file IS the cluster definition. To bring up a 4-instance
-# Consul + Connect mesh on dstack:
+# This whole HCL file IS the cluster definition. To bring up an
+# HA Postgres + webdemo cluster on dstack:
 #
-#   PHALA_CLOUD_API_KEY=$(your token) terraform apply
+#   PHALA_CLOUD_API_KEY=$(your token) terraform apply -parallelism=1
 #
 # Adding a worker is a `replicas` bump on phala_app.worker; terraform
 # apply propagates the new PEERS_JSON to every CVM via in-place env
-# update (no destroy/recreate; disks survive — verified in
-# stage4-experiments/disk-persistence/).
+# update (no destroy/recreate; disks survive).
 
 terraform {
   required_version = ">= 1.5"
@@ -47,6 +46,10 @@ provider "phala" {}
 # them in Terraform and hand the same bytes to every phala_app via
 # env. Trade-off accepted: anyone with read access to terraform.tfstate
 # (or the apply host's memory) sees plaintext keys. Stage 2 closes this.
+#
+# Connect CA root is NOT in this list — Consul's built-in CA provider
+# generates the root in Raft on first quorum, no external derivation
+# required and no per-CVM problem.
 resource "random_bytes" "gossip_key" {
   length = 32
 }
@@ -80,13 +83,9 @@ variable "gateway_domain" {
   description = "Phala dstack gateway domain (e.g. dstack-pha-prod5.phala.network)"
 }
 
-# Image references. Gap 2 collapsed bootstrap-secrets, mesh-conn, the
-# legacy keepalive placeholder, and the old envoy-only sidecar into
-# one `mesh_sidecar_image` (consul-postgres-ha-mesh-sidecar) — workers
-# and coordinators both reference it and the entrypoint dispatches on
-# ROLE. The `signaling` image is still published by CI (used by the
-# external Vultr coordinator), but no dstack CVM in this cluster
-# references it, so it isn't a Terraform input here.
+# Image references. The mesh_sidecar image bundles
+# bootstrap-secrets, mesh-conn, consul agent, and envoy; workers and
+# coordinators both reference it and the entrypoint dispatches on ROLE.
 variable "mesh_sidecar_image" { type = string }
 variable "webdemo_image" { type = string }
 variable "patroni_image" { type = string }
@@ -94,8 +93,7 @@ variable "patroni_image" { type = string }
 # External coordinator (Vultr coturn + signaling box). Used until
 # Phala admin enables UDP ingress on dstack apps; once that lands we
 # can host coturn + signaling inside the dstack mesh and drop these
-# external_* vars. The dstack-coordinator compose no longer carries
-# unused local copies of those services.
+# external_* vars.
 variable "external_coordinator_host" { type = string }
 variable "external_signaling_url" { type = string }
 variable "external_turn_secret" {
@@ -103,69 +101,52 @@ variable "external_turn_secret" {
   sensitive = true
 }
 
-# ---------- Protocol port plan ----------
+# ---------- Cluster topology + VIP allocation ----------
 
 locals {
-  # Index i is the same protocol on every peer; the per-peer port for
-  # protocol `name` at ordinal `n` is base + n. mesh-conn reads
-  # /run/instance/info.json for this peer's actual ports (computed by
-  # bootstrap-secrets from PROTOCOL_BASES + the ordinal it claimed).
-  protocol_bases = {
-    serf_lan       = 18000
-    server_rpc     = 18100
-    http_api       = 18200
-    grpc           = 18300
-    webdemo        = 18500
-    sidecar_public = 18600
-    postgres       = 18700 # Patroni-managed PostgreSQL listen
-    patroni_rest   = 18800 # Patroni REST API (peer health, leader query)
-  }
-
-  # The full peer list, identical on every CVM. Coordinators occupy
-  # ordinals 0..C-1 (where C = coordinator_replicas), workers fill
-  # ordinals C..C+W-1. PEERS_JSON is what mesh-conn consumes; the
-  # role-ordinal pair is what each peer self-identifies as in its
-  # bootstrap-secrets-derived /run/instance/info.json (mesh-conn then
-  # reads "<role>-<ordinal>" as its self ID).
+  # Peer VIPs: 127.50.0.<vip>/32. Allocated as ordinal+1 (so vip=1
+  # for the first coordinator, never 0 — the validate_test in
+  # mesh-conn rejects vip=0). PEERS_JSON shape: [{id, vip}], same
+  # on every CVM. mesh-conn binds the static infra-port allowlist
+  # ({21000, 21001, 8300, 8301}) on every other peer's VIP.
   peers = concat(
     [
       for i in range(var.coordinator_replicas) : {
         id      = "coordinator-${i}"
         ordinal = i
         role    = "coordinator"
+        vip     = i + 1
       }
     ],
     [
       for i in range(var.worker_replicas) : {
-        # ID must match mesh-conn's self_id, which is `role-ordinal`,
-        # NOT slot. Workers occupy ordinals C..C+W-1.
         id      = "worker-${i + var.coordinator_replicas}"
         ordinal = i + var.coordinator_replicas
         role    = "worker"
+        vip     = i + var.coordinator_replicas + 1
       }
     ],
   )
 
   peers_json = jsonencode([
-    for p in local.peers : {
-      id    = p.id
-      ports = [for proto, base in local.protocol_bases : base + p.ordinal]
-    }
+    for p in local.peers : { id = p.id, vip = p.vip }
   ])
 
-  protocol_bases_json = jsonencode(local.protocol_bases)
+  # COORDINATOR_VIPS — comma-separated for serf retry-join.
+  coordinator_vips = join(",", [for p in local.peers : tostring(p.vip) if p.role == "coordinator"])
 
-  # Comma-separated lists of coordinator-ordinal-shifted ports. Workers
-  # use COORDINATOR_SERF_PORTS to retry-join EVERY coordinator, and
-  # COORDINATOR_HTTP_PORTS to pick ANY coordinator's HTTP API for
-  # KV-CAS bootstrapping. Coordinators use COORDINATOR_SERF_PORTS to
-  # gossip-join their server peers (consul -bootstrap-expect=N).
-  coordinator_serf_ports = join(",", [for i in range(var.coordinator_replicas) : tostring(local.protocol_bases.serf_lan + i)])
-  coordinator_http_ports = join(",", [for i in range(var.coordinator_replicas) : tostring(local.protocol_bases.http_api + i)])
-
-  # First coordinator's HTTP port — used as a single endpoint for the
-  # consul-ui output and for legacy single-coord callers.
-  coordinator_http_port_first = local.protocol_bases.http_api + 0
+  # Service VIPs: 127.10.0.<vip>/32 — one per Connect upstream a
+  # worker consumes. Three services in this template (extend by
+  # adding entries here + Connect upstreams in the sidecar config):
+  #   webdemo          for the cross-peer fan-out demo
+  #   postgres-master  the Patroni leader, leader-aware via subset filter
+  #   postgres-replica any Patroni replica
+  service_vips = [
+    { name = "webdemo", vip = 10, port = 8080 },
+    { name = "postgres-master", vip = 20, port = 5432 },
+    { name = "postgres-replica", vip = 21, port = 5432 },
+  ]
+  upstreams_json = jsonencode(local.service_vips)
 }
 
 # ---------- Coordinator ----------
@@ -186,16 +167,15 @@ resource "phala_app" "coordinator" {
   docker_compose = file("${path.module}/../compose/coordinator.yaml")
 
   env = {
-    CLUSTER_NAME           = var.cluster_name
-    PROTOCOL_BASES         = local.protocol_bases_json
-    PEERS_JSON             = local.peers_json
-    COORDINATOR_ORDINAL    = tostring(each.value)
-    BOOTSTRAP_EXPECT       = tostring(var.coordinator_replicas)
-    COORDINATOR_SERF_PORTS = local.coordinator_serf_ports
-    SIGNALING_URL          = var.external_signaling_url
-    TURN_HOST              = var.external_coordinator_host
-    TURN_SHARED_SECRET     = var.external_turn_secret
-    MESH_SIDECAR_IMAGE     = var.mesh_sidecar_image
+    CLUSTER_NAME        = var.cluster_name
+    PEERS_JSON          = local.peers_json
+    COORDINATOR_ORDINAL = tostring(each.value)
+    BOOTSTRAP_EXPECT    = tostring(var.coordinator_replicas)
+    COORDINATOR_VIPS    = local.coordinator_vips
+    SIGNALING_URL       = var.external_signaling_url
+    TURN_HOST           = var.external_coordinator_host
+    TURN_SHARED_SECRET  = var.external_turn_secret
+    MESH_SIDECAR_IMAGE  = var.mesh_sidecar_image
     # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
     GOSSIP_KEY = random_bytes.gossip_key.base64
   }
@@ -215,17 +195,6 @@ resource "phala_app" "worker" {
   # app with replicas:N. Reason: each worker needs its OWN ordinal
   # passed in via env so bootstrap-secrets can write the correct
   # /run/instance/info.json without a Consul KV CAS round-trip.
-  # The CAS path has a chicken-and-egg: workers need Consul to
-  # claim an ordinal, but Consul (on the coordinator) is reached
-  # via mesh-conn, which depends on bootstrap-secrets having
-  # finished. Per-worker resources sidestep this entirely.
-  #
-  # Once phala-cloud#243 lands phala_app_instance + per-instance
-  # env, this reverts to one resource with replicas:N + per-instance
-  # env block.
-  # Key is the worker's 1-based slot (used in the CVM name); value is
-  # the cluster-wide ordinal (= slot + coordinator_replicas, since
-  # coordinators occupy ordinals 0..C-1).
   for_each = { for i in range(var.worker_replicas) : tostring(i + 1) => i + var.coordinator_replicas }
 
   name           = "${var.cluster_name}-worker-${each.key}"
@@ -237,19 +206,18 @@ resource "phala_app" "worker" {
   docker_compose = file("${path.module}/../compose/worker.yaml")
 
   env = {
-    CLUSTER_NAME           = var.cluster_name
-    PROTOCOL_BASES         = local.protocol_bases_json
-    PEERS_JSON             = local.peers_json
-    WORKER_ORDINAL         = tostring(each.value)
-    EXPECTED_REPLICAS      = var.worker_replicas + var.coordinator_replicas
-    COORDINATOR_SERF_PORTS = local.coordinator_serf_ports
-    COORDINATOR_HTTP_PORTS = local.coordinator_http_ports
-    SIGNALING_URL          = var.external_signaling_url
-    TURN_HOST              = var.external_coordinator_host
-    TURN_SHARED_SECRET     = var.external_turn_secret
-    MESH_SIDECAR_IMAGE     = var.mesh_sidecar_image
-    WEBDEMO_IMAGE          = var.webdemo_image
-    PATRONI_IMAGE          = var.patroni_image
+    CLUSTER_NAME       = var.cluster_name
+    PEERS_JSON         = local.peers_json
+    UPSTREAMS_JSON     = local.upstreams_json
+    WORKER_ORDINAL     = tostring(each.value)
+    EXPECTED_REPLICAS  = var.worker_replicas + var.coordinator_replicas
+    COORDINATOR_VIPS   = local.coordinator_vips
+    SIGNALING_URL      = var.external_signaling_url
+    TURN_HOST          = var.external_coordinator_host
+    TURN_SHARED_SECRET = var.external_turn_secret
+    MESH_SIDECAR_IMAGE = var.mesh_sidecar_image
+    WEBDEMO_IMAGE      = var.webdemo_image
+    PATRONI_IMAGE      = var.patroni_image
     # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
     GOSSIP_KEY             = random_bytes.gossip_key.base64
     PATRONI_SUPERUSER_PW   = random_bytes.patroni_superuser_pw.hex
@@ -269,11 +237,7 @@ resource "phala_app" "worker" {
 output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k => c.app_id } }
 output "worker_app_ids" { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "consul_ui" {
-  # Any coordinator's HTTP port serves the UI. Pick coord-0 by convention.
-  # `<port>` (no trailing 's') = gateway terminates TLS using the wildcard
-  # cert and forwards plain HTTP to the backend. Consul HTTP binds plain
-  # HTTP on 127.0.0.1, so this is the right convention. The `<port>s`
-  # form is for TLS pass-through where the backend speaks TLS itself
-  # (e.g. Envoy public mTLS on :21000).
-  value = "https://${phala_app.coordinator["0"].app_id}-${local.coordinator_http_port_first}.${var.gateway_domain}/ui"
+  # Coordinator-0's Consul HTTP API on the canonical 8500. The dstack
+  # gateway maps `<app_id>-<port>s.<gateway>` to that port on the CVM.
+  value = "https://${phala_app.coordinator["0"].app_id}-8500s.${var.gateway_domain}/ui"
 }

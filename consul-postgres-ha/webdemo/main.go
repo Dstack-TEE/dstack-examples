@@ -1,17 +1,21 @@
-// webdemo (stage 3b) — same as stage3a, but registered with a Connect
-// sidecar so cross-peer traffic flows through Envoy + mTLS.
+// webdemo — tiny Connect-mesh sample sitting on the peer-VIP / service-VIP
+// fabric.
 //
-// Differences from stage 3a:
-//   - service registration body includes a `Connect.SidecarService`
-//     stanza that Consul uses to spin up a sidecar definition. The
-//     sidecar's public listener binds the per-peer "sidecar port"
-//     (env SIDECAR_PORT), and the sidecar exposes one upstream
-//     ("webdemo") on local port 19000.
-//   - /all calls the upstream port directly (127.0.0.1:19000/hello).
-//     Each request goes app -> local sidecar -> mTLS over the overlay
-//     -> remote sidecar -> remote webdemo.
-//   - to fan out across all peers we hit /all multiple times so
-//     Envoy's load-balancer rotates through the instances.
+// Each instance:
+//   - listens on canonical 127.0.0.1:8080 (the workload itself)
+//   - registers itself as Consul service `webdemo` with a Connect
+//     sidecar advertised at 127.50.0.<SELF_VIP>:21000 (the peer's
+//     mesh-routable address for inbound mTLS)
+//   - declares ONE upstream: `webdemo` itself, with the local Envoy
+//     listener bound to the service VIP for `webdemo` (resolved from
+//     UPSTREAMS_JSON env). /etc/hosts on every container maps the
+//     service name to that VIP, so dialing http://webdemo:8080/hello
+//     hits the local Envoy and fans out across all peers' webdemo
+//     instances over Connect mTLS.
+//
+// All cross-peer ports / arithmetic are gone — the only numbers in
+// this file are 8080 (canonical webdemo port), 21000 (canonical
+// webdemo sidecar port), and the service VIPs read from env.
 package main
 
 import (
@@ -26,26 +30,31 @@ import (
 	"time"
 )
 
+const (
+	webdemoPort = 8080  // canonical app port — same on every CVM
+	sidecarPort = 21000 // canonical Envoy public mTLS port for webdemo
+)
+
 func main() {
 	name := mustEnv("PEER_ID")
-	port := mustEnv("WEBDEMO_PORT")
-	consulAddr := mustEnv("CONSUL_HTTP_ADDR")
-	sidecarPort := mustEnv("SIDECAR_PORT")
-	upstreamPort := envOr("UPSTREAM_PORT", "19000")
+	selfVip := mustEnv("SELF_VIP")
+	consulAddr := envOr("CONSUL_HTTP_ADDR", "127.0.0.1:8500")
 	fanoutN := envOr("FANOUT_N", "8")
+	webdemoUpstreamVip := upstreamVip("webdemo")
 
-	go registerForever(consulAddr, name, port, sidecarPort)
+	go registerForever(consulAddr, name, selfVip, webdemoUpstreamVip)
 
 	http.HandleFunc("/hello", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "hello from %s\n", name)
 	})
 	http.HandleFunc("/all", func(w http.ResponseWriter, r *http.Request) {
-		// Hit the local sidecar's upstream a few times; Envoy rotates
-		// across instances, so with enough samples we should reach all
-		// of them at least once.
+		// Hit `webdemo:8080/hello` (resolved via /etc/hosts → service
+		// VIP → local Envoy upstream). Envoy's load-balancer rotates
+		// across all registered webdemo instances; with enough samples
+		// we should reach each peer at least once.
 		var n int
 		fmt.Sscanf(fanoutN, "%d", &n)
-		results := fanOut(upstreamPort, n)
+		results := fanOut(n)
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]any{
 			"from":    name,
@@ -54,9 +63,9 @@ func main() {
 		})
 	})
 
-	addr := "127.0.0.1:" + port
-	log.Printf("webdemo: peer=%s listening on %s, consul=%s, sidecar=%s, upstream=%s",
-		name, addr, consulAddr, sidecarPort, upstreamPort)
+	addr := fmt.Sprintf("127.0.0.1:%d", webdemoPort)
+	log.Printf("webdemo: peer=%s vip=%s listening on %s, sidecar=%d",
+		name, selfVip, addr, sidecarPort)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
 
@@ -64,36 +73,37 @@ func main() {
 // Connect-aware registration
 // =============================================================================
 
-func registerForever(consulAddr, name, port, sidecarPort string) {
+func registerForever(consulAddr, name, selfVip string, upstreamVip int) {
 	body := fmt.Sprintf(`{
 		"Name": "webdemo",
 		"ID": "webdemo-%s",
 		"Address": "127.0.0.1",
-		"Port": %s,
+		"Port": %d,
 		"Tags": ["peer=%s"],
 		"Check": {
-			"HTTP": "http://127.0.0.1:%s/hello",
+			"HTTP": "http://127.0.0.1:%d/hello",
 			"Interval": "10s",
 			"Timeout": "2s",
 			"DeregisterCriticalServiceAfter": "1m"
 		},
 		"Connect": {
 			"SidecarService": {
-				"Port": %s,
+				"Address": "127.50.0.%s",
+				"Port": %d,
 				"Proxy": {
 					"LocalServiceAddress": "127.0.0.1",
-					"LocalServicePort": %s,
+					"LocalServicePort": %d,
 					"Upstreams": [
 						{
 							"DestinationName": "webdemo",
-							"LocalBindAddress": "127.0.0.1",
-							"LocalBindPort": 19000
+							"LocalBindAddress": "127.10.0.%d",
+							"LocalBindPort": %d
 						}
 					]
 				}
 			}
 		}
-	}`, name, port, name, port, sidecarPort, port)
+	}`, name, webdemoPort, name, webdemoPort, selfVip, sidecarPort, webdemoPort, upstreamVip, webdemoPort)
 
 	for {
 		req, _ := http.NewRequest("PUT",
@@ -103,8 +113,8 @@ func registerForever(consulAddr, name, port, sidecarPort string) {
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil && resp.StatusCode < 300 {
 			resp.Body.Close()
-			log.Printf("registered with consul (peer=%s, port=%s, sidecarPort=%s)",
-				name, port, sidecarPort)
+			log.Printf("registered with consul (peer=%s, sidecar=127.50.0.%s:%d)",
+				name, selfVip, sidecarPort)
 			return
 		}
 		if resp != nil {
@@ -119,10 +129,10 @@ func registerForever(consulAddr, name, port, sidecarPort string) {
 }
 
 // =============================================================================
-// Fan-out via local sidecar upstream port
+// Fan-out via the local sidecar's `webdemo` upstream
 // =============================================================================
 
-func fanOut(upstreamPort string, n int) map[string]int {
+func fanOut(n int) map[string]int {
 	results := make(map[string]int)
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -131,7 +141,7 @@ func fanOut(upstreamPort string, n int) map[string]int {
 		go func() {
 			defer wg.Done()
 			client := &http.Client{Timeout: 3 * time.Second}
-			resp, err := client.Get("http://127.0.0.1:" + upstreamPort + "/hello")
+			resp, err := client.Get(fmt.Sprintf("http://webdemo:%d/hello", webdemoPort))
 			body := ""
 			if err != nil {
 				body = "error: " + err.Error()
@@ -147,6 +157,27 @@ func fanOut(upstreamPort string, n int) map[string]int {
 	}
 	wg.Wait()
 	return results
+}
+
+// upstreamVip parses UPSTREAMS_JSON env (shape: [{name, vip, port}, ...])
+// and returns the VIP octet for the named service, or fatals.
+func upstreamVip(name string) int {
+	raw := mustEnv("UPSTREAMS_JSON")
+	var list []struct {
+		Name string `json:"name"`
+		Vip  int    `json:"vip"`
+		Port int    `json:"port"`
+	}
+	if err := json.Unmarshal([]byte(raw), &list); err != nil {
+		log.Fatalf("UPSTREAMS_JSON parse: %v", err)
+	}
+	for _, u := range list {
+		if u.Name == name {
+			return u.Vip
+		}
+	}
+	log.Fatalf("upstream %q not in UPSTREAMS_JSON", name)
+	return 0
 }
 
 func mustEnv(k string) string {
