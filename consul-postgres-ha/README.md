@@ -18,14 +18,18 @@ the platform plumbing keeps working unchanged.
 ## Architecture in one paragraph
 
 Three **coordinator** CVMs run a Consul server quorum (Raft). Three
-**worker** CVMs run Patroni + Postgres + a Consul client agent. All
-six are dstack-TEE CVMs hosted behind a provider NAT. One **external
-coordinator** (a regular Linux box with a public IP) runs coturn
-(STUN/TURN) plus a tiny signaling broker — that's the rendezvous
-infrastructure each CVM uses to find peers' ICE candidates; no
-data ever passes through it once peers connect. Per-CVM secrets
-(TURN HMAC key, Consul gossip key, Connect CA root) are derived from
-the dstack platform's KMS at boot — no human in the path.
+**worker** CVMs run Patroni + Postgres + a Consul client agent +
+two Envoy Connect sidecars. All six are dstack-TEE CVMs hosted
+behind a provider NAT. One **external coordinator** (a regular Linux
+box with a public IP) runs coturn (STUN/TURN) plus a tiny signaling
+broker — that's the rendezvous infrastructure each CVM uses to find
+peers' ICE candidates; no data ever passes through it once peers
+connect. Per-CVM and per-cluster secrets are split: the TURN HMAC is
+derived per-CVM from dstack KMS, while cluster-wide-identical
+material (gossip key, Patroni passwords) is generated in Terraform
+and broadcast via env until Stage-2 attestation-admission lands.
+Connect CA uses Consul's built-in CA provider — root in Raft, no
+external derivation needed.
 
 For the full topology and layering walkthrough, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
@@ -55,9 +59,12 @@ terraform apply -parallelism=1   # phala-cloud#247 needs serial creates
 ```
 
 Once apply finishes, the cluster is HA Postgres on
-`coordinator_replicas + worker_replicas` CVMs. Connect to the leader
-through any worker's `127.0.0.1:18703+ordinal` (forwarded by mesh-conn
-to whichever CVM Patroni elected leader).
+`coordinator_replicas + worker_replicas` CVMs. From inside any
+worker CVM, connect to the current leader as
+`psql -h postgres-master -p 5432` — the local Envoy upstream
+listener proxies via Connect mTLS to whichever CVM Patroni has
+elected leader. `postgres-replica:5432` reaches any non-leader for
+read-only queries.
 
 ### dstack gateway URL convention
 
@@ -65,8 +72,8 @@ Two forms, easy to confuse:
 
 | Form | Behavior | Use when |
 |---|---|---|
-| `<app-id>-<port>.<gateway-domain>` | Gateway terminates TLS using a pre-issued wildcard cert and forwards plain HTTP to `<port>` on the CVM. | The backend speaks plain HTTP (Consul HTTP API, Patroni REST, webdemo, etc.). |
-| `<app-id>-<port>s.<gateway-domain>` | Gateway does TLS pass-through — encrypted bytes go straight to `<port>`. | The backend speaks TLS itself (Envoy public mTLS listener on `:21000`). |
+| `<app-id>-<port>.<gateway-domain>` | Gateway terminates TLS using a pre-issued wildcard cert and forwards plain HTTP to `<port>` on the CVM. | The backend speaks plain HTTP (Consul HTTP API on `:8500`, Patroni REST on `:8008`, webdemo on `:8080`). |
+| `<app-id>-<port>s.<gateway-domain>` | Gateway does TLS pass-through — encrypted bytes go straight to `<port>`. | The backend speaks TLS itself (Envoy public mTLS listener on `:21000` or `:21001`). |
 
 Picking the wrong form fails permanently. Plain-HTTP backend with the
 `s` form yields `SSL_ERROR_SYSCALL` early and `wrong version number`
@@ -105,8 +112,9 @@ generic platform plumbing.
 | Patroni-specific | Lives in |
 |---|---|
 | The Patroni image itself | `patroni/` |
-| Per-CVM postgres + patroni rest port assignments | `compose/worker.yaml` env block |
-| The Patroni service entry in `cluster.tf`'s env | `cluster-example/cluster.tf` |
+| Patroni env block + REST/Postgres port choices | `compose/worker.yaml` |
+| Postgres service VIPs + Connect upstreams | `cluster-example/cluster.tf` (`local.service_vips`) |
+| Postgres Connect sidecar registration + Envoy launch | `mesh-sidecar/entrypoint.sh` |
 
 To run something else (a Redis cluster, a Kafka broker, your own
 stateful service): swap those three pieces, leave `mesh-conn`,

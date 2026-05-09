@@ -41,8 +41,9 @@ Per pair we then run **one QUIC connection** (quic-go) over the
 ICE conn, treating `ice.Conn` as a `net.PacketConn`. QUIC provides
 loss recovery, congestion control, and stream multiplexing on top of
 the lossy UDP underlay. Streams come in two flavours: some are
-long-lived (one per protocol port, carrying length-prefixed UDP
-datagrams), the rest are ephemeral (one per accepted TCP connection).
+long-lived (one per UDP-bearing infra port, carrying length-prefixed
+UDP datagrams), the rest are ephemeral (one per accepted TCP
+connection).
 
 ```
               ┌── ICE conn / QUIC ──┐
@@ -65,73 +66,107 @@ maintains five of them.
 > almost immediately under load. QUIC has the loss recovery + flow
 > control that yamux is forced to assume from below it.
 
-## Layer 2 — identity-port plane
+## Layer 2 — peer-VIP / service-VIP plane
 
 This is the trick that makes the overlay invisible to the applications
-above. Every peer has a unique port for every protocol. mesh-conn
-binds the **other** peers' identity ports on `127.0.0.1` and bridges
-each one to the right ICE+QUIC peer link, **preserving source ports**
-so the destination app sees the packet as coming from
-`127.0.0.1:<sender's identity port>` — which is exactly what the app
-uses to identify the sender.
+above. Two carved-out loopback `/24`s, allocated cluster-wide:
 
-So inside any CVM the entire cluster looks like a single loopback
-host. Eight protocol ports per peer (serf_lan, server_rpc, http_api,
-grpc, webdemo, sidecar_public, postgres, patroni_rest), spread by
-`base + ordinal`:
+- **Peer VIPs** in `127.50.0.0/24` — one per peer (the peer's
+  ordinal+1 in the example template). Identifies *who* a piece of
+  infrastructure traffic is for.
+- **Service VIPs** in `127.10.0.0/24` — one per Connect upstream a
+  worker consumes (e.g. webdemo, postgres-master, postgres-replica).
+  Identifies *what service* an app is calling.
+
+mesh-conn binds a small **static infra-port allowlist** on every
+*other* peer's VIP and forwards each accepted connection to the right
+remote peer over the QUIC link:
+
+| Port  | Used by                                               | Proto       |
+|-------|-------------------------------------------------------|-------------|
+| 21000 | Envoy Connect public mTLS — webdemo sidecar           | TCP         |
+| 21001 | Envoy Connect public mTLS — postgres sidecar          | TCP         |
+| 8300  | Consul server RPC (server-to-server, client-to-server)| TCP         |
+| 8301  | Consul serf-LAN gossip                                | UDP + TCP   |
+
+The allowlist is static and small by design — mesh-conn knows
+**peers, not services**. Apps never dial peer VIPs; only Envoy and
+Consul-agent do, and both speak well-known platform ports. Adding a
+port to the allowlist is a code change in `mesh-conn/main.go`, not
+a runtime catalog watch.
 
 ```
                   inside worker-3 CVM (network_mode: host)
    ┌───────────────────────────────────────────────────────────────────┐
-   │ local apps bind their OWN identity ports (base + ordinal=3):      │
+   │ local apps + platform processes bind canonical ports on lo:       │
    │                                                                   │
-   │   consul agent      ▶  127.0.0.1:18003 (serf)  18103 (rpc)        │
-   │                        18203 (http)   18303 (grpc)                │
-   │   webdemo           ▶  127.0.0.1:18503                            │
-   │   envoy sidecar     ▶  127.0.0.1:18603 (public mTLS)              │
-   │   patroni / pg      ▶  127.0.0.1:18703 (postgres) 18803 (REST)    │
+   │   patroni / pg     ▶  127.0.0.1:5432  (postgres)                  │
+   │                       127.0.0.1:8008  (patroni REST)              │
+   │   webdemo          ▶  127.0.0.1:8080                              │
+   │   envoy-webdemo    ▶  127.0.0.1:21000 (sidecar public mTLS)       │
+   │   envoy-postgres   ▶  127.0.0.1:21001 (sidecar public mTLS)       │
+   │   consul agent     ▶  127.0.0.1:8500  (HTTP)                      │
+   │                       127.0.0.1:8502  (gRPC, Envoy xDS)           │
+   │                       127.0.0.1:8301  (serf gossip)               │
+   │                       127.0.0.1:8300  (server RPC; coords only)   │
    │                                                                   │
-   │ mesh-conn binds OTHER peers' identity ports on 127.0.0.1:         │
+   │ loopback aliases (provisioned once at sidecar entrypoint):        │
    │                                                                   │
-   │   ports[0..7] + 0 ◄── coord-0                                     │
-   │   ports[0..7] + 1 ◄── coord-1                                     │
-   │   ports[0..7] + 2 ◄── coord-2                                     │
-   │   ports[0..7] + 4 ◄── worker-4                                    │
-   │   ports[0..7] + 5 ◄── worker-5                                    │
+   │   127.50.0.<vip>/32  for every peer — peer VIPs                   │
+   │   127.10.0.<vip>/32  per declared upstream — service VIPs         │
    │                                                                   │
-   │ all UDP/TCP traffic to those ports is shipped through the         │
-   │ matching ICE+QUIC connection to the corresponding peer.           │
+   │ mesh-conn binds the allowlist on OTHER peers' VIPs, e.g. on       │
+   │ worker-3:                                                         │
+   │                                                                   │
+   │   127.50.0.1:8301,8300,21000,21001  ◄── coord-0                   │
+   │   127.50.0.2:8301,8300,21000,21001  ◄── coord-1                   │
+   │   127.50.0.3:8301,8300,21000,21001  ◄── coord-2                   │
+   │   127.50.0.5:8301,8300,21000,21001  ◄── worker-4                  │
+   │   127.50.0.6:8301,8300,21000,21001  ◄── worker-5                  │
+   │                                                                   │
+   │ Envoy listens on the service VIPs for declared upstreams:         │
+   │                                                                   │
+   │   127.10.0.10:8080   →  cluster `webdemo`                         │
+   │   127.10.0.20:5432   →  cluster `postgres-master`                 │
+   │   127.10.0.21:5432   →  cluster `postgres-replica`                │
+   │                                                                   │
+   │ /etc/hosts maps service names → service VIPs, so apps just call   │
+   │ `postgres-master:5432`.                                           │
    └───────────────────────────────────────────────────────────────────┘
 ```
 
-Every peer has the symmetric layout — own ports bound by apps, other
-peers' ports bound by mesh-conn.
+Every peer has a symmetric layout: own ports bound by apps + Envoy +
+Consul, other peers' VIP+allowlist bound by mesh-conn. Self's VIP is
+also aliased on `lo` (local short-circuit: dialing
+`127.50.0.<self-vip>:21000` routes through the kernel directly to
+the local Envoy, no mesh-conn hop).
 
 ## Layer 3 — apps
 
 Consul agents, Envoy sidecars, webdemo, Patroni, anything else. These
-think they're talking to peers on `127.0.0.1`. They never see ICE,
-QUIC, TURN, or the public internet. Stock HashiCorp Consul, stock
-Envoy, stock Patroni.
+think they're talking to peers on `127.0.0.1` and to services by
+name. They never see ICE, QUIC, TURN, or the public internet. Stock
+HashiCorp Consul, stock Envoy, stock Patroni.
 
 ## How a single call traverses all four layers
 
-A Connect-style mTLS call from `worker-3`'s webdemo to `worker-4`'s
-webdemo:
+A Connect-mTLS call from `worker-3`'s webdemo to whichever peer's
+webdemo Envoy load-balances onto:
 
 ```
 worker-3 webdemo
-  GET http://127.0.0.1:19000/hello             ── Layer 3, app on its
-  │                                                local sidecar upstream
+  GET http://webdemo:8080/hello                ── Layer 3, app dialing
+  │   /etc/hosts → 127.10.0.10                    a service name
   ▼
-worker-3 envoy sidecar
-  picks endpoint via Consul-supplied EDS
-  opens mTLS to "127.0.0.1:18604" (worker-4's sidecar via mesh-conn)
+worker-3 envoy-webdemo
+  listener on 127.10.0.10:8080 (cluster `webdemo`)
+  EDS endpoint pick → e.g. 127.50.0.5:21000 (worker-4's webdemo sidecar)
+  opens mTLS to "127.50.0.5:21000"
   │
   ▼
-worker-3 mesh-conn (TCP listener on 127.0.0.1:18604)
+worker-3 mesh-conn (TCP listener on 127.50.0.5:21000)
   reads bytes off the local TCP listener
-  opens a QUIC stream tagged "port=18604"
+  opens a QUIC stream tagged "port=21000"
   writes through the worker-3↔worker-4 QUIC connection      ── Layer 2 → 1
   │     ╱
   │    ╱  here Layer 1 (QUIC frames over the ICE conn)
@@ -140,15 +175,15 @@ worker-3 mesh-conn (TCP listener on 127.0.0.1:18604)
   │ ╱
   ▼
 worker-4 mesh-conn (QUIC stream accept on the worker-3 ICE conn)
-  reads stream header → "port=18604"
-  dials TCP to 127.0.0.1:18604 (worker-4's actual sidecar)
+  reads stream header → "port=21000" (allowlist-validated)
+  dials TCP to 127.0.0.1:21000 (worker-4's webdemo sidecar)
   splices stream ↔ TCP conn                                 ── Layer 1 → 2
   │
   ▼
-worker-4 envoy sidecar
+worker-4 envoy-webdemo
   validates origin's mTLS cert against Connect CA
   checks intention webdemo → webdemo (allow)
-  forwards to local 127.0.0.1:18504 (LocalServicePort)
+  forwards to local 127.0.0.1:8080 (LocalServicePort)
   │
   ▼
 worker-4 webdemo
@@ -156,6 +191,36 @@ worker-4 webdemo
 ```
 
 Reply takes the same path in reverse.
+
+## Patroni replication uses the same path
+
+A Patroni replica following the leader is just another consumer of
+the `postgres-master` Connect upstream — no special case. The
+replica's `primary_conninfo` carries `host=postgres-master port=5432`
+(the same constant string registered as `postgresql.connect_address`
+on every Patroni instance). The local Envoy at `127.10.0.20:5432`
+proxies to the leader's `127.50.0.<leader-vip>:21001`, which lands
+on the leader's postgres-sidecar Envoy and gets forwarded to local
+`127.0.0.1:5432`. The Connect mesh stays in the data path for
+streaming WAL + `pg_basebackup` — the 2× Envoy hop tax is the cost
+of keeping mesh-conn workload-agnostic.
+
+Service-resolver subsets pick the right peer:
+
+```hcl
+Kind = "service-resolver"
+Name = "postgres"
+Subsets = {
+  master  = { Filter = "Service.Tags contains \"master\"" }
+  replica = { Filter = "Service.Tags contains \"replica\"" }
+}
+```
+
+Patroni auto-registers the parent `postgres` service with the
+current role as a tag (`master` on the leader, `replica` on
+followers). The subset filter strips down EDS endpoints to the right
+peer's sidecar, and the `postgres-master` / `postgres-replica`
+service-resolvers redirect to the right subset of `postgres`.
 
 ## mesh-conn × QUIC — how they work together
 
@@ -177,8 +242,9 @@ TEE layer, not TLS identity) and gives back a `*quic.Conn`.
 We need to carry multiple logical channels over the unreliable UDP
 underlay:
 
-- One long-lived stream per identity port (8 of these per peer-pair)
-  carrying length-prefixed UDP datagrams.
+- One long-lived stream per UDP-bearing allowlist port (currently
+  one: 8301 for serf gossip), carrying length-prefixed UDP
+  datagrams.
 - One ephemeral stream per accepted local TCP connection, opened and
   closed on demand.
 
@@ -222,10 +288,11 @@ When a stream opens, the **first 3 bytes** carry a mesh-conn header:
   datagrams.
 - `tag = 0x33` → **streamTCP** — per-connection raw TCP byte stream.
 
-The 16-bit `port` is the **receiver's own identity port** for the
-protocol slot this stream serves. The receiver looks it up in
-`self.Ports`, finds the index, and pairs the stream with the right
-local socket / dial target.
+The 16-bit `port` is the **receiver's local port to dial / write
+into**. The receiver validates it against the static allowlist
+(`{21000, 21001, 8300, 8301}`); anything else is rejected. There is
+no per-peer port-list lookup — ports are platform-level constants
+the same on every CVM.
 
 UDP-over-stream uses an explicit 2-byte big-endian length prefix per
 datagram, since QUIC streams are byte-oriented (like yamux was) and
@@ -255,7 +322,8 @@ format.
 ## Trust boundaries
 
 - **App → Envoy** is plaintext on loopback. Same CVM, same TEE.
-- **Envoy → Envoy** is mTLS, certs signed by Consul's Connect CA.
+- **Envoy → Envoy** is mTLS, certs signed by Consul's Connect CA
+  (built-in CA provider; root in Raft, no external derivation).
   End-to-end across the overlay; mesh-conn just sees encrypted bytes.
 - **mesh-conn → mesh-conn** rides ICE. Direct UDP between CVMs on the
   public internet (or TURN-relayed if hole-punching ever fails).
@@ -265,22 +333,25 @@ format.
 - …all confidential traffic above it is **already encrypted by Envoy
   mTLS** (Layer 3), so the wire is safe even if someone could see the
   UDP datagrams.
-- **Consul gossip** is currently unencrypted (we didn't set a gossip
-  key); RPC is plaintext. Both are confined to inside the overlay,
-  but a full setup would set `-encrypt=...` and TLS for
-  RPC. See [ROBUSTNESS.md](ROBUSTNESS.md).
+- **Consul gossip** is encrypted via `-encrypt` (Stage-1 workaround:
+  key generated in Terraform and broadcast via env; Stage-2
+  attestation will replace this with TEE-rooted material). RPC is
+  plaintext. Both are confined to inside the overlay, but a full
+  setup would also configure TLS for RPC. See [ROBUSTNESS.md](ROBUSTNESS.md).
 
 ## What's nice about this shape
 
 - **Layer 3 has zero awareness of layers below.** Consul, Envoy,
-  webdemo all think they're on a flat loopback. Anything that runs
-  against Consul today (Vault, Nomad, Boundary, custom apps) drops in
-  unchanged.
-- **Layer 1 is a single component (mesh-conn, ~700 LoC Go including
-  the QUIC adapter) and has zero awareness of Consul.** It just
-  bridges ports. It would equally well move Postgres replication,
-  Redis Sentinel, Kafka, etc. — and in fact this example uses it for
-  Patroni+Postgres replication.
+  webdemo, Patroni all think they're on a flat loopback talking to
+  services by name. Anything that runs against Consul today (Vault,
+  Nomad, Boundary, custom apps) drops in unchanged.
+- **Layer 1 + 2 are a single component (mesh-conn, ~600 LoC Go
+  including the QUIC adapter) and have zero awareness of services.**
+  mesh-conn forwards bytes between peer VIPs on a static infra-port
+  allowlist; it does not know what Consul, Patroni, or Envoy are.
+  It would equally well move Postgres replication, Redis Sentinel,
+  Kafka, etc. — and in fact this example uses it for both Consul
+  cluster gossip and Patroni-replication-via-Envoy.
 - **Layer 0 is dumb infra.** Just a public IP running coturn + a tiny
   broker. Fungible and not in the data path once peers are connected.
 

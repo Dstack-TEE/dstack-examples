@@ -24,7 +24,9 @@ set -euo pipefail
 
 CLUSTER_NAME="${CLUSTER_NAME:-demo}"
 GATEWAY_DOMAIN="${GATEWAY_DOMAIN:-dstack-pha-prod5.phala.network}"
-COORDINATOR_HTTP_PORT="${COORDINATOR_HTTP_PORT:-18200}"
+# Consul HTTP is on the canonical 8500 on every coordinator since the
+# peer-VIP / service-VIP rewrite (was per-ordinal 18200+ before).
+COORDINATOR_HTTP_PORT="${COORDINATOR_HTTP_PORT:-8500}"
 MIN_READY_SECONDS="${MIN_READY_SECONDS:-30}"
 HEALTH_TIMEOUT_SECONDS="${HEALTH_TIMEOUT_SECONDS:-180}"
 
@@ -46,10 +48,13 @@ done
 CONSUL_BASE=""
 
 resolve_consul_base() {
+  # `coordinator_app_ids` is a map keyed by ordinal as a string.
+  # We pick coord-0 by convention; any coord agent serves the HTTP
+  # API equally well.
   local coord_id
-  coord_id=$(terraform output -raw coordinator_app_id 2>/dev/null || true)
+  coord_id=$(terraform output -json coordinator_app_ids 2>/dev/null | jq -r '."0" // empty')
   if [[ -z "$coord_id" ]]; then
-    echo "ERROR: terraform output coordinator_app_id failed; run terraform apply at least once" >&2
+    echo "ERROR: terraform output coordinator_app_ids[\"0\"] missing; run terraform apply at least once" >&2
     exit 1
   fi
   # `<port>` (no trailing 's') — gateway terminates TLS, backend is

@@ -1,7 +1,7 @@
 # Robustness review
 
 We've assembled a tower of clever-ish components: CVMs behind a NAT,
-ICE hole-punch, QUIC stream multiplexer, identity-port forwarding, Consul +
+ICE hole-punch, QUIC stream multiplexer, peer-VIP forwarding, Consul +
 Envoy mTLS on top. Each layer earns its keep — but that's exactly
 when it's worth being honest about how the whole thing fails.
 
@@ -11,10 +11,11 @@ do we do about it?", and lands on a prioritised punch list.
 ## Mental model
 
 ```
-  Layer 3   apps         Consul + Envoy + webdemo
-                         (HashiCorp / Lyft code, well-trodden)
-  Layer 2   forwarder    mesh-conn ~700 LoC: per-peer port plan,
-                         source-port preservation
+  Layer 3   apps         Consul + Envoy + webdemo + Patroni
+                         (HashiCorp / Lyft / Zalando code, well-trodden)
+  Layer 2   forwarder    mesh-conn ~600 LoC: peer VIPs (127.50.0.0/24),
+                         static infra-port allowlist {21000, 21001,
+                         8300, 8301}, 3-byte stream header
   Layer 1   transport    pion/ice + QUIC: punched UDP path,
                          stream multiplex, flow control, keepalive
   Layer 0   rendezvous   coturn + signalling broker on a public box;
@@ -26,14 +27,14 @@ The risks fall into three buckets:
 - **operational**: things that fail in normal life and want
   watchdogs, retries, healthchecks, runbooks.
 - **structural**: SPOFs, capacity ceilings, missing redundancy.
-- **boutique-protocol**: bugs we could write into our 330-LoC
-  shim that would manifest as hard-to-debug stalls.
+- **boutique-protocol**: bugs we could write into the small shim
+  that would manifest as hard-to-debug stalls.
 
 The "are we playing too many tricks?" question really resolves to
 the third bucket. Most of the stack uses well-trodden libraries; the
-clever-and-ours bits are the identity-port plan and the 3-byte
-stream header. Both are simple enough to audit, but exactly because
-they're ours, they're the parts that *must* be made robust by hand.
+clever-and-ours bits are the peer-VIP plane and the 3-byte stream
+header. Both are simple enough to audit, but exactly because they're
+ours, they're the parts that *must* be made robust by hand.
 
 ## Layer 0 — rendezvous infra
 
@@ -122,7 +123,9 @@ whose direct path goes down can't fail over to TURN until it's back".
 
 ### What's there
 
-- the per-peer port plan (PEERS_JSON)
+- peer VIPs `127.50.0.<vip>` (one per peer, in PEERS_JSON)
+- the static infra-port allowlist `{21000, 21001, 8300, 8301}`
+  (in `mesh-conn/main.go`, deliberately small — see ARCHITECTURE.md)
 - the 3-byte stream header (tag, port-uint16-BE)
 - the per-stream pumps (UDP length-prefix, TCP raw splice)
 - one accept-loop per peer pair to demux incoming streams
@@ -131,11 +134,11 @@ whose direct path goes down can't fail over to TURN until it's back".
 
 | failure                          | impact                                                              | recovery |
 | ---                              | ---                                                                 | ---      |
-| Two peers configured with the same identity port | mesh-conn refuses to start with an explicit `port X claimed by both A and B` error and crashes the container before any link comes up. | already handled — `validatePeers()` runs at startup, see "Already shipped" below. |
-| Peer count mismatch in PEERS_JSON | `validatePeers()` rejects with `peer X has N ports, expected M` before any goroutine starts. | already handled. |
-| Local app binds same port as mesh-conn forwarder for a peer | EADDRINUSE; whichever started second loses. | enforce in compose / startup ordering. |
+| Two peers configured with the same VIP | mesh-conn refuses to start with an explicit `vip N claimed by both A and B` error before any goroutine starts. | already handled — `validatePeers()` runs at startup, see "Already shipped" below. |
+| VIP out of range (0 or > 254) | `validatePeers()` rejects with `vip out of range`. | already handled. |
+| Loopback alias for a peer's VIP not provisioned | mesh-conn fails at `net.ListenTCP/UDP` on the missing address; container crashes; compose restart re-runs entrypoint which re-provisions aliases. | automatic via `restart: on-failure`. |
 | **mesh-conn dies** | All peer-pair links from this CVM drop. QUIC + ICE on every other peer notice via keep-alive within ~30 s and tear down. Consul agent gossip-timeouts (~10 s default) drop this CVM from the catalog. Sidecars on other peers stop sending here. | container `restart: on-failure` brings it back; everyone re-handshakes. |
-| **Source-port-preservation breaks** (e.g. someone changes port plan and forgets to update an app) | Receiving Consul agent sees gossip from "wrong" address, labels it as a new node, may try to add it to membership; cluster gets confused. | add an integration test that boots cluster + writes KV from each peer + reads from each peer. |
+| Receiver gets a stream tagged for a port outside the allowlist | mesh-conn logs and closes the stream defensively (no dial). | already handled. |
 | 3-byte header parse confusion | Receiver gets a malformed header, currently logs and closes the stream. Other streams unaffected. | already handled defensively. |
 
 ### Risk shape
@@ -170,12 +173,12 @@ The mitigations are mostly testing discipline:
 ### Already shipped
 
 - **PEERS_JSON validation at startup** — `validatePeers()` in
-  `mesh-conn/main.go:182` runs before any goroutine starts and
-  fails fast on duplicate IDs, missing self, mismatched port-list
-  lengths, port collisions, empty port lists, or out-of-range
-  ports. A canonicalised `peersDigest()` is logged at startup so
-  `grep` across all peers' logs immediately surfaces config
-  drift. Nine unit tests in `validate_test.go` cover the cases.
+  `mesh-conn/main.go` runs before any goroutine starts and fails
+  fast on duplicate IDs, missing self, VIP collisions, or
+  out-of-range VIPs. A canonicalised `peersDigest()` is logged at
+  startup so `grep` across all peers' logs immediately surfaces
+  config drift. Unit tests in `validate_test.go` cover the cases
+  plus an `allowedPort` check pinning the static allowlist.
 
 ## Layer 3 — Consul + Envoy + apps
 
@@ -266,16 +269,18 @@ noting for the runbook.
 
 ### Configuration drift / inconsistency
 
-PEERS_JSON is duplicated across every CVM's deploy env. Keeping them
-in sync is a deploy-script discipline today (`deploy_one()` builds it
-once, passes the same string to every `phala deploy`). A single
-broken character on one CVM and that peer's port plan disagrees with
-the others — silently, until something tries to talk to that port.
+PEERS_JSON is duplicated across every CVM's deploy env. Today
+Terraform builds it once from `local.peers` and passes the same
+string to every `phala_app`, so within a single `terraform apply`
+they agree. A divergence (e.g. a partial apply that updates some
+CVMs but not others) would mean two peers disagree on which VIP
+identifies which peer — silently, until something tries to dial that
+peer.
 
-Mitigation: keep the deploy logic in a single shell script (already
-the pattern), and have mesh-conn validate the JSON at startup —
-include a hash in the log so you can `grep` across all peers and
-confirm they agree.
+Mitigation: mesh-conn logs a `peersDigest` at startup; `grep` across
+all peers' logs and confirm they agree. The digest is stable under
+peer-list reorder so different orderings of the same set hash to the
+same thing.
 
 ### Restart cascades
 
@@ -335,16 +340,18 @@ Honest answer: not really. Each layer earns its place.
 - The **NAT constraint** forces ICE / hole-punching.
 - **Consul's UDP-and-TCP-on-the-same-port** forces a multiplexer
   over the punched path.
-- Yamux is the obvious multiplexer (HashiCorp uses it inside Consul,
-  Nomad, and Vault — it's not exotic).
-- **Identity-port preservation** is the *one* clever-and-ours
-  technique, and it's there because Consul's own protocol assumes
-  every peer can be addressed at the same well-known port set.
+- QUIC is the obvious multiplexer over a lossy UDP underlay (yamux
+  was tried and discarded — see ARCHITECTURE.md).
+- **Per-peer loopback VIPs** are the *one* clever-and-ours
+  technique, and they exist because Consul's own protocol assumes
+  every peer can be reached at a stable address. The peer-VIP plane
+  gives us that stable address without modifying Consul; the static
+  infra-port allowlist on top keeps mesh-conn workload-agnostic.
 
 The risk concentration isn't in the count of layers; it's in the
 **single piece of code we wrote ourselves** (mesh-conn). That's
 exactly the file that needs the attention from the punch list above.
 
 The other risk concentration is **operational**: SPOFs at the
-coordinator and the Consul server. Those are easy fixes and just
-need to be done before treating any of this as production.
+coordinator. Easy fix (run two coordinators) and just needs to be
+done before treating any of this as production.

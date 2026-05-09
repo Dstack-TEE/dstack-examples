@@ -29,12 +29,17 @@ PW=$(ssh ... root@${W1}-22.${GW} "cat /tmp/dstack-runtime/secrets/patroni-superu
 
 ### 1. Snapshot pre-state + mark a "before" row
 
+Postgres + Patroni REST bind their canonical ports on every worker
+(no per-ordinal arithmetic): `127.0.0.1:5432` for Postgres,
+`127.0.0.1:8008` for Patroni REST. Both are local to the CVM, so
+queries go via `ssh` + `docker exec`.
+
 ```bash
 ssh ... root@${W1}-22.${GW} \
-  "docker exec dstack-sidecar-1 sh -c 'curl -s http://127.0.0.1:18803/cluster' | jq"
+  "docker exec dstack-sidecar-1 sh -c 'curl -s http://127.0.0.1:8008/cluster' | jq"
 
 ssh ... root@${W1}-22.${GW} "PGPASSWORD='$PW' docker exec -e PGPASSWORD dstack-patroni-1 \
-  psql -h 127.0.0.1 -p 18703 -U postgres -d postgres \
+  psql -h 127.0.0.1 -p 5432 -U postgres -d postgres \
   -c \"INSERT INTO demo(msg) VALUES ('before failover') RETURNING id, msg;\""
 ```
 
@@ -51,15 +56,18 @@ ssh ... root@${W1}-22.${GW} "docker stop -t 0 dstack-patroni-1"
 ### 3. Watch the election + first write on the new leader
 
 ```bash
-# Poll W4's /cluster endpoint every ~1s; promotion shows when the
-# leader-key expires from Consul KV (TTL=30s) and a replica wins.
-while ! curl -s http://127.0.0.1:18804/cluster | jq -e '.members[]|select(.role=="leader" and .name!="worker-3")' >/dev/null; do
+# Poll Consul's catalog from coord-0 — the postgres-master service is
+# only registered on whichever worker Patroni currently considers the
+# leader. When the registered Node changes from worker-3 to a new one,
+# the failover is complete.
+COORD0=...   # coordinator-0 app_id
+while [ "$(curl -s https://${COORD0}-8500s.${GW}/v1/catalog/service/postgres-master | jq -r '.[0].Node')" = "worker-3" ]; do
   sleep 1
 done
 
-# Try to write on whichever replica got promoted.
+# Try to write on whichever replica got promoted (W2 = worker-4 here).
 ssh ... root@${W2}-22.${GW} "PGPASSWORD='$PW' docker exec -e PGPASSWORD dstack-patroni-1 \
-  psql -h 127.0.0.1 -p 18704 -U postgres -d postgres \
+  psql -h 127.0.0.1 -p 5432 -U postgres -d postgres \
   -c \"INSERT INTO demo(msg) VALUES ('after failover') RETURNING id;\""
 ```
 
