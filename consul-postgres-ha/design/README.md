@@ -12,6 +12,7 @@ in their face.
 
 | Doc | What |
 |---|---|
+| [`service-discovery-restructure.md`](service-discovery-restructure.md) | Move from `127.0.0.1:base+ordinal` to `service:port` UX via per-service VIPs (`127.10.0.0/24`) and per-peer VIPs (`127.50.0.0/24`). mesh-conn keeps a 3-port platform allowlist `{21000, 8300, 8301}`; all app traffic (including Patroni replication) goes through Envoy uniformly. Single rewrite, no staging — old impl rolls back via git. |
 | [`attestation-admission.md`](attestation-admission.md) | Use dstack TEE attestation as the mesh-conn admission credential, replacing/augmenting the shared TURN HMAC. Phased plan: per-app-id first, Consul-KV-rooted policy later. |
 
 Each doc includes:
