@@ -16,9 +16,13 @@
 //      restarts re-find their own slot.
 //
 //   3. Write everything dependent services need to a tmpfs volume
-//      shared via compose. /run/secrets/{gossip,turn,ca-seed} are
+//      shared via compose. /run/secrets/{turn,ca-seed} are
 //      mode-0400 binary blobs; /run/instance/info.json carries the
-//      identity + ordinal + computed per-protocol ports.
+//      identity + ordinal. Per-protocol ports are no longer computed
+//      here — every service binds its canonical well-known port on
+//      127.0.0.1 (Postgres 5432, Envoy public 21000, Consul 8500/8300/
+//      8301, …) and cross-peer routing happens via mesh-conn over
+//      per-peer loopback VIPs.
 //
 //   4. Exit 0 so compose `depends_on` with
 //      `condition: service_completed_successfully` can release the
@@ -131,9 +135,6 @@ func main() {
 		}
 	}
 
-	// 4. Compute per-protocol ports for this ordinal.
-	ports := computePorts(cfg.ProtocolBases, ordinal)
-
 	instance := InstanceInfo{
 		InstanceID:  info.InstanceID,
 		AppID:       info.AppID,
@@ -141,13 +142,12 @@ func main() {
 		ClusterName: cfg.ClusterName,
 		Role:        cfg.Role,
 		Ordinal:     ordinal,
-		Ports:       ports,
 	}
 	if err := writeJSON("/run/instance/info.json", instance); err != nil {
 		log.Fatalf("write instance info: %v", err)
 	}
 
-	log.Printf("bootstrap done: role=%s ordinal=%d ports=%v", cfg.Role, ordinal, ports)
+	log.Printf("bootstrap done: role=%s ordinal=%d", cfg.Role, ordinal)
 }
 
 // =============================================================================
@@ -159,10 +159,9 @@ type Config struct {
 	Role                  string // coordinator | worker
 	ConsulHTTPAddr        string // 127.0.0.1:<port> on the local agent
 	ExpectedReplicas      int    // upper bound on ordinal slots to try
-	ProtocolBases         map[string]int
-	WorkerOrdinal         int  // optional, set by cluster.tf per-worker (>0)
-	CoordinatorOrdinal    int  // optional, set by cluster.tf per-coordinator (>=0)
-	HasCoordinatorOrdinal bool // distinguishes ordinal=0 from "unset"
+	WorkerOrdinal         int    // optional, set by cluster.tf per-worker (>0)
+	CoordinatorOrdinal    int    // optional, set by cluster.tf per-coordinator (>=0)
+	HasCoordinatorOrdinal bool   // distinguishes ordinal=0 from "unset"
 }
 
 func loadConfig() *Config {
@@ -186,11 +185,6 @@ func loadConfig() *Config {
 		}
 		cfg.CoordinatorOrdinal = n
 		cfg.HasCoordinatorOrdinal = true
-	}
-	// PROTOCOL_BASES: JSON object of name -> base port.
-	rawBases := mustEnv("PROTOCOL_BASES")
-	if err := json.Unmarshal([]byte(rawBases), &cfg.ProtocolBases); err != nil {
-		log.Fatalf("PROTOCOL_BASES not valid JSON: %v", err)
 	}
 	if r := os.Getenv("EXPECTED_REPLICAS"); r != "" {
 		n, err := strconv.Atoi(r)
@@ -286,21 +280,12 @@ func claimOrdinal(cfg *Config, instanceID string) (int, error) {
 // =============================================================================
 
 type InstanceInfo struct {
-	InstanceID  string         `json:"instance_id"`
-	AppID       string         `json:"app_id"`
-	ComposeHash string         `json:"compose_hash"`
-	ClusterName string         `json:"cluster_name"`
-	Role        string         `json:"role"`
-	Ordinal     int            `json:"ordinal"`
-	Ports       map[string]int `json:"ports"`
-}
-
-func computePorts(bases map[string]int, ordinal int) map[string]int {
-	out := make(map[string]int, len(bases))
-	for name, base := range bases {
-		out[name] = base + ordinal
-	}
-	return out
+	InstanceID  string `json:"instance_id"`
+	AppID       string `json:"app_id"`
+	ComposeHash string `json:"compose_hash"`
+	ClusterName string `json:"cluster_name"`
+	Role        string `json:"role"`
+	Ordinal     int    `json:"ordinal"`
 }
 
 // writeSecretEncoded writes b to path with the given encoding. 0444

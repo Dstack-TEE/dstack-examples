@@ -11,8 +11,8 @@ func TestValidatePeers_OK(t *testing.T) {
 	cfg := &Config{
 		SelfID: "ctrl",
 		Peers: []Peer{
-			{ID: "ctrl", Ports: []int{18000, 18100}},
-			{ID: "w1", Ports: []int{18001, 18101}},
+			{ID: "ctrl", Vip: 1},
+			{ID: "w1", Vip: 2},
 		},
 	}
 	if err := validatePeers(cfg); err != nil {
@@ -20,12 +20,12 @@ func TestValidatePeers_OK(t *testing.T) {
 	}
 }
 
-func TestValidatePeers_PortCollision(t *testing.T) {
+func TestValidatePeers_VipCollision(t *testing.T) {
 	cfg := &Config{
 		SelfID: "ctrl",
 		Peers: []Peer{
-			{ID: "ctrl", Ports: []int{18000, 18100}},
-			{ID: "w1", Ports: []int{18000, 18101}}, // 18000 collides with ctrl
+			{ID: "ctrl", Vip: 1},
+			{ID: "w1", Vip: 1}, // collides with ctrl
 		},
 	}
 	err := validatePeers(cfg)
@@ -34,26 +34,12 @@ func TestValidatePeers_PortCollision(t *testing.T) {
 	}
 }
 
-func TestValidatePeers_MismatchedPortCount(t *testing.T) {
-	cfg := &Config{
-		SelfID: "ctrl",
-		Peers: []Peer{
-			{ID: "ctrl", Ports: []int{18000, 18100, 18200}},
-			{ID: "w1", Ports: []int{18001, 18101}}, // missing one
-		},
-	}
-	err := validatePeers(cfg)
-	if err == nil || !strings.Contains(err.Error(), "expected 3") {
-		t.Fatalf("want port-count mismatch, got %v", err)
-	}
-}
-
 func TestValidatePeers_SelfNotInPeers(t *testing.T) {
 	cfg := &Config{
 		SelfID: "missing",
 		Peers: []Peer{
-			{ID: "ctrl", Ports: []int{18000}},
-			{ID: "w1", Ports: []int{18001}},
+			{ID: "ctrl", Vip: 1},
+			{ID: "w1", Vip: 2},
 		},
 	}
 	err := validatePeers(cfg)
@@ -66,8 +52,8 @@ func TestValidatePeers_DuplicateID(t *testing.T) {
 	cfg := &Config{
 		SelfID: "ctrl",
 		Peers: []Peer{
-			{ID: "ctrl", Ports: []int{18000}},
-			{ID: "ctrl", Ports: []int{18001}},
+			{ID: "ctrl", Vip: 1},
+			{ID: "ctrl", Vip: 2},
 		},
 	}
 	err := validatePeers(cfg)
@@ -76,59 +62,78 @@ func TestValidatePeers_DuplicateID(t *testing.T) {
 	}
 }
 
-func TestValidatePeers_EmptyPorts(t *testing.T) {
-	cfg := &Config{
-		SelfID: "ctrl",
-		Peers: []Peer{
-			{ID: "ctrl", Ports: []int{18000}},
-			{ID: "w1", Ports: []int{}},
-		},
+func TestValidatePeers_VipOutOfRange(t *testing.T) {
+	cases := []struct {
+		name string
+		vip  int
+	}{
+		{"zero", 0},
+		{"too-big", 255},
+		{"negative", -1},
 	}
-	err := validatePeers(cfg)
-	if err == nil || !strings.Contains(err.Error(), "empty Ports") {
-		t.Fatalf("want empty-ports error, got %v", err)
-	}
-}
-
-func TestValidatePeers_PortOutOfRange(t *testing.T) {
-	cfg := &Config{
-		SelfID: "ctrl",
-		Peers: []Peer{
-			{ID: "ctrl", Ports: []int{18000}},
-			{ID: "w1", Ports: []int{0}},
-		},
-	}
-	err := validatePeers(cfg)
-	if err == nil || !strings.Contains(err.Error(), "out of range") {
-		t.Fatalf("want out-of-range error, got %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &Config{
+				SelfID: "ctrl",
+				Peers: []Peer{
+					{ID: "ctrl", Vip: 1},
+					{ID: "w1", Vip: tc.vip},
+				},
+			}
+			err := validatePeers(cfg)
+			if err == nil || !strings.Contains(err.Error(), "out of range") {
+				t.Fatalf("want out-of-range error for vip=%d, got %v", tc.vip, err)
+			}
+		})
 	}
 }
 
 func TestValidatePeers_DigestStableUnderReorder(t *testing.T) {
 	a := []Peer{
-		{ID: "ctrl", Ports: []int{18000, 18100}},
-		{ID: "w1", Ports: []int{18001, 18101}},
+		{ID: "ctrl", Vip: 1},
+		{ID: "w1", Vip: 2},
 	}
 	b := []Peer{
-		{ID: "w1", Ports: []int{18001, 18101}},
-		{ID: "ctrl", Ports: []int{18000, 18100}},
+		{ID: "w1", Vip: 2},
+		{ID: "ctrl", Vip: 1},
 	}
 	if peersDigest(a) != peersDigest(b) {
 		t.Fatalf("digest changes with peer order: %s vs %s", peersDigest(a), peersDigest(b))
 	}
 }
 
-func TestValidatePeers_DigestDiffersWithDifferentPorts(t *testing.T) {
+func TestValidatePeers_DigestDiffersWithDifferentVips(t *testing.T) {
 	a := []Peer{
-		{ID: "ctrl", Ports: []int{18000}},
-		{ID: "w1", Ports: []int{18001}},
+		{ID: "ctrl", Vip: 1},
+		{ID: "w1", Vip: 2},
 	}
 	b := []Peer{
-		{ID: "ctrl", Ports: []int{18000}},
-		{ID: "w1", Ports: []int{18002}}, // different
+		{ID: "ctrl", Vip: 1},
+		{ID: "w1", Vip: 3}, // different
 	}
 	if peersDigest(a) == peersDigest(b) {
-		t.Fatalf("digest collides for different ports")
+		t.Fatalf("digest collides for different vips")
+	}
+}
+
+func TestPeer_VipAddr(t *testing.T) {
+	p := Peer{ID: "x", Vip: 7}
+	got := p.vipAddr().String()
+	if got != "127.50.0.7" {
+		t.Fatalf("vipAddr() = %q, want 127.50.0.7", got)
+	}
+}
+
+func TestAllowedPort(t *testing.T) {
+	for _, p := range []int{21000, 21001, 8300, 8301} {
+		if !allowedPort(p) {
+			t.Errorf("allowedPort(%d) = false, want true", p)
+		}
+	}
+	for _, p := range []int{0, 80, 5432, 8008} {
+		if allowedPort(p) {
+			t.Errorf("allowedPort(%d) = true, want false (not in static infra allowlist)", p)
+		}
 	}
 }
 

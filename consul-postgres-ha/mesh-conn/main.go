@@ -1,29 +1,43 @@
-// mesh-conn — userspace UDP port-forwarding agent over pion/ice.
+// mesh-conn — userspace port-forwarding agent over pion/ice + QUIC.
 //
-// Replaces the earlier TUN-based version. The TUN approach worked but
-// gave us a virtual L3 overlay we never really needed: our apps (Consul
-// gossip, simple HTTP services) just want a stable peer address they can
-// send UDP to.
+// Addressing model: peer VIPs + static infra-port allowlist.
 //
-// Naming convention used by the whole cluster:
-//   each peer declares a list of "identity ports" — one per protocol.
-//   For a Consul deployment that's typically four:
-//     index 0 = serf_lan (UDP+TCP), 1 = server-RPC (TCP),
-//     index 2 = HTTP API (TCP),     3 = gRPC/xDS (TCP)
+//   Every peer is identified by a /8 loopback IP `127.50.0.<vip>`. The
+//   `vip` is a small integer (typically the peer's ordinal in the
+//   cluster) declared in PEERS_JSON, byte-identical across the cluster.
 //
 //   On every peer's host:
-//   - the local app binds 127.0.0.1:<own_port[i]> for protocol i
-//   - mesh-conn binds 127.0.0.1:<peer_port[i]> for every OTHER peer
-//     and every protocol i
-//   - apps reach peer X on protocol i by sending UDP/TCP to
-//     127.0.0.1:<X.ports[i]>
+//   - the entrypoint provisions `127.50.0.<vip>/32 dev lo` for ALL
+//     peers, including self — so dialing self's VIP loops back through
+//     the kernel without crossing mesh-conn.
+//   - mesh-conn binds the static infra-port allowlist on every OTHER
+//     peer's VIP — and forwards each accepted connection to the right
+//     remote peer over QUIC.
 //
-// All N peer-pair connections multiplex over one pion/ice connection
-// per pair, wrapped in QUIC. Each QUIC stream's first three bytes are
-// (tag, port-as-uint16-big-endian) where port is the receiver's own
-// identity port — the receiver looks it up in self.ports and dispatches
-// to the matching local UDP socket / dials the matching local TCP
-// service.
+// Allowlist (every port in this list, every other peer):
+//
+//   21000  Envoy Connect public mTLS — webdemo sidecar         (TCP)
+//   21001  Envoy Connect public mTLS — postgres sidecar        (TCP)
+//   8300   Consul server RPC                                   (TCP)
+//   8301   Consul serf-LAN gossip                              (UDP + TCP)
+//
+// The allowlist is intentionally minimal: only platform infrastructure
+// that needs unmediated peer-to-peer reachability. App-level traffic
+// (including Patroni's Postgres replication) goes through the Connect
+// mesh — mesh-conn knows peers, never services.
+//
+// Sidecar ports come in pairs because stock Consul Connect requires
+// one sidecar Envoy process per Connect-mesh-accessible service:
+// 21000 terminates inbound mTLS for `webdemo`, 21001 terminates inbound
+// mTLS for `postgres`. Both are reserved cluster-wide; any new
+// mesh-accessible service either reuses one of these (by SNI-routing
+// custom Envoy config — out of scope here) or is added explicitly to
+// this list.
+//
+// Wire format on each QUIC stream is unchanged from the old shape:
+// the first 3 bytes are (tag, port-big-endian-uint16), where port is
+// the receiver's local port to dial / write into. The receiver
+// validates port against the allowlist and rejects anything else.
 //
 // Why QUIC and not yamux: yamux assumes a reliable byte-stream underlay,
 // but pion/ice.Conn is UDP — and the UDP path between dstack worker
@@ -76,18 +90,42 @@ import (
 // =============================================================================
 
 type Peer struct {
-	ID    string `json:"id"`
-	Ports []int  `json:"ports"`
+	ID  string `json:"id"`
+	Vip int    `json:"vip"` // last octet in 127.50.0.0/24 — identifies this peer cluster-wide
 }
 
-// hasPort returns the index of port in p.Ports, or -1 if absent.
-func (p *Peer) hasPort(port int) int {
-	for i, q := range p.Ports {
-		if q == port {
-			return i
+// vipAddr returns 127.50.0.<vip> as a net.IP for binding listeners.
+func (p *Peer) vipAddr() net.IP {
+	return net.IPv4(127, 50, 0, byte(p.Vip))
+}
+
+// infraPort is one entry in the static peer-VIP port allowlist. mesh-conn
+// binds (peer.vipAddr(), Port) on every OTHER peer for each entry.
+type infraPort struct {
+	Port int
+	UDP  bool // some ports carry UDP (e.g. serf gossip); most are TCP-only
+}
+
+// peerVIPAllowlist is the entire cluster-wide set of ports any host may
+// dial at a peer VIP. Adding a port here is a deliberate, reviewable
+// change — see consul-postgres-ha/ARCHITECTURE.md for the layering
+// invariant ("mesh-conn knows peers, not services").
+var peerVIPAllowlist = []infraPort{
+	{Port: 21000, UDP: false}, // Envoy Connect sidecar — webdemo
+	{Port: 21001, UDP: false}, // Envoy Connect sidecar — postgres
+	{Port: 8300, UDP: false},  // Consul server RPC (server-to-server + client-to-server)
+	{Port: 8301, UDP: true},   // Consul serf-LAN gossip (UDP datagrams + TCP fallback)
+}
+
+// allowedPort reports whether the given port is in the allowlist.
+// Used by the receiver to reject streams targeting unknown ports.
+func allowedPort(port int) bool {
+	for _, ip := range peerVIPAllowlist {
+		if ip.Port == port {
+			return true
 		}
 	}
-	return -1
+	return false
 }
 
 type Config struct {
@@ -175,18 +213,17 @@ func readTurnSecret() string {
 }
 
 // validatePeers fails fast on any silent mis-configuration that would
-// otherwise manifest as confusing runtime failures: collided ports,
-// missing self, mismatched port-list lengths, etc. Bound at startup
-// because a peer's PEERS_JSON is shared with every other peer's
-// configuration and must round-trip identically across the cluster.
+// otherwise manifest as confusing runtime failures: collided VIPs,
+// missing self, etc. Bound at startup because a peer's PEERS_JSON is
+// shared with every other peer's configuration and must round-trip
+// identically across the cluster.
 func validatePeers(cfg *Config) error {
 	if len(cfg.Peers) < 2 {
 		return fmt.Errorf("need at least 2 peers in PEERS_JSON, got %d", len(cfg.Peers))
 	}
 
 	seenIDs := map[string]bool{}
-	allPorts := map[int]string{} // port -> peer.ID owning it (for collision detection)
-	expectedPortCount := -1
+	allVips := map[int]string{} // vip -> peer.ID owning it (for collision detection)
 	selfFound := false
 
 	for i, p := range cfg.Peers {
@@ -201,34 +238,17 @@ func validatePeers(cfg *Config) error {
 			selfFound = true
 		}
 
-		if len(p.Ports) == 0 {
-			return fmt.Errorf("peer %q has empty Ports list", p.ID)
+		// VIP is the last octet of 127.50.0.0/24; must be 1..254
+		// (avoid network 0 and broadcast 255 by convention) and unique
+		// cluster-wide.
+		if p.Vip < 1 || p.Vip > 254 {
+			return fmt.Errorf("peer %q vip=%d out of range (1..254)", p.ID, p.Vip)
 		}
-		if expectedPortCount < 0 {
-			expectedPortCount = len(p.Ports)
-		} else if len(p.Ports) != expectedPortCount {
-			return fmt.Errorf("peer %q has %d ports, expected %d (every peer's port-list must have the same length — index i is the same protocol slot across peers)",
-				p.ID, len(p.Ports), expectedPortCount)
+		if owner, ok := allVips[p.Vip]; ok {
+			return fmt.Errorf("vip %d is claimed by both peer %q and peer %q — every peer VIP must be globally unique",
+				p.Vip, owner, p.ID)
 		}
-
-		// Each port must be unique cluster-wide: mesh-conn binds OTHER
-		// peers' ports on 127.0.0.1, so two peers can't share a port
-		// number or one would shadow the other.
-		seenSelf := map[int]bool{}
-		for j, port := range p.Ports {
-			if port <= 0 || port > 65535 {
-				return fmt.Errorf("peer %q ports[%d]=%d is out of range", p.ID, j, port)
-			}
-			if seenSelf[port] {
-				return fmt.Errorf("peer %q has duplicate port %d in its own Ports list", p.ID, port)
-			}
-			seenSelf[port] = true
-			if owner, ok := allPorts[port]; ok {
-				return fmt.Errorf("port %d is claimed by both peer %q and peer %q — every identity port must be globally unique",
-					port, owner, p.ID)
-			}
-			allPorts[port] = p.ID
-		}
+		allVips[p.Vip] = p.ID
 	}
 
 	if !selfFound {
@@ -239,8 +259,8 @@ func validatePeers(cfg *Config) error {
 	// every peer in the cluster sees the same PEERS_JSON. Differences
 	// across peers would indicate a deploy-script discrepancy.
 	digest := peersDigest(cfg.Peers)
-	log.Printf("PEERS_JSON validated: %d peers, %d ports each, digest=%s",
-		len(cfg.Peers), expectedPortCount, digest)
+	log.Printf("PEERS_JSON validated: %d peers, allowlist=%d ports/peer, digest=%s",
+		len(cfg.Peers), len(peerVIPAllowlist), digest)
 	return nil
 }
 
@@ -250,6 +270,15 @@ func knownIDs(peers []Peer) []string {
 		ids = append(ids, p.ID)
 	}
 	return ids
+}
+
+// allowlistPorts returns the bare port numbers for log output.
+func allowlistPorts() []int {
+	out := make([]int, len(peerVIPAllowlist))
+	for i, ip := range peerVIPAllowlist {
+		out[i] = ip.Port
+	}
+	return out
 }
 
 // peersDigest is a short stable hash of the canonical PEERS_JSON used
@@ -273,9 +302,7 @@ func peersDigest(peers []Peer) string {
 		// find peer
 		for _, p := range peers {
 			if p.ID == id {
-				for _, port := range p.Ports {
-					fmt.Fprintf(&buf, "%d,", port)
-				}
+				fmt.Fprintf(&buf, "vip=%d", p.Vip)
 				break
 			}
 		}
@@ -317,7 +344,8 @@ func main() {
 			others = append(others, p)
 		}
 	}
-	log.Printf("mesh-conn: self=%s ports=%v other=%d", cfg.SelfID, self.Ports, len(others))
+	log.Printf("mesh-conn: self=%s vip=%d allowlist=%v other=%d",
+		cfg.SelfID, self.Vip, allowlistPorts(), len(others))
 
 	go pollLoop(cfg)
 
@@ -377,10 +405,6 @@ func quicConfig() *quic.Config {
 }
 
 func dialAndPump(cfg *Config, self, peer Peer) error {
-	if len(self.Ports) != len(peer.Ports) {
-		return fmt.Errorf("port-count mismatch: self has %d ports, peer has %d", len(self.Ports), len(peer.Ports))
-	}
-
 	// 1. Establish ICE + wrap with a counting conn for byte-level telemetry.
 	rawConn, err := dialICE(cfg, peer.ID)
 	if err != nil {
@@ -438,83 +462,103 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 	go reportLinkStats(peer.ID, counted, stopStats)
 	defer close(stopStats)
 
-	// 3. Bind localhost UDP+TCP listeners for every one of peer's ports.
-	udpSocks := make([]*net.UDPConn, len(peer.Ports))
-	tcpListeners := make([]*net.TCPListener, len(peer.Ports))
-	for i, port := range peer.Ports {
-		udpSocks[i], err = net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	// 3. Bind allowlist listeners on the peer's VIP. UDP only for ports
+	//    flagged UDP=true (currently only 8301); TCP for every entry.
+	//    Aliases like 127.50.0.<peer.Vip>/32 are provisioned by
+	//    mesh-sidecar/entrypoint.sh before mesh-conn starts; failing
+	//    here means the alias didn't get set up.
+	peerVip := peer.vipAddr()
+	udpSocks := map[int]*net.UDPConn{}     // port -> listener (only UDP-bearing ports)
+	tcpListeners := make([]*net.TCPListener, 0, len(peerVIPAllowlist))
+	for _, ip := range peerVIPAllowlist {
+		tl, err := net.ListenTCP("tcp", &net.TCPAddr{IP: peerVip, Port: ip.Port})
 		if err != nil {
-			return fmt.Errorf("udp listen 127.0.0.1:%d: %w", port, err)
+			return fmt.Errorf("tcp listen %s:%d: %w", peerVip, ip.Port, err)
 		}
-		defer udpSocks[i].Close()
-		tcpListeners[i], err = net.ListenTCP("tcp", &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
-		if err != nil {
-			return fmt.Errorf("tcp listen 127.0.0.1:%d: %w", port, err)
+		defer tl.Close()
+		tcpListeners = append(tcpListeners, tl)
+		if ip.UDP {
+			us, err := net.ListenUDP("udp", &net.UDPAddr{IP: peerVip, Port: ip.Port})
+			if err != nil {
+				return fmt.Errorf("udp listen %s:%d: %w", peerVip, ip.Port, err)
+			}
+			defer us.Close()
+			udpSocks[ip.Port] = us
 		}
-		defer tcpListeners[i].Close()
 	}
 
-	// 4. Establish the per-port long-lived UDP streams. Client opens
-	//    them eagerly, server's accept loop populates them as headers
-	//    arrive. Both sides also run an accept loop to handle ad-hoc
-	//    incoming TCP streams.
-	udpStreams := make([]*quic.Stream, len(peer.Ports))
+	// 4. Establish the per-UDP-port long-lived streams. Client opens
+	//    them eagerly tagged with the allowlist port; server's accept
+	//    loop matches them by header. Both sides also run an accept
+	//    loop to handle ad-hoc incoming TCP streams.
+	udpStreams := map[int]*quic.Stream{}
 	allUDPReady := make(chan struct{})
-	errCh := make(chan error, 4*len(peer.Ports))
+	errCh := make(chan error, 4*len(peerVIPAllowlist))
 
+	udpPortCount := len(udpSocks)
 	go func() {
-		errCh <- runAcceptLoop(connCtx, qconn, &self, &peer, udpStreams, allUDPReady)
+		errCh <- runAcceptLoop(connCtx, qconn, udpStreams, udpPortCount, allUDPReady)
 	}()
 
 	if isClient {
-		for i, peerPort := range peer.Ports {
+		for _, ip := range peerVIPAllowlist {
+			if !ip.UDP {
+				continue
+			}
 			s, err := qconn.OpenStreamSync(connCtx)
 			if err != nil {
 				return fmt.Errorf("quic OpenStreamSync: %w", err)
 			}
-			hdr := []byte{streamUDP, byte(peerPort >> 8), byte(peerPort & 0xff)}
+			hdr := []byte{streamUDP, byte(ip.Port >> 8), byte(ip.Port & 0xff)}
 			if _, err := s.Write(hdr); err != nil {
 				return fmt.Errorf("quic write hdr: %w", err)
 			}
-			udpStreams[i] = s
+			udpStreams[ip.Port] = s
 		}
 		close(allUDPReady)
-	} else {
-		// Server: wait for all UDP streams to register via accept loop.
+	} else if udpPortCount > 0 {
 		select {
 		case <-allUDPReady:
 		case <-time.After(60 * time.Second):
 			return fmt.Errorf("timeout waiting for UDP streams")
 		}
+	} else {
+		close(allUDPReady)
 	}
 
-	log.Printf("[%s] link up — %d ports forwarded (udp+tcp), peer reachable via ICE",
-		peer.ID, len(peer.Ports))
+	log.Printf("[%s] link up — peer vip=127.50.0.%d, allowlist=%v (udp=%d, tcp=%d)",
+		peer.ID, peer.Vip, allowlistPorts(), udpPortCount, len(tcpListeners))
 
-	// 5. Start pumps for each port.
-	for i := range peer.Ports {
-		i := i
-		selfPort := self.Ports[i]
-		go func() { errCh <- pumpUDPSockToStream(udpSocks[i], udpStreams[i]) }()
-		go func() {
-			udpDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: selfPort}
-			errCh <- pumpUDPStreamToSock(udpStreams[i], udpSocks[i], udpDst)
-		}()
-		go func() {
-			peerPort := peer.Ports[i]
-			errCh <- acceptLocalTCP(connCtx, tcpListeners[i], qconn, peerPort)
-		}()
+	// 5. Start pumps. UDP: one bidirectional pump pair per UDP port.
+	//    TCP: one accept-loop per port (each accepted conn opens an
+	//    ephemeral streamTCP).
+	for _, ip := range peerVIPAllowlist {
+		port := ip.Port
+		if ip.UDP {
+			us := udpSocks[port]
+			st := udpStreams[port]
+			go func() { errCh <- pumpUDPSockToStream(us, st) }()
+			go func() {
+				udpDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
+				errCh <- pumpUDPStreamToSock(st, us, udpDst)
+			}()
+		}
+	}
+	for i, ip := range peerVIPAllowlist {
+		tl := tcpListeners[i]
+		port := ip.Port
+		go func() { errCh <- acceptLocalTCP(connCtx, tl, qconn, port) }()
 	}
 	return <-errCh
 }
 
 // runAcceptLoop handles every incoming QUIC stream from the peer.
-// streamUDP headers are matched to the right slot in udpStreams (one per
-// port, by index in self.Ports). streamTCP triggers a Dial to the
-// corresponding local TCP service.
-func runAcceptLoop(ctx context.Context, qconn *quic.Conn, self, peer *Peer, udpStreams []*quic.Stream, allUDPReady chan struct{}) error {
-	udpRegisteredCount := 0
-	udpRegisteredOnce := make([]bool, len(self.Ports))
+// streamUDP headers are matched into udpStreams keyed by port; streamTCP
+// triggers a Dial to 127.0.0.1:<port>. The receiver validates port
+// against the static allowlist; anything else is rejected — that's the
+// only port-knowledge the receiver needs.
+func runAcceptLoop(ctx context.Context, qconn *quic.Conn, udpStreams map[int]*quic.Stream, expectedUDP int, allUDPReady chan struct{}) error {
+	udpRegistered := 0
 	for {
 		s, err := qconn.AcceptStream(ctx)
 		if err != nil {
@@ -528,28 +572,29 @@ func runAcceptLoop(ctx context.Context, qconn *quic.Conn, self, peer *Peer, udpS
 		}
 		tag := hdr[0]
 		port := int(hdr[1])<<8 | int(hdr[2])
-		// "port" is the receiver-side port — we look it up in our own ports.
-		idx := self.hasPort(port)
-		if idx < 0 {
-			log.Printf("[%s] stream for unknown self-port %d", peer.ID, port)
+		if !allowedPort(port) {
+			log.Printf("stream for non-allowlist port %d (tag=0x%x)", port, tag)
 			s.CancelRead(0)
 			s.Close()
 			continue
 		}
 		switch tag {
 		case streamUDP:
-			udpStreams[idx] = s
-			if !udpRegisteredOnce[idx] {
-				udpRegisteredOnce[idx] = true
-				udpRegisteredCount++
-				if udpRegisteredCount == len(self.Ports) {
-					close(allUDPReady)
-				}
+			if _, dup := udpStreams[port]; dup {
+				log.Printf("duplicate streamUDP for port %d", port)
+				s.CancelRead(0)
+				s.Close()
+				continue
+			}
+			udpStreams[port] = s
+			udpRegistered++
+			if udpRegistered == expectedUDP {
+				close(allUDPReady)
 			}
 		case streamTCP:
 			go handleIncomingTCP(s, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
 		default:
-			log.Printf("[%s] unknown stream tag 0x%x", peer.ID, tag)
+			log.Printf("unknown stream tag 0x%x", tag)
 			s.CancelRead(0)
 			s.Close()
 		}
