@@ -92,57 +92,31 @@ whose direct path goes down can't fail over to TURN until it's back".
 | ICE state stalls without dropping (pion bug) | Streams hang. QUIC keep-alive ping eventually fails → session ends → restart loop kicks in. | automatic via keep-alive timeout. |
 | `pion/ice` panics                     | Whole mesh-conn process crashes; Docker restart policy `on-failure` brings it back. | automatic; ICE re-handshakes on next start. |
 | QUIC session can't be created (handshake mismatch) | mesh-conn errors out, retry loop. | automatic. |
-| **Reconnect deadlock** (real bug, see below) | After ICE drop + reconnect, mesh-conn hangs on `<-sess.authCh` because the channel is buffered with one slot already filled by the previous session's auth. | manual restart for now. **Should fix.** |
+| ICE state goes Failed/Closed without `Dial`/`Accept` returning | Without intervention, `agent.Dial` / `agent.Accept` would block forever — pion doesn't surface terminal states through the dial context. `dialICE` registers an `OnConnectionStateChange` handler that cancels its dialCtx on Failed/Closed, so the dial returns and `runPeerLink` retries. | automatic. |
 | Resource exhaustion (many TCP streams) | QUIC per-session limits kick in (256 streams default); new TCP streams to that peer fail. UDP and existing TCP unaffected. | bump `AcceptBacklog` / `MaxIncomingStreams` if it ever hits us at scale. |
 | Head-of-line blocking | A big TCP write on one stream briefly delays a UDP datagram or another TCP stream. Imperceptible at Consul scale. | None needed today. If a future workload becomes jitter-sensitive, split into two ICE conns per pair (UDP-only + TCP-only). |
 
-### The reconnect deadlock — the one real bug
-
-Looking at `mesh-conn/main.go`:
-
-```go
-type peerSession struct {
-    agent  *ice.Agent
-    authCh chan [2]string  // buffered size 1
-}
-
-var (
-    sessionsMu sync.Mutex
-    sessions   = map[string]*peerSession{}  // keyed by remote peer id
-)
-```
-
-`sessions[remoteID]` is created lazily and **never deleted on failure**.
-On the second `dialICE` call after a drop:
-
-- A new `*ice.Agent` is set on the existing session struct.
-- `pollLoop` already-delivered the partner's auth into `authCh` once
-  during the first session, never wrote again because of the
-  `default` clause in the `select`.
-- Or, if the partner re-published auth, `pollLoop`'s `select` writes
-  it but the channel might be empty depending on whether the first
-  session consumed it.
-- Result: under most reconnect orderings the new `dialICE` blocks on
-  `<-sess.authCh` forever, hitting the 10-minute timeout.
-
-Fix is straightforward: **clear the session on failure** so the next
-attempt starts from a clean state, and treat each `dialICE` as a
-fresh round of signalling. Or restructure so each call gets its own
-isolated session struct keyed by attempt-id. Maybe ~30 LoC of work.
-
-This is not yet exercised in production because we haven't had ICE
-drops, but it would bite the first time we did.
-
 ### Recommended fixes
 
-1. **Fix the auth-channel reconnect bug.** As above. Highest priority
-   single fix in this whole document.
-2. **Set a QUIC read deadline on the UDP-stream pumps**, so if a
+1. **Set a QUIC read deadline on the UDP-stream pumps**, so if a
    stream silently stalls (QUIC keep-alive happens at session
    level, not stream level), the pump returns and `runPeerLink`
    restarts.
-3. **Tune QUIC `MaxStreamWindowSize`** if we ever need higher
+2. **Tune QUIC `MaxStreamWindowSize`** if we ever need higher
    throughput; default is 256 KB which is fine for now.
+
+### Already shipped
+
+- **Auth-channel reconnect path is clean.** Each `dialICE` call
+  installs a fresh `peerSession{}` (fresh `authCh`) via
+  `installSession()` and atomically swaps `sessions[remoteID]`, so
+  any auth that was delivered to a prior failed attempt is left
+  unreferenced. `pollLoop` does drain-then-push on the auth channel,
+  so the channel always holds the *latest* auth and `dialICE`
+  can't consume a stale ufrag/pwd from before the peer's last
+  bounce. Verified by inspection of `mesh-conn/main.go:817-822` and
+  `:1006-1016`; the original bug described in earlier revisions of
+  this doc is closed.
 
 ## Layer 2 — mesh-conn forwarder
 
@@ -157,8 +131,8 @@ drops, but it would bite the first time we did.
 
 | failure                          | impact                                                              | recovery |
 | ---                              | ---                                                                 | ---      |
-| Two peers configured with the same identity port | mesh-conn's `net.ListenUDP` fails on startup; container retries forever, never succeeds. | catch on deploy: validate PEERS_JSON before deploy. |
-| Peer count mismatch in PEERS_JSON | `len(self.Ports) != len(peer.Ports)` → connection refused with explicit error. | already handled. |
+| Two peers configured with the same identity port | mesh-conn refuses to start with an explicit `port X claimed by both A and B` error and crashes the container before any link comes up. | already handled — `validatePeers()` runs at startup, see "Already shipped" below. |
+| Peer count mismatch in PEERS_JSON | `validatePeers()` rejects with `peer X has N ports, expected M` before any goroutine starts. | already handled. |
 | Local app binds same port as mesh-conn forwarder for a peer | EADDRINUSE; whichever started second loses. | enforce in compose / startup ordering. |
 | **mesh-conn dies** | All peer-pair links from this CVM drop. QUIC + ICE on every other peer notice via keep-alive within ~30 s and tear down. Consul agent gossip-timeouts (~10 s default) drop this CVM from the catalog. Sidecars on other peers stop sending here. | container `restart: on-failure` brings it back; everyone re-handshakes. |
 | **Source-port-preservation breaks** (e.g. someone changes port plan and forgets to update an app) | Receiving Consul agent sees gossip from "wrong" address, labels it as a new node, may try to add it to membership; cluster gets confused. | add an integration test that boots cluster + writes KV from each peer + reads from each peer. |
@@ -184,15 +158,24 @@ The mitigations are mostly testing discipline:
 
 ### Recommended fixes
 
-1. **Validate PEERS_JSON at startup** — assert no port collisions,
-   no zero ports, all peers have the same port-list length. Crash
-   fast with a useful message.
-2. **Add a CI test** that runs mesh-conn ↔ mesh-conn locally with
-   loopback IPs + signalling. Catches protocol-level regressions
-   without burning CVMs.
-3. **Periodic metrics** — counters for streams open/closed, bytes
+1. **Add a loopback integration test** that runs mesh-conn ↔
+   mesh-conn locally with a real signalling broker on `127.0.0.1`.
+   Catches protocol-level regressions (3-byte header, port plan)
+   without burning CVMs. The unit tests in `validate_test.go` cover
+   config-time bugs but not the wire format.
+2. **Periodic metrics** — counters for streams open/closed, bytes
    in/out per port. A `/metrics` endpoint or even just stderr every
    30 s.
+
+### Already shipped
+
+- **PEERS_JSON validation at startup** — `validatePeers()` in
+  `mesh-conn/main.go:182` runs before any goroutine starts and
+  fails fast on duplicate IDs, missing self, mismatched port-list
+  lengths, port collisions, empty port lists, or out-of-range
+  ports. A canonicalised `peersDigest()` is logged at startup so
+  `grep` across all peers' logs immediately surfaces config
+  drift. Nine unit tests in `validate_test.go` cover the cases.
 
 ## Layer 3 — Consul + Envoy + apps
 
@@ -214,8 +197,7 @@ The mitigations are mostly testing discipline:
 | Envoy sidecar dies               | All in-flight mTLS connections through it drop. App's calls to `127.0.0.1:19000` get connection refused. | container restart. ~5 s downtime per peer. |
 | Connect CA root expiry           | All sidecar leaf certs go invalid; whole mesh stops. | `consul connect ca set-config` to rotate root, or default 5-year root won't bite us in this experiment. |
 | Connect intention misconfigured (e.g. accidental deny) | Some traffic blocked silently. Sidecar denies are reported as `RBAC: access denied` in Envoy logs. | rotate intention; xDS picks it up in seconds (already demoed). |
-| **Gossip key not set** (current state) | Any actor that can see the wire can read gossip messages. Inside our overlay this means any actor with TURN relay creds + an in-path tap. **Practical risk: low while overlay is end-to-end ICE-direct.** **Real risk: medium when relay paths are involved.** | set `-encrypt=$(consul keygen)` on every agent, rotate periodically. |
-| **RPC TLS not set** | RPC is plaintext on the overlay. Same threat shape as gossip. | configure Consul auto-encrypt + Connect-CA-issued RPC certs. |
+| **RPC TLS not set** | RPC is plaintext on the overlay. Threat is bounded by the QUIC overlay below it (peer ⇄ peer end-to-end encrypted), so on-the-wire taps don't see it; in-CVM containers that bind `127.0.0.1` to the agent's RPC port would. | Stage-2 work: derive a small CA from attestation-rooted material and configure Consul TLS using it. |
 | ttl.sh image expiry | After 24h, a CVM restart can't pull our images. New deploys silently fail to pull. | move to a real registry (GHCR, Phala internal, local registry on the public box). |
 
 ### Risk shape
@@ -232,9 +214,7 @@ depth.
 
 ### Recommended fixes (still open)
 
-1. **Set a gossip key** — `consul keygen | base64`, pass to every
-   agent via env, hardcode in compose.
-2. **Cluster health endpoint** outside Consul — a separate tiny
+1. **Cluster health endpoint** outside Consul — a separate tiny
    service that polls `/v1/status/leader` and `/v1/health/state/any`
    on each peer and emits red/green. Avoids "we don't know what's
    wrong with the cluster" mode.
@@ -249,6 +229,14 @@ depth.
 - **Real registry** — Sigstore-attested GHCR images via
   `.github/workflows/consul-postgres-ha-publish.yml`. See
   `PUBLISHING.md`.
+- **Gossip key wired in (Stage-1 workaround)** — `cluster.tf`
+  generates a `random_bytes` and broadcasts it to every CVM via
+  env; `mesh-sidecar/entrypoint.sh` passes it as
+  `consul agent -encrypt=…`. Same shape used for the Patroni
+  superuser + replication passwords. The keys live in
+  `terraform.tfstate`; eliminating that exposure is part of the
+  Stage-2 attestation-admission work
+  (`design/attestation-admission.md`).
 
 ## Cross-layer concerns
 
@@ -305,26 +293,39 @@ fine).
 
 In order of worst-impact-per-fix-cost:
 
-1. **Fix the mesh-conn auth-channel reconnect deadlock** (Layer 1).
-   First real bug; will bite the first ICE drop.
-2. **Add a Consul gossip key + RPC TLS** (Layer 3). 30 minutes of
-   config; closes the biggest threat-model gap.
-3. **Three-server Consul** (Layer 3). Removes the structural SPOF;
-   needed for any "leave it running" use.
-4. **Validate PEERS_JSON at mesh-conn startup** (Layer 2). Cheap,
-   prevents the silent-port-collision class of bug.
-5. **Move images off ttl.sh** (Layer 0/3). 24-hour expiry will bite
-   us at the worst possible time.
-6. **Two coordinators** + signed signalling messages (Layer 0).
+1. **Two coordinators** + signed signalling messages (Layer 0).
    Removes the new-join SPOF and closes the metadata-spoof gap.
-7. **Local CI for mesh-conn** (Layer 2). Catches future protocol
-   bugs before they hit a CVM.
-8. **Periodic metrics on mesh-conn** (Layer 2). Cheap, dramatic
+2. **Local loopback integration test for mesh-conn** (Layer 2).
+   Unit tests cover the config layer; the wire protocol still has
+   no regression net.
+3. **Periodic metrics on mesh-conn** (Layer 2). Cheap, dramatic
    improvement in operability.
 
-Items 1–5 are essentially what stands between "fun experiment that
-demos correctly" and "leave it running and forget about it".
-Items 6–8 are the next plateau.
+Item 1 is what stands between "fun experiment that demos
+correctly" and "leave it running and forget about it"; items 2–3
+are the next plateau.
+
+The deeper open question — **anyone with `terraform.tfstate` can
+read the cluster's gossip key and Patroni passwords** — is
+deliberately deferred to Stage 2 (attestation admission), where
+peers prove TEE residency and shared cluster material is rooted
+in attestation rather than handed in by the deployer.
+
+### Closed since the previous revision
+
+- **Auth-channel reconnect deadlock** — fixed via fresh
+  `peerSession{}` per `dialICE` + drain-then-push on `authCh`.
+- **Three-server Consul** — coordinator deploys with
+  `replicas = 3`; Consul agents run as servers with
+  `bootstrap_expect = 3`.
+- **PEERS_JSON validation** — `validatePeers()` runs at startup
+  with nine-case unit-test coverage.
+- **Real registry** — Sigstore-attested GHCR images via
+  `.github/workflows/consul-postgres-ha-publish.yml`.
+- **Gossip key + Patroni passwords are now cluster-wide identical
+  (Stage-1 workaround)** — generated in Terraform and broadcast
+  to every phala_app via env. Stage-2 attestation will replace
+  this with TEE-rooted material.
 
 ## "Are we playing too many tricks?"
 

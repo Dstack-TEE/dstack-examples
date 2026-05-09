@@ -48,6 +48,9 @@ services:
       - SIGNALING_URL=${SIGNALING_URL}
       - TURN_HOST=${TURN_HOST}
       - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
+      # Stage-1 WORKAROUND: gossip key generated in Terraform and
+      # broadcast identically to every CVM. See cluster.tf.
+      - GOSSIP_KEY=${GOSSIP_KEY}
       # See worker.yaml for the rationale on MESH_CONN_RELAY_ONLY.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
     volumes:

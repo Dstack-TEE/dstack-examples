@@ -82,6 +82,10 @@ CONSUL_ARGS=(
   "${RETRYJOIN[@]}"
   -data-dir=/consul/data
   -hcl='connect { enabled = true }'
+  # Stage-1 WORKAROUND: GOSSIP_KEY is generated in Terraform and
+  # broadcast to every CVM via env. Stage-2 attestation will replace
+  # this with TEE-rooted material — see design/attestation-admission.md.
+  -encrypt="${GOSSIP_KEY:?GOSSIP_KEY required}"
   -log-level=INFO
 )
 if [ "$ROLE" = "coordinator" ]; then

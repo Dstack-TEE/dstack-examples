@@ -65,26 +65,29 @@ func main() {
 	log.Printf("dstack: app_id=%s instance_id=%s compose_hash=%s",
 		info.AppID, info.InstanceID, shortHash(info.ComposeHash))
 
-	// 2. Derive cluster-wide secrets. Same path/purpose triple
-	// returns the same 32 bytes on every replica of this app.
-	// Each secret has a name, a derivation path, and a serialisation
-	// format that matches what its consumer expects:
-	//   gossip:  consul agent's -encrypt=<key> wants base64.
-	//   turn:    coturn's --static-auth-secret takes any string;
-	//            we use hex for compactness.
-	//   ca-seed: just bytes we re-derive into a Connect CA root;
-	//            hex is fine.
+	// 2. Derive per-app secrets via dstack KMS.
+	//
+	// Stage-1 WORKAROUND scope note: gossip key, Patroni superuser
+	// password, and Patroni replication password are NOT derived
+	// here — they would be different bytes on every CVM (each CVM
+	// is its own phala_app with its own app_id, and GetKey is rooted
+	// at app_id), so per-CVM derivation can't produce the
+	// cluster-wide identical material those consumers need. They
+	// come from Terraform-generated env instead. See cluster.tf and
+	// design/attestation-admission.md for the Stage-2 fix.
+	//
+	// What's still derived here is intentionally narrow:
+	//   turn:    handed to mesh-conn for coturn auth (the actual
+	//            coturn host uses an out-of-band shared secret —
+	//            this is for the case where a future TEE-resident
+	//            TURN allocator wants per-app HMAC material).
+	//   ca-seed: reserved for a future Connect-CA-from-attestation
+	//            path; not currently consumed.
 	derived := []struct {
 		name, path, format string
 	}{
-		{"gossip", "dstack-mesh/gossip", "base64"},
 		{"turn", "dstack-mesh/turn", "hex"},
 		{"ca-seed", "dstack-mesh/connect-ca", "hex"},
-		// Patroni superuser + replication passwords. Both are random
-		// 32-byte hex strings; identical on every replica because all
-		// peers derive against the same path + ClusterName.
-		{"patroni-superuser", "dstack-mesh/patroni-superuser", "hex"},
-		{"patroni-replication", "dstack-mesh/patroni-replication", "hex"},
 	}
 	for _, d := range derived {
 		seed, err := client.GetKey(ctx, d.path, cfg.ClusterName, "secp256k1")

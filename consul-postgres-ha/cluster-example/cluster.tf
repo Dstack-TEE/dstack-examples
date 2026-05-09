@@ -23,10 +23,39 @@ terraform {
       # versions; bump this line by hand when a newer beta ships.
       version = "0.2.0-beta.3"
     }
+    random = {
+      source  = "hashicorp/random"
+      version = ">= 3.5"
+    }
   }
 }
 
 provider "phala" {}
+
+# ---------- Cluster-wide shared secrets (Stage-1 WORKAROUND) ----------
+#
+# These three secrets MUST be byte-identical across every CVM that
+# joins the cluster (gossip auth, Patroni replication, Patroni superuser).
+# The principled answer is "derive them in the TEE, never let a human
+# touch them" — but each phala_app in this cluster has its own app_id
+# (one resource per CVM, deliberate; see the for_each comments on
+# phala_app.coordinator/worker) and dstack's GetKey() is rooted at
+# app_id, so per-CVM derivation produces DIFFERENT bytes on each peer.
+#
+# Until Stage-2 attestation-rooted admission lands (see
+# `consul-postgres-ha/design/attestation-admission.md`), we generate
+# them in Terraform and hand the same bytes to every phala_app via
+# env. Trade-off accepted: anyone with read access to terraform.tfstate
+# (or the apply host's memory) sees plaintext keys. Stage 2 closes this.
+resource "random_bytes" "gossip_key" {
+  length = 32
+}
+resource "random_bytes" "patroni_superuser_pw" {
+  length = 32
+}
+resource "random_bytes" "patroni_replication_pw" {
+  length = 32
+}
 
 # ---------- Cluster knobs ----------
 
@@ -59,8 +88,8 @@ variable "gateway_domain" {
 # external Vultr coordinator), but no dstack CVM in this cluster
 # references it, so it isn't a Terraform input here.
 variable "mesh_sidecar_image" { type = string }
-variable "webdemo_image"      { type = string }
-variable "patroni_image"      { type = string }
+variable "webdemo_image" { type = string }
+variable "patroni_image" { type = string }
 
 # External coordinator (Vultr coturn + signaling box). Used until
 # Phala admin enables UDP ingress on dstack apps; once that lands we
@@ -167,6 +196,8 @@ resource "phala_app" "coordinator" {
     TURN_HOST              = var.external_coordinator_host
     TURN_SHARED_SECRET     = var.external_turn_secret
     MESH_SIDECAR_IMAGE     = var.mesh_sidecar_image
+    # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
+    GOSSIP_KEY = random_bytes.gossip_key.base64
   }
 
   listed         = false
@@ -219,6 +250,10 @@ resource "phala_app" "worker" {
     MESH_SIDECAR_IMAGE     = var.mesh_sidecar_image
     WEBDEMO_IMAGE          = var.webdemo_image
     PATRONI_IMAGE          = var.patroni_image
+    # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
+    GOSSIP_KEY             = random_bytes.gossip_key.base64
+    PATRONI_SUPERUSER_PW   = random_bytes.patroni_superuser_pw.hex
+    PATRONI_REPLICATION_PW = random_bytes.patroni_replication_pw.hex
   }
 
   listed         = false

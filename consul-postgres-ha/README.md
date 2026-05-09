@@ -117,6 +117,13 @@ and the Terraform structure as-is.
 * The mesh-conn admission story is **shared-secret based today**
   (TURN HMAC), not attestation-based. Adding TEE attestation as the
   admission credential is the next architectural step.
+* The cluster's gossip key, Patroni superuser password, and
+  replication password are **generated in Terraform and broadcast
+  via env to every CVM**. This is a Stage-1 workaround — those
+  bytes live in `terraform.tfstate` and pass through whoever runs
+  `apply`. Stage-2 attestation-admission
+  ([`design/attestation-admission.md`](design/attestation-admission.md))
+  replaces this with TEE-rooted material that no human ever sees.
 
 ## Filed upstream
 

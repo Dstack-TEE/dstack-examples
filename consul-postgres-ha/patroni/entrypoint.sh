@@ -10,14 +10,15 @@
 #     real peer's listener, so 127.0.0.1:<peer_postgres_port> from any
 #     peer reaches that peer's postgres.
 #
-# Replication user/password is derived deterministically from the
-# cluster-wide `replication` secret written by bootstrap-secrets.
-# Same trick for the superuser.
+# Stage-1 WORKAROUND: superuser + replication passwords come from
+# Terraform-generated env (PATRONI_SUPERUSER_PW, PATRONI_REPLICATION_PW)
+# broadcast identically to every worker. Stage-2 attestation will
+# replace this with TEE-rooted material; see
+# design/attestation-admission.md.
 
 set -e
 
 INFO=/run/instance/info.json
-SECRETS=/run/secrets
 
 if [ ! -f "$INFO" ]; then
   echo "FATAL: $INFO not present — bootstrap-secrets did not run" >&2
@@ -31,12 +32,8 @@ PG_PORT=$(jq      -r '.ports.postgres'     "$INFO")
 REST_PORT=$(jq    -r '.ports.patroni_rest' "$INFO")
 CONSUL_PORT=$(jq  -r '.ports.http_api'     "$INFO")
 CLUSTER="${CLUSTER_NAME:?CLUSTER_NAME required}"
-
-# Read or default the credentials. bootstrap-secrets writes
-# /run/secrets/{patroni-superuser,patroni-replication} as raw 32-byte
-# hex strings (deterministic per-cluster via getKey()).
-SUPERUSER_PW=$(cat "${SECRETS}/patroni-superuser"  2>/dev/null || echo dev-pg-pass)
-REPL_PW=$(cat      "${SECRETS}/patroni-replication" 2>/dev/null || echo dev-repl-pass)
+SUPERUSER_PW="${PATRONI_SUPERUSER_PW:?PATRONI_SUPERUSER_PW required}"
+REPL_PW="${PATRONI_REPLICATION_PW:?PATRONI_REPLICATION_PW required}"
 
 DATA_DIR=/var/lib/patroni/pgdata
 mkdir -p "$DATA_DIR"

@@ -33,6 +33,9 @@ services:
       # picks the first reachable one to talk to Consul KV — only used
       # if WORKER_ORDINAL is unset (legacy CAS-claim fallback).
       - COORDINATOR_HTTP_PORTS=${COORDINATOR_HTTP_PORTS}
+      # Stage-1 WORKAROUND: gossip key generated in Terraform and
+      # broadcast identically to every CVM. See cluster.tf.
+      - GOSSIP_KEY=${GOSSIP_KEY}
       # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay
       # candidates, routing all peer traffic through the coturn server.
       # Default off because direct candidates work; flip on if a
@@ -60,8 +63,13 @@ services:
     # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
     # must use the same value to land in the same cluster. The rest
     # is read from /run/instance/info.json by entrypoint.sh.
+    # Stage-1 WORKAROUND: superuser + replication passwords generated
+    # in Terraform and broadcast identically to every worker. See
+    # cluster.tf.
     environment:
       - CLUSTER_NAME=${CLUSTER_NAME}
+      - PATRONI_SUPERUSER_PW=${PATRONI_SUPERUSER_PW}
+      - PATRONI_REPLICATION_PW=${PATRONI_REPLICATION_PW}
     volumes:
       - /tmp/dstack-runtime/instance:/run/instance:ro
       - /tmp/dstack-runtime/secrets:/run/secrets:ro

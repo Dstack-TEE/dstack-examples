@@ -22,6 +22,23 @@ anywhere. A peer running a **rolled-back or compromised image** can
 rejoin too — nobody asks "what are you running?" before admitting
 the connection. That's a meaningful gap for a TEE-rooted system.
 
+### Stage-1 workaround that this work replaces
+
+Because each `phala_app` resource has its own `app_id` and dstack
+`GetKey` is rooted at `app_id`, per-CVM derivation produces
+*different* bytes on each peer for any path. Cluster-wide identical
+secrets — gossip key, Patroni superuser/replication passwords —
+therefore can't come from `GetKey` in this topology. They are
+instead generated in Terraform (`random_bytes` in
+`cluster-example/cluster.tf`) and broadcast to every CVM via env.
+
+That sacrifices the "key never leaves the TEE" property: the keys
+sit in `terraform.tfstate` and pass through whoever runs `apply`.
+Anyone with that file's bytes has the same authority as a cluster
+member. This admission redesign is the principled fix —
+attestation-rooted material derived inside the TEE, no human in the
+trust path.
+
 ## Goal
 
 Each peer's mesh-conn admission decision is gated on a fresh dstack
