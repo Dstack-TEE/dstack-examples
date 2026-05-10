@@ -497,7 +497,7 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 
 	udpPortCount := len(udpSocks)
 	go func() {
-		errCh <- runAcceptLoop(connCtx, qconn, udpStreams, udpPortCount, allUDPReady)
+		errCh <- runAcceptLoop(connCtx, qconn, &self, udpStreams, udpPortCount, allUDPReady)
 	}()
 
 	if isClient {
@@ -539,7 +539,14 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 			st := udpStreams[port]
 			go func() { errCh <- pumpUDPSockToStream(us, st) }()
 			go func() {
-				udpDst := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port}
+				// Dispatch to the SELF VIP, not 127.0.0.1, so the
+				// inbound packet lands on whatever (Consul, Envoy, ...)
+				// is listening on this peer's own loopback alias. This
+				// also keeps the source-port-preservation invariant
+				// intact: the local listener's bound addr is the
+				// remote peer's VIP, so the receiving service sees
+				// "from peer-N" as the source.
+				udpDst := &net.UDPAddr{IP: self.vipAddr(), Port: port}
 				errCh <- pumpUDPStreamToSock(st, us, udpDst)
 			}()
 		}
@@ -554,10 +561,11 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 
 // runAcceptLoop handles every incoming QUIC stream from the peer.
 // streamUDP headers are matched into udpStreams keyed by port; streamTCP
-// triggers a Dial to 127.0.0.1:<port>. The receiver validates port
-// against the static allowlist; anything else is rejected — that's the
-// only port-knowledge the receiver needs.
-func runAcceptLoop(ctx context.Context, qconn *quic.Conn, udpStreams map[int]*quic.Stream, expectedUDP int, allUDPReady chan struct{}) error {
+// triggers a Dial to <self-vip>:<port> (so it lands on whatever the
+// local Consul / Envoy bound on the peer's own loopback alias). The
+// receiver validates port against the static allowlist; anything
+// else is rejected — that's the only port-knowledge the receiver needs.
+func runAcceptLoop(ctx context.Context, qconn *quic.Conn, self *Peer, udpStreams map[int]*quic.Stream, expectedUDP int, allUDPReady chan struct{}) error {
 	udpRegistered := 0
 	for {
 		s, err := qconn.AcceptStream(ctx)
@@ -592,7 +600,7 @@ func runAcceptLoop(ctx context.Context, qconn *quic.Conn, udpStreams map[int]*qu
 				close(allUDPReady)
 			}
 		case streamTCP:
-			go handleIncomingTCP(s, &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+			go handleIncomingTCP(s, &net.TCPAddr{IP: self.vipAddr(), Port: port})
 		default:
 			log.Printf("unknown stream tag 0x%x", tag)
 			s.CancelRead(0)

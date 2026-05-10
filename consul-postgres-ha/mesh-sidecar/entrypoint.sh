@@ -94,8 +94,17 @@ CONSUL_ARGS=(
   agent
   -node="$PEER_ID"
   -datacenter="${CLUSTER_NAME}"
-  -bind=127.0.0.1
+  # bind on the self-VIP so serf + RPC listen there. Consumers (other
+  # peers AND self) reach this Consul at 127.50.0.<self-vip>:8301/8300:
+  #   - other-peer dials → that peer's mesh-conn forwards via QUIC →
+  #     this peer's mesh-conn dispatches to 127.50.0.<self-vip>:port →
+  #     Consul receives.
+  #   - self-dial (e.g. internal "server health" probe) → kernel
+  #     loopback → Consul receives directly. No mesh-conn hop.
+  -bind="127.50.0.${SELF_VIP}"
   -advertise="127.50.0.${SELF_VIP}"
+  # HTTP API + gRPC stay loopback-only — apps and Patroni use them
+  # from inside the same network namespace, never via the mesh.
   -client=127.0.0.1
   -serf-lan-port=8301
   -server-port=8300
@@ -154,39 +163,44 @@ if [ "$ROLE" = "worker" ]; then
   # filtered by the role tag Patroni stamps on each registration.
   POSTGRES_MASTER_VIP=$(jq -r '.[] | select(.name=="postgres-master") | .vip' <<<"$UPSTREAMS_JSON")
   POSTGRES_REPLICA_VIP=$(jq -r '.[] | select(.name=="postgres-replica") | .vip' <<<"$UPSTREAMS_JSON")
+  # Patroni's auto-registered parent service uses CLUSTER_NAME as the
+  # service name (Patroni-internal "scope"). The Connect sidecar
+  # terminates inbound mTLS for that same name; consumers reach it via
+  # the postgres-master/-replica service-resolver redirects below.
   cat > /tmp/postgres-sidecar.json <<EOF
 {
-  "kind": "connect-proxy",
-  "id": "postgres-sidecar-${PEER_ID}",
-  "name": "postgres-sidecar-proxy",
-  "address": "127.50.0.${SELF_VIP}",
-  "port": 21001,
-  "proxy": {
-    "destination_service_name": "postgres",
-    "destination_service_id": "postgres-${PEER_ID}",
-    "local_service_address": "127.0.0.1",
-    "local_service_port": 5432,
-    "upstreams": [
+  "Kind": "connect-proxy",
+  "ID": "postgres-sidecar-${PEER_ID}",
+  "Name": "postgres-sidecar-proxy",
+  "Address": "127.50.0.${SELF_VIP}",
+  "Port": 21001,
+  "Proxy": {
+    "DestinationServiceName": "${CLUSTER_NAME}",
+    "LocalServiceAddress": "127.0.0.1",
+    "LocalServicePort": 5432,
+    "Upstreams": [
       {
-        "destination_name": "postgres-master",
-        "local_bind_address": "127.10.0.${POSTGRES_MASTER_VIP}",
-        "local_bind_port": 5432
+        "DestinationName": "postgres-master",
+        "LocalBindAddress": "127.10.0.${POSTGRES_MASTER_VIP}",
+        "LocalBindPort": 5432
       },
       {
-        "destination_name": "postgres-replica",
-        "local_bind_address": "127.10.0.${POSTGRES_REPLICA_VIP}",
-        "local_bind_port": 5432
+        "DestinationName": "postgres-replica",
+        "LocalBindAddress": "127.10.0.${POSTGRES_REPLICA_VIP}",
+        "LocalBindPort": 5432
       }
     ]
   }
 }
 EOF
-  # Re-register on every boot; Consul's API is PUT-style so this is
-  # idempotent. Patroni's auto-registration of the regular `postgres`
-  # service may not have landed yet — that's fine, the sidecar can
-  # register before its destination service exists.
+  # Re-register on every boot via the agent HTTP API (PUT-idempotent).
+  # The `consul services register` CLI uses a different file format
+  # (HCL-style with a top-level `service` block); the HTTP API takes
+  # the flat capital-letter JSON above and is consistent with how
+  # webdemo registers itself.
   log "registering postgres-sidecar-proxy (port=21001)"
-  until consul services register /tmp/postgres-sidecar.json; do
+  until curl -fsS -X PUT --data-binary @/tmp/postgres-sidecar.json \
+           http://127.0.0.1:8500/v1/agent/service/register; do
     log "postgres-sidecar-proxy register failed; retrying"
     sleep 2
   done
@@ -195,7 +209,7 @@ EOF
   # need Envoy to form quorum (Raft RPC rides peer VIPs as plain TCP),
   # but workers can't start their sidecars until a server can issue.
   log "waiting for connect CA to be ready..."
-  until consul connect ca leaf -service=postgres >/dev/null 2>&1; do
+  until consul connect ca leaf -service="${CLUSTER_NAME}" >/dev/null 2>&1; do
     sleep 2
   done
   log "connect CA ready"
@@ -249,36 +263,37 @@ Config { protocol = "tcp" }
 HCL
 
     # Postgres subset definitions. Patroni auto-registers the parent
-    # `postgres` service with role tags (master|replica); subsets pick
-    # the right instances by tag, and the redirect resolvers expose
-    # consumer-facing names that are independent of Patroni's tagging.
-    consul config write - <<'HCL' || true
+    # service under its `scope` (= CLUSTER_NAME) with role tags
+    # (master|replica); subsets pick the right instances by tag, and
+    # the redirect resolvers expose consumer-facing names that are
+    # independent of Patroni's scope.
+    consul config write - <<HCL || true
 Kind    = "service-resolver"
-Name    = "postgres"
+Name    = "${CLUSTER_NAME}"
 Subsets = {
   master  = { Filter = "Service.Tags contains \"master\"" }
   replica = { Filter = "Service.Tags contains \"replica\"" }
 }
 HCL
 
-    consul config write - <<'HCL' || true
+    consul config write - <<HCL || true
 Kind     = "service-resolver"
 Name     = "postgres-master"
-Redirect { Service = "postgres", ServiceSubset = "master" }
+Redirect { Service = "${CLUSTER_NAME}", ServiceSubset = "master" }
 HCL
 
-    consul config write - <<'HCL' || true
+    consul config write - <<HCL || true
 Kind     = "service-resolver"
 Name     = "postgres-replica"
-Redirect { Service = "postgres", ServiceSubset = "replica" }
+Redirect { Service = "${CLUSTER_NAME}", ServiceSubset = "replica" }
 HCL
 
     # Default-allow intentions for now. Tightening this to per-pair
     # allow + default-deny is straightforward but out of scope here;
     # see design/attestation-admission.md for the longer-term shape.
-    consul config write - <<'HCL' || true
+    consul config write - <<HCL || true
 Kind = "service-intentions"
-Name = "postgres"
+Name = "${CLUSTER_NAME}"
 Sources = [{ Name = "*", Action = "allow" }]
 HCL
     consul config write - <<'HCL' || true

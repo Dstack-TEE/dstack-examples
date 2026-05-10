@@ -101,6 +101,15 @@ variable "external_turn_secret" {
   sensitive = true
 }
 
+# Force ICE to gather Relay candidates only — routes all peer traffic
+# through coturn instead of attempting NAT-hairpin direct paths. Set
+# this when worker↔worker direct-pair ICE handshakes are unstable
+# (the dstack provider NAT path is known-flaky for these pairs).
+variable "mesh_conn_relay_only" {
+  type    = string
+  default = ""
+}
+
 # ---------- Cluster topology + VIP allocation ----------
 
 locals {
@@ -177,7 +186,8 @@ resource "phala_app" "coordinator" {
     TURN_SHARED_SECRET  = var.external_turn_secret
     MESH_SIDECAR_IMAGE  = var.mesh_sidecar_image
     # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
-    GOSSIP_KEY = random_bytes.gossip_key.base64
+    GOSSIP_KEY           = random_bytes.gossip_key.base64
+    MESH_CONN_RELAY_ONLY = var.mesh_conn_relay_only
   }
 
   listed         = false
@@ -222,6 +232,7 @@ resource "phala_app" "worker" {
     GOSSIP_KEY             = random_bytes.gossip_key.base64
     PATRONI_SUPERUSER_PW   = random_bytes.patroni_superuser_pw.hex
     PATRONI_REPLICATION_PW = random_bytes.patroni_replication_pw.hex
+    MESH_CONN_RELAY_ONLY   = var.mesh_conn_relay_only
   }
 
   listed         = false
@@ -237,7 +248,8 @@ resource "phala_app" "worker" {
 output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k => c.app_id } }
 output "worker_app_ids" { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "consul_ui" {
-  # Coordinator-0's Consul HTTP API on the canonical 8500. The dstack
-  # gateway maps `<app_id>-<port>s.<gateway>` to that port on the CVM.
-  value = "https://${phala_app.coordinator["0"].app_id}-8500s.${var.gateway_domain}/ui"
+  # Coordinator-0's Consul HTTP API on the canonical 8500. Plain HTTP
+  # backend → use the no-`s` gateway form (gateway terminates TLS).
+  # See README "dstack gateway URL convention".
+  value = "https://${phala_app.coordinator["0"].app_id}-8500.${var.gateway_domain}/ui"
 }
