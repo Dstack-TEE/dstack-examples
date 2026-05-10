@@ -844,9 +844,28 @@ func serverTLS() *tls.Config {
 // to handshake) and pollLoop (delivering signalling messages). It is
 // replaced wholesale on every reconnect so stale state from a previous
 // failed attempt can't poison the next one.
+//
+// The "stale-auth races" mitigation: dialICE reads the remote's auth
+// exactly once from authCh, then calls agent.Dial/Accept which uses
+// those credentials in every connectivity-check it sends for the
+// duration of the attempt. If the peer republishes a fresher auth
+// while we're mid-dial (which happens during hot-patches and other
+// asynchronous restarts), pushing it to authCh would just sit in the
+// buffer unread — Dial/Accept never re-reads. ICE then runs to its
+// 30s timeout against a peer whose pion agent has rolled to new
+// credentials and is rejecting our message-integrity-mismatched
+// BINDING_REQUESTs. To break the deadlock, dialICE registers its
+// dialCtx-cancel + the consumed auth string on the session under mu;
+// pollLoop, on receiving a fresher auth, cancels the in-flight dial
+// so runPeerLink's 5s retry loop re-enters dialICE with a fresh agent
+// that publishes new auth and converges with the peer.
 type peerSession struct {
 	agent  *ice.Agent
 	authCh chan [2]string
+
+	mu           sync.Mutex
+	consumedAuth [2]string          // ufrag,pwd dialICE pulled off authCh; zero before
+	cancelDial   context.CancelFunc // non-nil once dialICE has consumed and is dialing
 }
 
 var (
@@ -965,6 +984,15 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 		return nil, fmt.Errorf("timeout waiting for remote auth from %s", remoteID)
 	}
 
+	// Record what we're about to dial against, so pollLoop can detect
+	// fresher auth from the peer and cancel us instead of letting Dial
+	// run to its 30s connectivity-check timeout against stale creds.
+	// See the comment on peerSession for why this is necessary.
+	sess.mu.Lock()
+	sess.consumedAuth = remote
+	sess.cancelDial = cancelDial
+	sess.mu.Unlock()
+
 	// 60s is comfortably longer than pion's default 30s connectivity-check
 	// window. If Dial/Accept hasn't succeeded by then, ICE has already
 	// transitioned to Failed and the state callback above cancelled the ctx.
@@ -1056,17 +1084,43 @@ func pollLoop(cfg *Config) {
 					log.Printf("[%s] bad auth %q", m.From, m.Data)
 					continue
 				}
-				// Always keep the LATEST auth. select-default would drop
-				// the new one — and if the buffered one was stale (from
-				// before the peer's last bounce), dialICE would consume
-				// that stale auth, Dial against the wrong ufrag, ICE
-				// would Fail, and we'd repeat forever. Drain-then-push
-				// ensures the channel always holds the most-recent auth.
+				newAuth := [2]string{parts[0], parts[1]}
+
+				// If dialICE has already consumed an earlier auth and
+				// is mid-Dial, we can't deliver this one through authCh
+				// — agent.Dial doesn't re-read. Cancel the stale dial
+				// so runPeerLink's 5s retry re-enters dialICE with a
+				// fresh agent that publishes new auth and converges
+				// with the peer. Skip the cancel if the new auth
+				// matches what we already consumed (defensive against
+				// a hypothetical broker re-delivery; pion never reuses
+				// ufrag/pwd across restarts so in practice this means
+				// "the peer didn't actually change").
+				sess.mu.Lock()
+				if sess.cancelDial != nil {
+					if newAuth != sess.consumedAuth {
+						log.Printf("[%s] fresh auth (ufrag=%s) supersedes consumed (ufrag=%s) — cancelling stale dial",
+							m.From, newAuth[0], sess.consumedAuth[0])
+						sess.cancelDial()
+					}
+					sess.mu.Unlock()
+					continue
+				}
+				sess.mu.Unlock()
+
+				// First auth for this attempt — drain-then-push so
+				// dialICE always reads the most recent value if multiple
+				// arrive before its select fires. (mailbox.push on the
+				// broker also drops a sender's prior queued messages on
+				// auth, but the broker's drop only takes effect on
+				// subsequent /publish calls; the message that's already
+				// queued for our pending /poll is what this drain
+				// handles.)
 				select {
 				case <-sess.authCh:
 				default:
 				}
-				sess.authCh <- [2]string{parts[0], parts[1]}
+				sess.authCh <- newAuth
 			case "candidate":
 				if sess.agent == nil {
 					continue
