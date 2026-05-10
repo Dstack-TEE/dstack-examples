@@ -208,34 +208,50 @@ EOF
   # Wait for Connect CA to be able to mint leaf certs. Servers don't
   # need Envoy to form quorum (Raft RPC rides peer VIPs as plain TCP),
   # but workers can't start their sidecars until a server can issue.
+  # The leaf-cert API is HTTP-only — there is no `consul connect ca
+  # leaf` CLI subcommand (only get-config / set-config).
   log "waiting for connect CA to be ready..."
-  until consul connect ca leaf -service="${CLUSTER_NAME}" >/dev/null 2>&1; do
+  until curl -fsS "http://127.0.0.1:8500/v1/agent/connect/ca/leaf/${CLUSTER_NAME}" >/dev/null 2>&1; do
     sleep 2
   done
   log "connect CA ready"
 
-  # Webdemo Envoy supervise loop. Webdemo registers itself + a
-  # SidecarService block with port=21000 from its own entrypoint;
-  # consul connect envoy waits for that registration to land.
+  # Webdemo Envoy supervise loop. We use `consul connect envoy
+  # -bootstrap` to generate the JSON, then exec envoy ourselves; this
+  # bypasses Consul's Envoy version-compatibility check (Envoy 1.30
+  # bundled with the sidecar image isn't on Consul 1.19's supported
+  # list, but the bootstrap config is fine). Webdemo registers its own
+  # SidecarService block from webdemo/main.go; the bootstrap call
+  # blocks until that registration is in place.
   (
-    until consul connect envoy \
+    while true; do
+      if consul connect envoy \
             -sidecar-for="webdemo-${PEER_ID}" \
             -admin-bind="127.0.0.1:19000" \
-            >/dev/null 2>/dev/null; do
-      echo "[envoy-webdemo] waiting for webdemo sidecar registration..."
+            -bootstrap \
+            > /tmp/envoy-webdemo.json 2>/dev/null; then
+        envoy -c /tmp/envoy-webdemo.json -l info 2>&1
+      else
+        echo "[envoy-webdemo] waiting for webdemo sidecar registration..."
+      fi
       sleep 2
     done
   ) 2>&1 | prefix envoy-webdemo &
   ENVOYS+=("$!")
 
-  # Postgres Envoy supervise loop. The proxy-id is what we registered
-  # above; consul connect envoy bootstraps Envoy from that registration.
+  # Postgres Envoy supervise loop, same pattern. Bootstrap from the
+  # standalone connect-proxy registration above.
   (
-    until consul connect envoy \
+    while true; do
+      if consul connect envoy \
             -proxy-id="postgres-sidecar-${PEER_ID}" \
             -admin-bind="127.0.0.1:19001" \
-            >/dev/null 2>/dev/null; do
-      echo "[envoy-postgres] waiting for ca leaf..."
+            -bootstrap \
+            > /tmp/envoy-postgres.json 2>/dev/null; then
+        envoy -c /tmp/envoy-postgres.json -l info 2>&1
+      else
+        echo "[envoy-postgres] waiting for ca leaf / proxy registration..."
+      fi
       sleep 2
     done
   ) 2>&1 | prefix envoy-postgres &
