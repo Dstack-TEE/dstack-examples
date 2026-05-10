@@ -110,6 +110,14 @@ variable "mesh_conn_relay_only" {
   default = ""
 }
 
+# Set to "1" to enable pion's verbose ICE debug logs (connectivity
+# checks, STUN attribute parsing). Useful when debugging hot-patch
+# / re-handshake flakiness; off by default because it's very chatty.
+variable "mesh_conn_debug_ice" {
+  type    = string
+  default = ""
+}
+
 # ---------- Cluster topology + VIP allocation ----------
 
 locals {
@@ -188,6 +196,7 @@ resource "phala_app" "coordinator" {
     # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
     GOSSIP_KEY           = random_bytes.gossip_key.base64
     MESH_CONN_RELAY_ONLY = var.mesh_conn_relay_only
+    MESH_CONN_DEBUG_ICE  = var.mesh_conn_debug_ice
   }
 
   listed         = false
@@ -233,6 +242,7 @@ resource "phala_app" "worker" {
     PATRONI_SUPERUSER_PW   = random_bytes.patroni_superuser_pw.hex
     PATRONI_REPLICATION_PW = random_bytes.patroni_replication_pw.hex
     MESH_CONN_RELAY_ONLY   = var.mesh_conn_relay_only
+    MESH_CONN_DEBUG_ICE    = var.mesh_conn_debug_ice
   }
 
   listed         = false

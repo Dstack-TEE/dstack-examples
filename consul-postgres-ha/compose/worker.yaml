@@ -48,6 +48,7 @@ services:
       # Default off because direct candidates work; flip on if a
       # deployment hits worker↔worker direct-pair instability.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
+      - MESH_CONN_DEBUG_ICE=${MESH_CONN_DEBUG_ICE:-}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
       - /tmp/dstack-runtime/secrets:/run/secrets

@@ -81,6 +81,7 @@ import (
 	"time"
 
 	"github.com/pion/ice/v2"
+	"github.com/pion/logging"
 	"github.com/pion/stun"
 	"github.com/quic-go/quic-go"
 )
@@ -919,11 +920,20 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 	if os.Getenv("MESH_CONN_RELAY_ONLY") == "1" {
 		candidateTypes = []ice.CandidateType{ice.CandidateTypeRelay}
 	}
-	agent, err := ice.NewAgent(&ice.AgentConfig{
+	// MESH_CONN_DEBUG_ICE=1 turns on pion's verbose ICE-level logging
+	// (connectivity-check requests/responses, STUN attribute parsing,
+	// candidate-pair scoring). Off by default because it's chatty.
+	agentCfg := &ice.AgentConfig{
 		Urls:           urls,
 		NetworkTypes:   []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
 		CandidateTypes: candidateTypes,
-	})
+	}
+	if os.Getenv("MESH_CONN_DEBUG_ICE") == "1" {
+		lf := logging.NewDefaultLoggerFactory()
+		lf.DefaultLogLevel = logging.LogLevelTrace
+		agentCfg.LoggerFactory = lf
+	}
+	agent, err := ice.NewAgent(agentCfg)
 	if err != nil {
 		return nil, fmt.Errorf("NewAgent: %w", err)
 	}

@@ -4,6 +4,7 @@ go 1.24
 
 require (
 	github.com/pion/ice/v2 v2.3.25
+	github.com/pion/logging v0.2.2
 	github.com/pion/stun v0.6.1
 	github.com/quic-go/quic-go v0.59.0
 )
@@ -12,7 +13,6 @@ require (
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/google/uuid v1.3.1 // indirect
 	github.com/pion/dtls/v2 v2.2.7 // indirect
-	github.com/pion/logging v0.2.2 // indirect
 	github.com/pion/mdns v0.0.12 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/transport/v2 v2.2.2 // indirect
