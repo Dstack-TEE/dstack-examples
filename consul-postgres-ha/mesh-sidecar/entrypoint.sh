@@ -236,7 +236,10 @@ EOF
             -admin-bind="127.0.0.1:19000" \
             -bootstrap \
             > /tmp/envoy-webdemo.json 2>/dev/null; then
-        envoy -c /tmp/envoy-webdemo.json -l info 2>&1
+        # --base-id distinguishes this envoy from the postgres one
+        # below; otherwise both fight over the default base-id=0
+        # hot-restart domain socket and one fails with EADDRINUSE.
+        envoy -c /tmp/envoy-webdemo.json -l info --base-id 1 2>&1
       else
         echo "[envoy-webdemo] waiting for webdemo sidecar registration..."
       fi
@@ -255,7 +258,8 @@ EOF
             -admin-bind="127.0.0.1:19001" \
             -bootstrap \
             > /tmp/envoy-postgres.json 2>/dev/null; then
-        envoy -c /tmp/envoy-postgres.json -l info 2>&1
+        # See note on --base-id in the webdemo envoy block above.
+        envoy -c /tmp/envoy-postgres.json -l info --base-id 2 2>&1
       else
         echo "[envoy-postgres] waiting for ca leaf / proxy registration..."
       fi
