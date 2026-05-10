@@ -174,6 +174,7 @@ if [ "$ROLE" = "worker" ]; then
   "Name": "postgres-sidecar-proxy",
   "Address": "127.50.0.${SELF_VIP}",
   "Port": 21001,
+  "Tags": [],
   "Proxy": {
     "DestinationServiceName": "${CLUSTER_NAME}",
     "LocalServiceAddress": "127.0.0.1",
@@ -223,7 +224,12 @@ EOF
   # list, but the bootstrap config is fine). Webdemo registers its own
   # SidecarService block from webdemo/main.go; the bootstrap call
   # blocks until that registration is in place.
+  #
+  # `set +e` because envoy crashes mid-startup count as expected events
+  # the while loop handles by retrying — outer `set -e` would bubble
+  # them up as a "child exited" → container teardown.
   (
+    set +eo pipefail
     while true; do
       if consul connect envoy \
             -sidecar-for="webdemo-${PEER_ID}" \
@@ -242,6 +248,7 @@ EOF
   # Postgres Envoy supervise loop, same pattern. Bootstrap from the
   # standalone connect-proxy registration above.
   (
+    set +eo pipefail
     while true; do
       if consul connect envoy \
             -proxy-id="postgres-sidecar-${PEER_ID}" \
@@ -255,6 +262,43 @@ EOF
       sleep 2
     done
   ) 2>&1 | prefix envoy-postgres &
+  ENVOYS+=("$!")
+
+  # Role watcher: mirror Patroni's current role into the postgres-
+  # sidecar registration's Tags. Service-resolver subset filters
+  # (Service.Tags contains "master") apply to the SIDECAR registration,
+  # not to Patroni's parent service. So we poll Patroni's REST API
+  # (127.0.0.1:8008, shared via network_mode: host) and re-PUT the
+  # sidecar with Tags=["master"] / ["replica"] on role change. Patroni
+  # itself drives the role via its DCS leader-lock; this loop just
+  # mirrors that into a shape Connect EDS understands.
+  #
+  # Initial state: Tags=[] (the registration above). Until the watcher
+  # runs at least once, postgres-master and postgres-replica EDS
+  # return empty. The first iteration runs ~5s after Patroni REST
+  # comes up; consumers pre-watch will reconnect when EDS populates.
+  (
+    set +eo pipefail
+    PREV=""
+    while true; do
+      sleep 5
+      ROLE=$(curl -fsS --max-time 2 http://127.0.0.1:8008/ 2>/dev/null \
+              | jq -r '.role // empty' 2>/dev/null)
+      case "$ROLE" in
+        master|primary)               TAG="master"  ;;
+        replica|standby_leader|sync_standby) TAG="replica" ;;
+        *)                            continue ;;
+      esac
+      [ "$TAG" = "$PREV" ] && continue
+      jq --arg t "$TAG" '.Tags = [$t]' /tmp/postgres-sidecar.json \
+         > /tmp/postgres-sidecar.tagged.json
+      if curl -fsS -X PUT --data-binary @/tmp/postgres-sidecar.tagged.json \
+              http://127.0.0.1:8500/v1/agent/service/register; then
+        echo "[role-watcher] postgres-sidecar tag: $PREV -> $TAG (patroni role=$ROLE)"
+        PREV="$TAG"
+      fi
+    done
+  ) 2>&1 | prefix role-watcher &
   ENVOYS+=("$!")
 fi
 
