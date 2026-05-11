@@ -17,9 +17,10 @@ By convention, **the workload repo provides its own bash entry point at the
 fixed path `tee-launch.sh`** (default mode). This keeps install/build/run
 logic inside the workload repo, where it is covered by source provenance of
 the pinned `COMMIT_SHA` and is **not** a trust-bearing field in the
-launcher config. A verifier therefore only audits two things: the launcher
-image's identity, and the `REPO_URL` + `COMMIT_SHA` pair in the attested
-config.
+launcher config. A verifier therefore audits two things: the launcher
+image's identity, and the `REPO_URL` + `COMMIT_SHA` pair (plus
+`REPO_SUBDIR` when used, since it selects *which* `tee-launch.sh` runs)
+in the attested config.
 
 The launcher image is **generic**: its digest attests the launcher's
 implementation, not the workload. The workload identity comes from the
@@ -148,13 +149,21 @@ Recommended for every workload you control. The workload repo provides a
 bash script at the fixed path `tee-launch.sh` (at the repo root, or at
 `REPO_SUBDIR/tee-launch.sh` if `REPO_SUBDIR` is set). The launcher runs it
 with `bash tee-launch.sh` after checkout — **no executable bit is
-required**. All install/build/run logic lives in that script; the launcher
-config carries only `REPO_URL` + `COMMIT_SHA` (+ local `WORK_DIR`).
+required**. All install/build/run logic lives in that script.
 
-Because the script's bytes are pinned by `COMMIT_SHA` and stored in the
-workload repo, they are covered by source provenance of the pinned commit.
-The verifier does not need to extract or audit any command string out of
-the launcher config.
+In this mode the trust-bearing config in the launcher's config file is
+`REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` if used, since it selects
+which `tee-launch.sh` runs). `WORK_DIR` is local plumbing — it names
+where on the in-TEE filesystem to keep the checkout — and is not
+trust-bearing. `CHILD_ENV_FILE` (and any env it provides) can change the
+script's runtime behavior but does not change the bytes that run; if the
+deployment uses it, audit it the same way you audit any other runtime
+configuration the deployment ships with.
+
+Because `tee-launch.sh`'s bytes are pinned by `COMMIT_SHA` and stored in
+the workload repo, they are covered by source provenance of the pinned
+commit. The verifier does not need to extract or audit any command string
+out of the launcher config.
 
 ### Advanced mode: explicit `RUN_CMD` / `INSTALL_CMD`
 

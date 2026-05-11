@@ -7,22 +7,24 @@ TEE is the one they audited.
 ## Quick path (default mode, 4 steps)
 
 In default mode the workload repo provides its own `tee-launch.sh` at the
-pinned commit, so the trust-bearing config is just `REPO_URL + COMMIT_SHA`
-and the install/run command chain disappears from the verifier's checklist.
+pinned commit, so the trust-bearing config is `REPO_URL + COMMIT_SHA`
+(plus `REPO_SUBDIR` when used, since it selects which `tee-launch.sh`
+runs) and the install/run command chain disappears from the verifier's
+checklist. `WORK_DIR` is local plumbing and is not trust-bearing.
 The whole chain is:
 
 ```mermaid
 flowchart LR
-    A[dstack attestation] --> B[launcher image digest<br/>+ REPO_URL<br/>+ COMMIT_SHA]
+    A[dstack attestation] --> B[launcher image digest<br/>+ REPO_URL<br/>+ COMMIT_SHA<br/>+ REPO_SUBDIR if used]
     B --> C[Sigstore attestation<br/>for launcher image digest<br/>= dstack-examples@ref/SHA]
-    B --> D[upstream repo at COMMIT_SHA<br/>incl. tee-launch.sh]
+    B --> D[upstream repo at COMMIT_SHA<br/>incl. tee-launch.sh under REPO_SUBDIR]
 ```
 
 1. **Verify the dstack attestation.**
    `phala cvms attestation --cvm-id <id> --json` and feed the TDX quote
    into the dstack verifier (or trust the Phala Cloud verifier as a lite
    path). Read out the deployed launcher image digest and the attested
-   `REPO_URL` + `COMMIT_SHA`.
+   `REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` if present).
 2. **Verify launcher image provenance via Sigstore.** Confirm the image
    digest from step 1 carries a build-provenance attestation signed by
    the expected `Dstack-TEE/dstack-examples` GitHub Actions workflow at
@@ -40,10 +42,11 @@ upstream commit you audited, produced by an audited launcher.
 
 > **Advanced mode adds one step.** If the launcher config sets `RUN_CMD`
 > (and optionally `INSTALL_CMD`) instead of relying on `tee-launch.sh`,
-> those strings are trust-bearing config: read them from the attested
-> compose in step 1 and audit them as if they were source code at the
-> pinned commit. The simplification of the default mode is exactly that
-> this extra step does not exist.
+> those strings are trust-bearing deployment config: read them from the
+> attested compose in step 1 and audit them like any other deployment
+> code — they are not part of the upstream repo at `COMMIT_SHA` and so
+> are not covered by its source provenance. The simplification of the
+> default mode is exactly that this extra step does not exist.
 
 The rest of this document explains how the chain works and what to do at
 each step.
@@ -176,20 +179,27 @@ evidence of tampering.
 ### 4. Extract and audit the workload pin
 
 Parse the `configs:` content from step 2 and read `REPO_URL` and
-`COMMIT_SHA` (plus optional `REPO_SUBDIR` / `CHILD_ENV_FILE`). In default
-mode there are no `INSTALL_CMD` / `RUN_CMD` strings to audit — the entry
-point is the fixed-path `tee-launch.sh` in the workload repo, which is
-covered by source provenance of the pinned commit. In advanced mode
-(`RUN_CMD` present) also read `RUN_CMD` and any `INSTALL_CMD` and treat
-them as trust-bearing config.
+`COMMIT_SHA` (plus `REPO_SUBDIR` if present — it selects which
+`tee-launch.sh` is used). `WORK_DIR` is local plumbing only and is not
+part of the trust-bearing config. `CHILD_ENV_FILE` (and any env it
+supplies) does not change the bytes that run; if used, audit it as
+runtime deployment configuration, not as source.
+
+In default mode there are no `INSTALL_CMD` / `RUN_CMD` strings to audit —
+the entry point is the fixed-path `tee-launch.sh` in the workload repo,
+which is covered by source provenance of the pinned commit. In advanced
+mode (`RUN_CMD` present), also read `RUN_CMD` and any `INSTALL_CMD` and
+audit them as trust-bearing deployment config: they are not part of the
+upstream repo at `COMMIT_SHA` and so are not covered by its source
+provenance.
 
 ```sh
 git -C <workload-checkout> rev-parse --verify <COMMIT_SHA>
 ```
 
 Confirm the upstream repo at `REPO_URL` contains `COMMIT_SHA`, and review
-the workload at that commit, including `tee-launch.sh` in default mode.
-This is the code that actually serves traffic.
+the workload at that commit, including `<REPO_SUBDIR>/tee-launch.sh` in
+default mode. This is the code that actually serves traffic.
 
 ### 5. Spot-check runtime logs
 
@@ -197,18 +207,21 @@ This is the code that actually serves traffic.
 phala logs --cvm-id <id> -n 200
 ```
 
-Default mode expected:
+Default-mode output should include these lines (the launcher logs `mode`
+during config summary, then the checkout/verify lines, then the `exec`
+line, so they appear in this order):
 
 ```
+[trusted-workload-launcher] mode:     default (workload repo tee-launch.sh)
 [trusted-workload-launcher] checking out <COMMIT_SHA>
 [trusted-workload-launcher] HEAD verified: <COMMIT_SHA>
-[trusted-workload-launcher] mode:     default (workload repo tee-launch.sh)
 [trusted-workload-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: bash tee-launch.sh
 ```
 
-Advanced mode shows the explicit `RUN_CMD` instead of `bash tee-launch.sh`
-on the last line. Either way these lines show the launcher reached the
-post-checkout state. They are not signed, so they don't replace
+Advanced mode logs `mode: advanced (RUN_CMD)` early on, and the last
+`exec in ...:` line shows the explicit `RUN_CMD` instead of
+`bash tee-launch.sh`. Either way these lines show the launcher reached
+the post-checkout state. They are not signed, so they don't replace
 steps 1–4 — they corroborate.
 
 A workload that needs signed runtime evidence should produce its own
