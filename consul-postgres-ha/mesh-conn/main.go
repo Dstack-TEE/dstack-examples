@@ -367,8 +367,14 @@ func main() {
 // =============================================================================
 
 func runPeerLink(cfg *Config, self, peer Peer) {
+	// One peerSession per peer for the lifetime of mesh-conn. The
+	// session holds authCh + candidateBuffer + abortAttempt — the
+	// stable wiring pollLoop dispatches through. The ICE agent itself
+	// is rebuilt per attempt inside dialICE (pion's Restart() doesn't
+	// support re-Dial; see peerSession docstring).
+	sess := setupPeerSession(peer.ID)
 	for {
-		if err := dialAndPump(cfg, self, peer); err != nil {
+		if err := dialAndPump(cfg, self, peer, sess); err != nil {
 			log.Printf("[%s] link failed: %v — retrying in 5s", peer.ID, err)
 			time.Sleep(5 * time.Second)
 			continue
@@ -405,12 +411,36 @@ func quicConfig() *quic.Config {
 	}
 }
 
-func dialAndPump(cfg *Config, self, peer Peer) error {
+func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
+	// One attemptCtx for the entire attempt — covers dialICE, QUIC dial,
+	// and the long-running pump goroutines. pollLoop and the ICE state
+	// callback both wire abortAttempt to this ctx; cancelling it makes
+	// the whole pile collapse so runPeerLink's 5s retry can re-enter.
+	attemptCtx, abort := context.WithCancel(context.Background())
+	sess.mu.Lock()
+	sess.consumedAuth = [2]string{}
+	sess.abortAttempt = abort
+	sess.mu.Unlock()
+	defer func() {
+		abort()
+		sess.mu.Lock()
+		// Only clear if it's still ours. runPeerLink's loop is serial
+		// per peer so this is always the case, but defensive.
+		if sess.abortAttempt != nil {
+			sess.abortAttempt = nil
+		}
+		sess.mu.Unlock()
+	}()
+
 	// 1. Establish ICE + wrap with a counting conn for byte-level telemetry.
-	rawConn, err := dialICE(cfg, peer.ID)
+	rawConn, err := dialICE(cfg, peer.ID, sess, attemptCtx)
 	if err != nil {
 		return fmt.Errorf("ice: %w", err)
 	}
+	// ice.Conn.Close() also closes the underlying agent (pion ties
+	// their lifetimes — transport.go:112). That's exactly what we want
+	// at end-of-attempt: this iteration's agent goes away, and the
+	// next iteration installs a fresh one.
 	defer rawConn.Close()
 	counted := newCountingConn(rawConn, peer.ID)
 	pkt := &iceConnPacketConn{conn: counted}
@@ -425,8 +455,7 @@ func dialAndPump(cfg *Config, self, peer Peer) error {
 	//    UDP underlay is exactly what it expects. Stream multiplex API is
 	//    a near-drop-in for yamux: OpenStreamSync / AcceptStream.
 	isClient := cfg.SelfID < peer.ID
-	connCtx, connCancel := context.WithCancel(context.Background())
-	defer connCancel()
+	connCtx := attemptCtx
 	dialCtx, dialCancel := context.WithTimeout(connCtx, 30*time.Second)
 	defer dialCancel()
 
@@ -838,35 +867,58 @@ func serverTLS() *tls.Config {
 }
 
 // =============================================================================
-// ICE — one agent per peer pair
+// ICE — long-lived per-peer session, agent rebuilt per attempt
 // =============================================================================
 
-// peerSession is the shared state between dialICE (the current attempt
-// to handshake) and pollLoop (delivering signalling messages). It is
-// replaced wholesale on every reconnect so stale state from a previous
-// failed attempt can't poison the next one.
+// peerSession holds the per-peer state shared between dialAndPump (the
+// current attempt) and pollLoop (delivering signalling messages from the
+// broker). The session is created ONCE per peer at startup; the agent
+// inside it is replaced on every attempt.
 //
-// The "stale-auth races" mitigation: dialICE reads the remote's auth
-// exactly once from authCh, then calls agent.Dial/Accept which uses
-// those credentials in every connectivity-check it sends for the
-// duration of the attempt. If the peer republishes a fresher auth
-// while we're mid-dial (which happens during hot-patches and other
-// asynchronous restarts), pushing it to authCh would just sit in the
-// buffer unread — Dial/Accept never re-reads. ICE then runs to its
-// 30s timeout against a peer whose pion agent has rolled to new
-// credentials and is rejecting our message-integrity-mismatched
-// BINDING_REQUESTs. To break the deadlock, dialICE registers its
-// dialCtx-cancel + the consumed auth string on the session under mu;
-// pollLoop, on receiving a fresher auth, cancels the in-flight dial
-// so runPeerLink's 5s retry loop re-enters dialICE with a fresh agent
-// that publishes new auth and converges with the peer.
+// Why not persistent agent + Restart()? It looked clean on paper, but
+// pion's Restart() doesn't reset agent.startedCh — once you've Dial'd
+// or Accept'd once, a second Dial returns ErrMultipleStart. Restart is
+// only intended for the WebRTC pattern where you keep the same ice.Conn
+// and let the agent's connectivity checks re-form pairs internally.
+// Our pattern (re-Dial on retry, drive a fresh QUIC connection each
+// time) needs a fresh agent every iteration.
+//
+// What the session still provides — even with per-iteration agents —
+// are the three race fixes that were the whole point of touching this:
+//
+//  1. **Stale auth mid-dial.** dialICE consumes one remote auth from
+//     authCh then calls agent.Dial/Accept which bakes those credentials
+//     into every connectivity-check for the attempt's duration. If the
+//     peer republishes a fresher auth (hot-patch, asynchronous restart)
+//     ICE silently runs to its 30s timeout against creds the peer no
+//     longer recognises. Fix: pollLoop, on receiving a fresher peer
+//     auth, calls sess.abortAttempt to unwind the whole attempt; the
+//     retry loop re-enters dialICE with a fresh agent that publishes
+//     fresh local credentials and converges with the peer.
+//
+//  2. **Lost remote candidates between attempts.** Peer's gather is
+//     one-shot per attempt — if pollLoop receives peer's candidates
+//     while WE are between attempts (no agent installed yet), nothing
+//     ever calls AddRemoteCandidate and peer won't resend. Fix:
+//     pollLoop appends every received candidate into sess.candidateBuffer
+//     in addition to dispatching to the current agent; dialICE drains
+//     the buffer into the freshly-created agent before Dial. The buffer
+//     is cleared whenever pollLoop observes a fresh peer auth (peer
+//     rolled creds → old candidates won't match new ufrag anyway).
+//
+//  3. **Lost auth between attempts.** Same shape: peer auth arriving
+//     when sess.agent is mid-replacement used to be dropped. Fix:
+//     pollLoop always drain-then-pushes auth into a session-owned
+//     authCh, independent of the abort decision. dialICE always reads
+//     the freshest value from authCh when its turn comes.
 type peerSession struct {
-	agent  *ice.Agent
 	authCh chan [2]string
 
-	mu           sync.Mutex
-	consumedAuth [2]string          // ufrag,pwd dialICE pulled off authCh; zero before
-	cancelDial   context.CancelFunc // non-nil once dialICE has consumed and is dialing
+	mu              sync.Mutex
+	agent           *ice.Agent         // replaced on every dialICE attempt; guarded by mu
+	consumedAuth    [2]string          // ufrag,pwd dialICE pulled off authCh; zero before
+	abortAttempt    context.CancelFunc // non-nil for the duration of an attempt
+	candidateBuffer []ice.Candidate    // remote candidates seen since last peer-auth; replayed into each new agent
 }
 
 var (
@@ -874,28 +926,30 @@ var (
 	sessions   = map[string]*peerSession{} // key = remote peer id
 )
 
-// currentSession returns the active session for remoteID, or nil if
-// none exists yet. Used by pollLoop to find the right authCh /
-// agent for incoming messages.
+// currentSession returns the persistent session for remoteID, or nil
+// if setupPeerSession hasn't installed it yet. Used by pollLoop to
+// dispatch incoming messages to the right agent.
 func currentSession(remoteID string) *peerSession {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
 	return sessions[remoteID]
 }
 
-// installSession atomically replaces any previous session for
-// remoteID. Called from dialICE on each new attempt, so any stale
-// auth/candidate that pollLoop wrote to the *old* channel is left
-// behind unreferenced and the new attempt starts from clean state.
-func installSession(remoteID string, agent *ice.Agent) *peerSession {
+// setupPeerSession allocates the long-lived session shell (authCh,
+// candidateBuffer, mutex) for one peer. The ICE agent itself is built
+// per-attempt inside dialICE — see the peerSession docstring for why
+// per-attempt rather than persistent.
+func setupPeerSession(remoteID string) *peerSession {
+	sess := &peerSession{
+		authCh: make(chan [2]string, 1),
+	}
 	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	s := &peerSession{agent: agent, authCh: make(chan [2]string, 1)}
-	sessions[remoteID] = s
-	return s
+	sessions[remoteID] = sess
+	sessionsMu.Unlock()
+	return sess
 }
 
-func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
+func dialICE(cfg *Config, remoteID string, sess *peerSession, attemptCtx context.Context) (*ice.Conn, error) {
 	var urls []*stun.URI
 	if cfg.TurnHost != "" {
 		user, pass := turnCreds(cfg.TurnSecret, time.Hour)
@@ -937,88 +991,115 @@ func dialICE(cfg *Config, remoteID string) (*ice.Conn, error) {
 	if err != nil {
 		return nil, fmt.Errorf("NewAgent: %w", err)
 	}
-	// Install fresh session BEFORE doing any signalling so any partner
-	// auth/candidate we publish only ever resolves against this attempt.
-	// pollLoop will deliver messages here from now on.
-	sess := installSession(remoteID, agent)
+	// Install the agent in the session BEFORE any signalling so
+	// pollLoop dispatches AddRemoteCandidate to this attempt. Any
+	// agent from a previous attempt is dropped (it's already failed
+	// or closed by the caller) — pollLoop captures the new pointer
+	// under mu and uses that.
+	sess.mu.Lock()
+	sess.agent = agent
+	sess.mu.Unlock()
 
-	// dialCtx is cancelled either by ICE state Failed/Closed (terminal
-	// pion/ice states; agent.Dial/Accept won't recover from them on its
-	// own and would otherwise block forever) or by the 60s deadline below.
-	// runPeerLink retries the whole dialAndPump after we return — without
-	// the cancel, a single ICE failure wedges this peer slot indefinitely.
-	dialCtx, cancelDial := context.WithCancel(context.Background())
-	defer cancelDial()
+	// On failure, close the agent before returning so pion's goroutines
+	// don't leak. Successful path returns the conn; runPeerLink's outer
+	// loop is responsible for closing it at end-of-attempt.
+	closed := false
+	defer func() {
+		if !closed && err != nil {
+			_ = agent.Close()
+		}
+	}()
 
-	closeAgent := func() {
-		// pion's Close is idempotent; safe in defers and callbacks both.
-		_ = agent.Close()
-	}
-
-	if err := agent.OnCandidate(func(c ice.Candidate) {
+	if err = agent.OnCandidate(func(c ice.Candidate) {
 		if c == nil {
 			return
 		}
 		publish(cfg, remoteID, "candidate", c.Marshal())
 	}); err != nil {
-		closeAgent()
 		return nil, err
 	}
-	if err := agent.OnConnectionStateChange(func(s ice.ConnectionState) {
+	if err = agent.OnConnectionStateChange(func(s ice.ConnectionState) {
 		log.Printf("[%s] ice state: %s", remoteID, s)
 		if s == ice.ConnectionStateFailed || s == ice.ConnectionStateClosed {
-			cancelDial()
+			sess.mu.Lock()
+			if sess.abortAttempt != nil {
+				sess.abortAttempt()
+			}
+			sess.mu.Unlock()
 		}
 	}); err != nil {
-		closeAgent()
 		return nil, err
 	}
 
 	localUfrag, localPwd, err := agent.GetLocalUserCredentials()
 	if err != nil {
-		closeAgent()
 		return nil, err
 	}
 	publish(cfg, remoteID, "auth", localUfrag+":"+localPwd)
 
-	if err := agent.GatherCandidates(); err != nil {
-		closeAgent()
+	if err = agent.GatherCandidates(); err != nil {
 		return nil, err
 	}
 
+	// Replay any remote candidates already buffered by pollLoop (sent
+	// by peer before this iteration's agent was even constructed).
+	// pollLoop also dispatches AddRemoteCandidate to the live agent for
+	// every NEW candidate; this catch-up only matters for candidates
+	// from peer's last gather that arrived during our retry window.
+	sess.mu.Lock()
+	buffered := append([]ice.Candidate(nil), sess.candidateBuffer...)
+	sess.mu.Unlock()
+	for _, c := range buffered {
+		if err2 := agent.AddRemoteCandidate(c); err2 != nil {
+			log.Printf("[%s] replay AddRemoteCandidate: %v", remoteID, err2)
+		}
+	}
+
+	// Wait for remote auth. pollLoop drain-then-pushes the freshest
+	// peer auth into sess.authCh independent of state, so by the time
+	// we wake we always have the latest value. attemptCtx covers the
+	// case where pollLoop already aborted us mid-wait (peer rolled
+	// creds again between agent install and now).
 	var remote [2]string
 	select {
 	case remote = <-sess.authCh:
 	case <-time.After(60 * time.Second):
-		closeAgent()
-		return nil, fmt.Errorf("timeout waiting for remote auth from %s", remoteID)
+		err = fmt.Errorf("timeout waiting for remote auth from %s", remoteID)
+		return nil, err
+	case <-attemptCtx.Done():
+		err = fmt.Errorf("attempt aborted before auth from %s", remoteID)
+		return nil, err
 	}
 
 	// Record what we're about to dial against, so pollLoop can detect
-	// fresher auth from the peer and cancel us instead of letting Dial
-	// run to its 30s connectivity-check timeout against stale creds.
-	// See the comment on peerSession for why this is necessary.
+	// fresher auth from the peer and abort the attempt. See peerSession
+	// docstring for why this is necessary.
 	sess.mu.Lock()
 	sess.consumedAuth = remote
-	sess.cancelDial = cancelDial
 	sess.mu.Unlock()
 
-	// 60s is comfortably longer than pion's default 30s connectivity-check
-	// window. If Dial/Accept hasn't succeeded by then, ICE has already
-	// transitioned to Failed and the state callback above cancelled the ctx.
-	dialTimer := time.AfterFunc(60*time.Second, cancelDial)
+	// 60s safety net; pion's default connectivity-check window is 30s
+	// so if Dial/Accept hasn't succeeded by then the state callback
+	// will have already fired abortAttempt.
+	dialTimer := time.AfterFunc(60*time.Second, func() {
+		sess.mu.Lock()
+		if sess.abortAttempt != nil {
+			sess.abortAttempt()
+		}
+		sess.mu.Unlock()
+	})
 	defer dialTimer.Stop()
 
 	var conn *ice.Conn
 	if cfg.SelfID < remoteID {
-		conn, err = agent.Dial(dialCtx, remote[0], remote[1])
+		conn, err = agent.Dial(attemptCtx, remote[0], remote[1])
 	} else {
-		conn, err = agent.Accept(dialCtx, remote[0], remote[1])
+		conn, err = agent.Accept(attemptCtx, remote[0], remote[1])
 	}
 	if err != nil {
-		closeAgent()
 		return nil, err
 	}
+	closed = true // success — let runPeerLink own the conn (and thus the agent)
 
 	if pair, perr := agent.GetSelectedCandidatePair(); perr == nil && pair != nil {
 		// Log full addresses + types so we can correlate stuck links against
@@ -1081,10 +1162,10 @@ func pollLoop(cfg *Config) {
 		for _, m := range msgs {
 			sess := currentSession(m.From)
 			if sess == nil {
-				// No active dialICE attempt for this remote yet; drop.
-				// On reconnect both sides re-enter dialICE and publish
-				// fresh auth/candidates, so dropping stale messages from
-				// before our local attempt is what we want.
+				// setupPeerSession hasn't installed this remote yet;
+				// drop. runPeerLink installs all peer sessions at
+				// startup, so this only fires if we receive a message
+				// from a non-peer id (mis-configured cluster).
 				continue
 			}
 			switch m.Type {
@@ -1096,52 +1177,62 @@ func pollLoop(cfg *Config) {
 				}
 				newAuth := [2]string{parts[0], parts[1]}
 
-				// If dialICE has already consumed an earlier auth and
-				// is mid-Dial, we can't deliver this one through authCh
-				// — agent.Dial doesn't re-read. Cancel the stale dial
-				// so runPeerLink's 5s retry re-enters dialICE with a
-				// fresh agent that publishes new auth and converges
-				// with the peer. Skip the cancel if the new auth
-				// matches what we already consumed (defensive against
-				// a hypothetical broker re-delivery; pion never reuses
-				// ufrag/pwd across restarts so in practice this means
-				// "the peer didn't actually change").
+				// Fresh peer auth is the only reliable signal we have
+				// that peer rolled credentials (process restart, ICE
+				// restart, etc). Three things have to happen atomically
+				// under sess.mu:
+				//   1. Drop the candidate buffer — those candidates
+				//      belong to the previous peer epoch and won't
+				//      pair against the new credentials.
+				//   2. If an attempt is currently in flight against
+				//      different consumed creds, abort it; runPeerLink
+				//      retries with a fresh agent + republished auth.
+				//   3. (Outside mu, below.) Replace the buffered auth
+				//      in authCh so the next dialICE iteration reads
+				//      the freshest value.
 				sess.mu.Lock()
-				if sess.cancelDial != nil {
-					if newAuth != sess.consumedAuth {
-						log.Printf("[%s] fresh auth (ufrag=%s) supersedes consumed (ufrag=%s) — cancelling stale dial",
-							m.From, newAuth[0], sess.consumedAuth[0])
-						sess.cancelDial()
-					}
-					sess.mu.Unlock()
-					continue
+				sess.candidateBuffer = nil
+				zero := [2]string{}
+				if sess.abortAttempt != nil &&
+					sess.consumedAuth != zero &&
+					sess.consumedAuth != newAuth {
+					log.Printf("[%s] fresh auth (ufrag=%s) supersedes consumed (ufrag=%s) — aborting attempt",
+						m.From, newAuth[0], sess.consumedAuth[0])
+					sess.abortAttempt()
 				}
 				sess.mu.Unlock()
 
-				// First auth for this attempt — drain-then-push so
-				// dialICE always reads the most recent value if multiple
-				// arrive before its select fires. (mailbox.push on the
-				// broker also drops a sender's prior queued messages on
-				// auth, but the broker's drop only takes effect on
-				// subsequent /publish calls; the message that's already
-				// queued for our pending /poll is what this drain
-				// handles.)
+				// Drain-then-push: the channel is buffer-1 and we want
+				// only the freshest auth retained for the next read.
+				// pion never reuses ufrag/pwd across restarts, so the
+				// freshest message is always what we want to consume.
 				select {
 				case <-sess.authCh:
 				default:
 				}
 				sess.authCh <- newAuth
 			case "candidate":
-				if sess.agent == nil {
-					continue
-				}
 				cand, err := ice.UnmarshalCandidate(m.Data)
 				if err != nil {
 					log.Printf("[%s] bad candidate: %v", m.From, err)
 					continue
 				}
-				if err := sess.agent.AddRemoteCandidate(cand); err != nil {
-					log.Printf("[%s] AddRemoteCandidate: %v", m.From, err)
+				// Buffer first, then dispatch to the live agent if any.
+				// Each attempt builds a fresh agent that starts with
+				// zero remote candidates; dialICE drains this buffer
+				// into the new agent before Dial so peer's candidates
+				// from the previous attempt window don't get lost.
+				// agent may be nil if we haven't entered dialICE yet,
+				// or stale if we're mid-replacement — both are fine,
+				// the buffer-drain on next dialICE catches them up.
+				sess.mu.Lock()
+				sess.candidateBuffer = append(sess.candidateBuffer, cand)
+				agent := sess.agent
+				sess.mu.Unlock()
+				if agent != nil {
+					if err := agent.AddRemoteCandidate(cand); err != nil {
+						log.Printf("[%s] AddRemoteCandidate: %v", m.From, err)
+					}
 				}
 			}
 		}
