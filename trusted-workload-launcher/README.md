@@ -47,9 +47,12 @@ pinned workload commit, see [`VERIFY.md`](./VERIFY.md).
 
 ```
 launcher image digest ──►  launcher implementation identity
-                           (this directory at commit L,
-                            reproducibly built; published by the release
-                            workflow with a Sigstore attestation)
+                           (this directory at commit L; the release
+                            workflow publishes a Sigstore build-provenance
+                            attestation that binds the image digest to a
+                            specific GitHub workflow run / repo / ref /
+                            SHA. This is a signed chain of custody, not a
+                            claim of bit-for-bit reproducibility.)
 
 launcher config file  ──►  workload pin
                            (REPO_URL + full COMMIT_SHA U; selects which
@@ -75,8 +78,11 @@ attestation:
 Once the config is attested by one of the first two options, a relying party
 verifies in four steps:
 
-1. The launcher image digest in the dstack attestation matches a reproducible
-   build of this directory at commit `L`.
+1. The launcher image digest in the dstack attestation matches the digest
+   published by the release workflow for this directory at commit `L`
+   (verified via the Sigstore build-provenance attestation, which binds
+   the digest to a specific GitHub Actions workflow run / repo / ref /
+   SHA — see [`VERIFY.md`](./VERIFY.md) for the exact check).
 2. The launcher script at commit `L` is the audited script — small, parses
    (does not source) its config, refuses anything but a full commit SHA, and
    verifies `HEAD` after checkout.
