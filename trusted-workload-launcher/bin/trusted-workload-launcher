@@ -1,0 +1,244 @@
+#!/usr/bin/env bash
+# trusted-workload-launcher — minimal, auditable launcher for a workload pinned
+# at a specific upstream Git commit.
+#
+# Reads one env-file config, clones the configured repo, hard-pins to the
+# requested commit SHA, runs the configured install step inside the checkout,
+# then exec()s the configured run command so signals reach the child program.
+#
+# The launcher is intentionally tiny: it knows nothing about the workload it
+# runs. Its only job is to make the bytes that execute correspond exactly to
+# the bytes at a specific commit in a specific upstream repo, so that a
+# verifier who knows the launcher image digest can derive what code ran.
+
+set -euo pipefail
+
+PROG=$(basename "$0")
+
+log() { printf '[%s] %s\n' "$PROG" "$*" >&2; }
+die() { printf '[%s] error: %s\n' "$PROG" "$*" >&2; exit 1; }
+
+usage() {
+  cat >&2 <<EOF
+Usage: $PROG <config-file>
+
+The config file is a line-oriented KEY=VALUE env file. It is parsed, NOT
+sourced; the launcher does not eval untrusted config beyond the two values
+INSTALL_CMD and RUN_CMD, which are intentionally executed via 'bash -c'.
+
+Required keys:
+  REPO_URL       Git URL of the pinned repo (https://... or git@...).
+  COMMIT_SHA     Full 40-hex (SHA-1) or 64-hex (SHA-256) commit hash.
+                 Branches, tags, and short SHAs are rejected.
+  WORK_DIR       Local directory used as the checkout. Created if missing.
+                 Reused across runs if it already contains a clone of REPO_URL.
+  INSTALL_CMD    Shell command to run inside the checkout (after cd into
+                 REPO_SUBDIR if set). Pass an empty string to skip the install
+                 step; the key must still be present for explicitness.
+  RUN_CMD        Shell command to exec inside the checkout. exec() ensures the
+                 child receives signals directly.
+
+Optional keys:
+  REPO_SUBDIR    Path inside the repo to cd into before running INSTALL_CMD and
+                 RUN_CMD. Defaults to the repo root.
+  CHILD_ENV_FILE Path to a separate KEY=VALUE env file. Each key listed there
+                 is exported into the environment of INSTALL_CMD and RUN_CMD.
+
+Lines starting with '#' and blank lines are ignored. Values may be wrapped in
+matching single or double quotes; one layer of surrounding quotes is stripped.
+Unknown keys are rejected.
+EOF
+}
+
+if [[ $# -ne 1 ]]; then
+  usage
+  exit 2
+fi
+
+case ${1:-} in
+  -h|--help) usage; exit 0 ;;
+esac
+
+CONFIG_FILE=$1
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || die "required tool not found in PATH: $1"
+}
+
+require_tool git
+
+# Parse the config file line-by-line. We never source it, so a config cannot
+# inject arbitrary commands during parsing — INSTALL_CMD and RUN_CMD are the
+# only values that are later executed, and they go through 'bash -c'.
+parse_config() {
+  local config_file=$1
+  [[ -f $config_file ]] || die "config file not found: $config_file"
+
+  CFG_REPO_URL=
+  CFG_COMMIT_SHA=
+  CFG_WORK_DIR=
+  CFG_REPO_SUBDIR=
+  CFG_CHILD_ENV_FILE=
+  CFG_INSTALL_CMD=
+  CFG_RUN_CMD=
+  CFG_INSTALL_CMD_SET=0
+  CFG_RUN_CMD_SET=0
+
+  local line key val lineno=0 trimmed
+  while IFS= read -r line || [[ -n $line ]]; do
+    lineno=$((lineno + 1))
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    [[ -z $trimmed ]] && continue
+    [[ ${trimmed:0:1} == '#' ]] && continue
+    if [[ ! $trimmed =~ ^([A-Z_][A-Z0-9_]*)=(.*)$ ]]; then
+      die "config parse error at $config_file:$lineno: $trimmed"
+    fi
+    key=${BASH_REMATCH[1]}
+    val=${BASH_REMATCH[2]}
+    if [[ ${#val} -ge 2 ]]; then
+      local first=${val:0:1} last=${val: -1}
+      if [[ ($first == '"' && $last == '"') || ($first == "'" && $last == "'") ]]; then
+        val=${val:1:${#val}-2}
+      fi
+    fi
+    case $key in
+      REPO_URL)        CFG_REPO_URL=$val ;;
+      COMMIT_SHA)      CFG_COMMIT_SHA=$val ;;
+      WORK_DIR)        CFG_WORK_DIR=$val ;;
+      REPO_SUBDIR)     CFG_REPO_SUBDIR=$val ;;
+      CHILD_ENV_FILE)  CFG_CHILD_ENV_FILE=$val ;;
+      INSTALL_CMD)     CFG_INSTALL_CMD=$val; CFG_INSTALL_CMD_SET=1 ;;
+      RUN_CMD)         CFG_RUN_CMD=$val; CFG_RUN_CMD_SET=1 ;;
+      *) die "unknown config key '$key' at $config_file:$lineno" ;;
+    esac
+  done < "$config_file"
+}
+
+validate_config() {
+  [[ -n $CFG_REPO_URL ]]   || die "missing required config key: REPO_URL"
+  [[ -n $CFG_COMMIT_SHA ]] || die "missing required config key: COMMIT_SHA"
+  [[ -n $CFG_WORK_DIR ]]   || die "missing required config key: WORK_DIR"
+  [[ $CFG_INSTALL_CMD_SET -eq 1 ]] || die "missing required config key: INSTALL_CMD (use INSTALL_CMD= to skip)"
+  [[ $CFG_RUN_CMD_SET -eq 1 ]]     || die "missing required config key: RUN_CMD"
+  [[ -n $CFG_RUN_CMD ]] || die "RUN_CMD must not be empty"
+
+  # Refuse anything that isn't a full commit hash. Branches, tags, and short
+  # SHAs are rejected because they let upstream rewrites silently change which
+  # bytes get executed inside the TEE.
+  if [[ ! $CFG_COMMIT_SHA =~ ^[0-9a-f]{40}$ && ! $CFG_COMMIT_SHA =~ ^[0-9a-f]{64}$ ]]; then
+    die "COMMIT_SHA must be a full 40-hex SHA-1 or 64-hex SHA-256 hash (got: $CFG_COMMIT_SHA)"
+  fi
+
+  if [[ -n $CFG_REPO_SUBDIR ]]; then
+    case $CFG_REPO_SUBDIR in
+      /*)  die "REPO_SUBDIR must be a relative path inside the repo (got: $CFG_REPO_SUBDIR)" ;;
+      *..*) die "REPO_SUBDIR must not contain '..' (got: $CFG_REPO_SUBDIR)" ;;
+    esac
+  fi
+}
+
+ensure_repo_at_commit() {
+  local work_dir=$CFG_WORK_DIR
+  local url=$CFG_REPO_URL
+  local sha=$CFG_COMMIT_SHA
+
+  mkdir -p "$work_dir"
+  cd "$work_dir"
+
+  if [[ -d .git ]]; then
+    local current_url
+    current_url=$(git config --get remote.origin.url 2>/dev/null || true)
+    if [[ -n $current_url && $current_url != "$url" ]]; then
+      die "existing checkout at $work_dir has origin '$current_url' but config wants '$url'"
+    fi
+    log "reusing checkout at $work_dir; fetching origin"
+    git fetch --tags --prune origin
+  else
+    if [[ -n "$(ls -A "$work_dir")" ]]; then
+      die "WORK_DIR '$work_dir' is not empty and is not a git checkout; refusing to clone over it"
+    fi
+    log "cloning $url into $work_dir"
+    git clone "$url" .
+  fi
+
+  log "checking out $sha"
+  if ! git -c advice.detachedHead=false checkout --detach "$sha" 2>/dev/null; then
+    die "git checkout failed for commit $sha (commit not present in $url? short SHA disallowed)"
+  fi
+
+  local head
+  head=$(git rev-parse --verify HEAD)
+  local sha_lc=${sha,,}
+  local head_lc=${head,,}
+  if [[ $head_lc != "$sha_lc" ]]; then
+    die "HEAD after checkout is $head, expected $sha"
+  fi
+  log "HEAD verified: $head"
+}
+
+apply_child_env() {
+  local env_file=$1
+  [[ -f $env_file ]] || die "CHILD_ENV_FILE not found: $env_file"
+  local line key val lineno=0 trimmed
+  while IFS= read -r line || [[ -n $line ]]; do
+    lineno=$((lineno + 1))
+    trimmed=${line#"${line%%[![:space:]]*}"}
+    [[ -z $trimmed ]] && continue
+    [[ ${trimmed:0:1} == '#' ]] && continue
+    if [[ ! $trimmed =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
+      die "child env parse error at $env_file:$lineno: $trimmed"
+    fi
+    key=${BASH_REMATCH[1]}
+    val=${BASH_REMATCH[2]}
+    if [[ ${#val} -ge 2 ]]; then
+      local first=${val:0:1} last=${val: -1}
+      if [[ ($first == '"' && $last == '"') || ($first == "'" && $last == "'") ]]; then
+        val=${val:1:${#val}-2}
+      fi
+    fi
+    export "$key=$val"
+  done < "$env_file"
+}
+
+main() {
+  parse_config "$CONFIG_FILE"
+  validate_config
+
+  log "config:   $CONFIG_FILE"
+  log "repo:     $CFG_REPO_URL"
+  log "commit:   $CFG_COMMIT_SHA"
+  log "workdir:  $CFG_WORK_DIR"
+  if [[ -n $CFG_REPO_SUBDIR ]]; then
+    log "subdir:   $CFG_REPO_SUBDIR"
+  fi
+  log "install:  ${CFG_INSTALL_CMD:-<empty — skipped>}"
+  log "run:      $CFG_RUN_CMD"
+  if [[ -n $CFG_CHILD_ENV_FILE ]]; then
+    log "envfile:  $CFG_CHILD_ENV_FILE"
+  fi
+
+  ensure_repo_at_commit
+
+  local target=$CFG_WORK_DIR
+  if [[ -n $CFG_REPO_SUBDIR ]]; then
+    target=$CFG_WORK_DIR/$CFG_REPO_SUBDIR
+    [[ -d $target ]] || die "REPO_SUBDIR '$CFG_REPO_SUBDIR' does not exist under $CFG_WORK_DIR after checkout"
+  fi
+  cd "$target"
+
+  if [[ -n $CFG_CHILD_ENV_FILE ]]; then
+    apply_child_env "$CFG_CHILD_ENV_FILE"
+  fi
+
+  if [[ -n $CFG_INSTALL_CMD ]]; then
+    log "running install in $target"
+    bash -c "$CFG_INSTALL_CMD"
+  else
+    log "INSTALL_CMD is empty; skipping install step"
+  fi
+
+  log "exec in $target: $CFG_RUN_CMD"
+  exec bash -c "$CFG_RUN_CMD"
+}
+
+main "$@"

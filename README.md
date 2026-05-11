@@ -230,7 +230,8 @@ Implementation details and infrastructure patterns.
 
 | Example | Description |
 |---------|-------------|
-| [launcher](./launcher) | Generic launcher pattern for Docker Compose apps |
+| [launcher](./launcher) | Generic launcher pattern for Docker Compose apps (auto-update) |
+| [trusted-workload-launcher](./trusted-workload-launcher) | Tiny auditable launcher image that fetches a workload at a full upstream Git commit SHA — opposite trust posture to `launcher/` (no auto-update). The launcher image digest attests the launcher itself; the workload pin lives in a config file that must be attested via dstack `compose_hash`/`config_id` or baked into a derived image |
 | [prelaunch-script](./prelaunch-script) | Pre-launch script patterns (Phala Cloud) |
 | [private-docker-image-deployment](./private-docker-image-deployment) | Using private Docker registries |
 | [attestation/rtmr3-based](./attestation/rtmr3-based) | RTMR3-based attestation (legacy) |
