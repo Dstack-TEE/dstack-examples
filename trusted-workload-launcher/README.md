@@ -126,6 +126,23 @@ shell expansion in the parse step.
 | `REPO_SUBDIR` | Relative directory inside the repo to `cd` into before `INSTALL_CMD` and `RUN_CMD`. Must not be absolute and must not contain `..`. |
 | `CHILD_ENV_FILE` | Path to a separate env file. Each `KEY=VALUE` line is `export`ed into the environment seen by `INSTALL_CMD` and `RUN_CMD`. The file is parsed line-by-line just like the main config (not sourced). |
 
+### Multi-line install or run logic
+
+`INSTALL_CMD` and `RUN_CMD` are single-line shell strings — the config is
+line-oriented and the launcher does not implement multi-line value parsing.
+This is intentional: a config that "almost" parses a multi-line script is a
+trust hazard. If you need more than one command, put a script in the
+workload repo at the pinned commit (e.g. `scripts/install.sh`,
+`scripts/run.sh`) and call it:
+
+```
+INSTALL_CMD=./scripts/install.sh
+RUN_CMD=./scripts/run.sh
+```
+
+The script then lives at the same pinned `COMMIT_SHA` as the workload, so
+its bytes are covered by the same audit.
+
 ### What the launcher will and will not do
 
 * Will: clone fresh if `WORK_DIR` is empty; reuse the existing clone otherwise

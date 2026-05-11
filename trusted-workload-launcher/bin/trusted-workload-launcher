@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# trusted-workload-launcher — minimal, auditable launcher for a workload pinned
-# at a specific upstream Git commit.
+# trusted-workload-launcher: minimal launcher for a workload pinned at a
+# specific upstream Git commit.
 #
 # Reads one env-file config, clones the configured repo, hard-pins to the
 # requested commit SHA, runs the configured install step inside the checkout,
@@ -68,7 +68,7 @@ require_tool() {
 require_tool git
 
 # Parse the config file line-by-line. We never source it, so a config cannot
-# inject arbitrary commands during parsing — INSTALL_CMD and RUN_CMD are the
+# inject arbitrary commands during parsing. INSTALL_CMD and RUN_CMD are the
 # only values that are later executed, and they go through 'bash -c'.
 parse_config() {
   local config_file=$1
@@ -211,7 +211,7 @@ main() {
   if [[ -n $CFG_REPO_SUBDIR ]]; then
     log "subdir:   $CFG_REPO_SUBDIR"
   fi
-  log "install:  ${CFG_INSTALL_CMD:-<empty — skipped>}"
+  log "install:  ${CFG_INSTALL_CMD:-<empty, skipped>}"
   log "run:      $CFG_RUN_CMD"
   if [[ -n $CFG_CHILD_ENV_FILE ]]; then
     log "envfile:  $CFG_CHILD_ENV_FILE"
