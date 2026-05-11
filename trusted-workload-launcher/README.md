@@ -1,9 +1,9 @@
 # trusted-workload-launcher
 
-A minimal, auditable launcher image for dstack: given a config file that
+A minimal, auditable launcher image for dstack. Given a config file that
 names an upstream Git repo and a full commit SHA, the launcher fetches that
-exact commit, verifies `HEAD` after checkout, and `exec`s the configured run
-command — with no fallback to branches, tags, or short SHAs.
+exact commit, verifies `HEAD` after checkout, and runs the workload's own
+entry point script — with no fallback to branches, tags, or short SHAs.
 
 "Trusted" in the name refers to what a dstack deployment using this image
 can produce — a *trusted workload deployment* — not to any intrinsic
@@ -12,6 +12,14 @@ of what runs in the TEE checkable: it combines TEE attestation with an
 auditable image digest and an attested config that names the workload
 commit. Whether the workload at that commit is itself trustworthy is up to
 the auditor.
+
+By convention, **the workload repo provides its own bash entry point at the
+fixed path `tee-launch.sh`** (default mode). This keeps install/build/run
+logic inside the workload repo, where it is covered by source provenance of
+the pinned `COMMIT_SHA` and is **not** a trust-bearing field in the
+launcher config. A verifier therefore only audits two things: the launcher
+image's identity, and the `REPO_URL` + `COMMIT_SHA` pair in the attested
+config.
 
 The launcher image is **generic**: its digest attests the launcher's
 implementation, not the workload. The workload identity comes from the
@@ -56,10 +64,11 @@ launcher image digest ──►  launcher implementation identity
 
 launcher config file  ──►  workload pin
                            (REPO_URL + full COMMIT_SHA U; selects which
-                            upstream commit gets fetched and exec()d)
+                            upstream commit gets fetched and run)
 
                        ──►  workload running inside the TEE
-                           = workload repo at commit U
+                           = workload repo at commit U,
+                             starting from its tee-launch.sh
 ```
 
 The published launcher image is a **generic** runner: the same image digest
@@ -103,17 +112,18 @@ trusted-workload-launcher <config-file>
 ```
 
 The launcher is a single bash script (`bin/trusted-workload-launcher`). It
-depends only on `bash`, `git`, and POSIX coreutils. It is **not** sourced and
-**does not source** the config; the only values executed as shell are
-`INSTALL_CMD` and `RUN_CMD`, which are documented to be intentionally
-executed.
+depends only on `bash`, `git`, and POSIX coreutils. It is **not** sourced
+and **does not source** the config. In default mode, the only bytes it
+executes are those of the workload repo's `tee-launch.sh` at the pinned
+`COMMIT_SHA`. In advanced mode (see below), it additionally executes the
+configured `INSTALL_CMD` / `RUN_CMD` via `bash -c`.
 
 ## Config contract
 
 An env-file with `KEY=VALUE` lines. Comments start with `#`. Surrounding
 matching single or double quotes are stripped (one layer). Unknown keys are
-rejected. The config is parsed, not sourced — no command substitution and no
-shell expansion in the parse step.
+rejected. The config is parsed, not sourced — no command substitution and
+no shell expansion in the parse step.
 
 ### Required
 
@@ -122,32 +132,39 @@ shell expansion in the parse step.
 | `REPO_URL` | Git URL of the upstream workload repo (`https://…` or `git@…`). |
 | `COMMIT_SHA` | **Full** 40-hex SHA-1 or 64-hex SHA-256. Branches, tags, and short SHAs are rejected. |
 | `WORK_DIR` | Local directory used as the checkout. Created if missing. Reused on subsequent runs as long as the existing clone's `origin` URL matches `REPO_URL`. |
-| `INSTALL_CMD` | Shell command run inside the checkout (in `REPO_SUBDIR` if set). Pass `INSTALL_CMD=` to explicitly skip the install step. The key must still be present. |
-| `RUN_CMD` | Shell command `exec`d after the install step. Because `exec` is used, signals reach the child program directly. |
 
 ### Optional
 
 | Key | Meaning |
 | --- | --- |
-| `REPO_SUBDIR` | Relative directory inside the repo to `cd` into before `INSTALL_CMD` and `RUN_CMD`. Must not be absolute and must not contain `..`. |
-| `CHILD_ENV_FILE` | Path to a separate env file. Each `KEY=VALUE` line is `export`ed into the environment seen by `INSTALL_CMD` and `RUN_CMD`. The file is parsed line-by-line just like the main config (not sourced). |
+| `REPO_SUBDIR` | Relative directory inside the repo to `cd` into before running the entry point or `RUN_CMD`. Must not be absolute and must not contain `..`. |
+| `CHILD_ENV_FILE` | Path to a separate env file. Each `KEY=VALUE` line is `export`ed into the environment seen by `tee-launch.sh` / `INSTALL_CMD` / `RUN_CMD`. The file is parsed line-by-line just like the main config (not sourced). |
+| `RUN_CMD` | **Advanced.** Shell command to exec instead of the default `tee-launch.sh`. Use only when the workload repo cannot host its own entry script. |
+| `INSTALL_CMD` | **Advanced.** Shell command to run before `RUN_CMD`. Only valid alongside `RUN_CMD`. |
 
-### Multi-line install or run logic
+### Default mode: `tee-launch.sh` in the workload repo
 
-`INSTALL_CMD` and `RUN_CMD` are single-line shell strings — the config is
-line-oriented and the launcher does not implement multi-line value parsing.
-This is intentional: a config that "almost" parses a multi-line script is a
-trust hazard. If you need more than one command, put a script in the
-workload repo at the pinned commit (e.g. `scripts/install.sh`,
-`scripts/run.sh`) and call it:
+Recommended for every workload you control. The workload repo provides a
+bash script at the fixed path `tee-launch.sh` (at the repo root, or at
+`REPO_SUBDIR/tee-launch.sh` if `REPO_SUBDIR` is set). The launcher runs it
+with `bash tee-launch.sh` after checkout — **no executable bit is
+required**. All install/build/run logic lives in that script; the launcher
+config carries only `REPO_URL` + `COMMIT_SHA` (+ local `WORK_DIR`).
 
-```
-INSTALL_CMD=./scripts/install.sh
-RUN_CMD=./scripts/run.sh
-```
+Because the script's bytes are pinned by `COMMIT_SHA` and stored in the
+workload repo, they are covered by source provenance of the pinned commit.
+The verifier does not need to extract or audit any command string out of
+the launcher config.
 
-The script then lives at the same pinned `COMMIT_SHA` as the workload, so
-its bytes are covered by the same audit.
+### Advanced mode: explicit `RUN_CMD` / `INSTALL_CMD`
+
+Use this when the workload repo cannot be modified to add a
+`tee-launch.sh` (e.g. you are pinning a third-party repo unchanged).
+Setting `RUN_CMD` switches the launcher into advanced mode; if you need
+more than one command, set `INSTALL_CMD` to run before `RUN_CMD`. Each is
+a single-line shell string and the launcher does not implement multi-line
+parsing. In this mode both values are trust-bearing config and must be
+audited alongside `COMMIT_SHA`.
 
 ### What the launcher will and will not do
 
@@ -159,21 +176,24 @@ its bytes are covered by the same audit.
   A missing commit is a hard failure.
 * Will not: accept short SHAs. A truncated SHA could resolve ambiguously if
   the upstream history changes.
-* Will not: source the config or `eval` anything beyond `INSTALL_CMD` /
-  `RUN_CMD`, which are executed via `bash -c`.
+* Will not: source the config or `eval` config values. In default mode the
+  launcher executes `bash tee-launch.sh` from the pinned commit; in advanced
+  mode it executes `INSTALL_CMD` / `RUN_CMD` via `bash -c`. Nothing else
+  from the config reaches a shell.
 
 ## Example
 
 See [`examples/web-app.conf`](./examples/web-app.conf). Adapt `REPO_URL`,
-`COMMIT_SHA`, `INSTALL_CMD`, and `RUN_CMD` for your workload.
+`COMMIT_SHA`, and (if you need it) `REPO_SUBDIR` for your workload, and
+make sure the workload repo has a `tee-launch.sh` at the pinned commit.
 
 ```sh
 ./bin/trusted-workload-launcher ./examples/web-app.conf
 ```
 
-The launcher logs the resolved repo, commit, workdir, and commands at
-startup, then logs the verified `HEAD` after checkout, before invoking the
-install and run steps.
+The launcher logs the resolved repo, commit, workdir, and selected mode at
+startup, then logs the verified `HEAD` after checkout, before handing
+control to `tee-launch.sh` (or `INSTALL_CMD` / `RUN_CMD` in advanced mode).
 
 ## Deploying with dstack
 
@@ -227,8 +247,6 @@ configs:
       REPO_URL=https://github.com/example-org/example-web-app.git
       COMMIT_SHA=<full-40-or-64-hex-sha>
       WORK_DIR=/var/lib/trusted-workload-launcher/example-web-app
-      INSTALL_CMD=npm ci --omit=dev
-      RUN_CMD=node server.js
 
 volumes:
   workload-checkout:

@@ -45,10 +45,11 @@ run_case() {
   fi
 }
 
-# Build a fixture git repo with three commits:
+# Build a fixture git repo with four commits:
 #   c0: initial empty
-#   c1: adds sub/run.sh and greeting.txt              <-- this is the PIN commit
+#   c1: adds sub/run.sh and greeting.txt              <-- advanced-mode PIN
 #   c2: adds tip.txt                                  <-- "future" advance
+#   c3: adds sub/tee-launch.sh                        <-- default-mode PIN
 setup_fixture_repo() {
   local repo=$1
   mkdir -p "$repo"
@@ -77,14 +78,31 @@ SH
   echo "tip" > "$repo/tip.txt"
   git -C "$repo" add tip.txt
   git -C "$repo" commit -q -m "c2 add tip.txt"
+
+  # tee-launch.sh is intentionally NOT marked executable; the launcher must
+  # run it through 'bash <script>' rather than rely on the exec bit.
+  cat > "$repo/sub/tee-launch.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+: "${MARKER_FILE:?MARKER_FILE not set}"
+{
+  printf 'mode=default\n'
+  printf 'cwd=%s\n' "$PWD"
+  printf 'head=%s\n' "$(git rev-parse HEAD)"
+  printf 'child_env_extra=%s\n' "${CHILD_ENV_EXTRA-UNSET}"
+} > "$MARKER_FILE"
+SH
+  git -C "$repo" add sub/tee-launch.sh
+  git -C "$repo" commit -q -m "c3 add tee-launch.sh"
 }
 
 FIXTURE=$TMPROOT/fixture-repo
 setup_fixture_repo "$FIXTURE"
 
-PIN_SHA=$(git -C "$FIXTURE" rev-parse HEAD~1)   # c1, the run.sh commit
-TIP_SHA=$(git -C "$FIXTURE" rev-parse HEAD)     # c2
-# 40 zeros — syntactically a valid SHA, semantically not in this repo.
+PIN_SHA=$(git -C "$FIXTURE" rev-parse HEAD~2)        # c1, advanced-mode pin
+TIP_SHA=$(git -C "$FIXTURE" rev-parse HEAD~1)        # c2
+DEFAULT_SHA=$(git -C "$FIXTURE" rev-parse HEAD)      # c3, default-mode pin
+# 40 zeros: syntactically a valid SHA, semantically not in this repo.
 BOGUS_SHA=0000000000000000000000000000000000000000
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -330,6 +348,60 @@ EOF
   return 0
 }
 
+test_default_mode_happy() {
+  local work=$TMPROOT/work-default
+  local marker=$TMPROOT/marker-default.txt
+  local conf=$TMPROOT/conf-default.env
+  # No INSTALL_CMD, no RUN_CMD: default mode. tee-launch.sh in REPO_SUBDIR is
+  # exec'd by the launcher and produces the marker.
+  cat > "$conf" <<EOF
+REPO_URL=$FIXTURE
+COMMIT_SHA=$DEFAULT_SHA
+WORK_DIR=$work
+REPO_SUBDIR=sub
+EOF
+  MARKER_FILE=$marker "$LAUNCHER" "$conf" || return 1
+  [[ -f $marker ]] || { echo "marker not created" >&2; return 1; }
+  grep -q "mode=default" "$marker" || { echo "default-mode tee-launch.sh did not run" >&2; cat "$marker" >&2; return 1; }
+  grep -q "head=$DEFAULT_SHA" "$marker" || { echo "head not pinned to $DEFAULT_SHA" >&2; cat "$marker" >&2; return 1; }
+  return 0
+}
+
+test_default_mode_missing_script_fails() {
+  # PIN_SHA (c1) has run.sh but no tee-launch.sh. In default mode the launcher
+  # must refuse to start rather than fall back to anything.
+  local conf=$TMPROOT/conf-default-missing.env
+  cat > "$conf" <<EOF
+REPO_URL=$FIXTURE
+COMMIT_SHA=$PIN_SHA
+WORK_DIR=$TMPROOT/work-default-missing
+REPO_SUBDIR=sub
+EOF
+  if "$LAUNCHER" "$conf"; then
+    echo "launcher should have failed with tee-launch.sh missing" >&2
+    return 1
+  fi
+  return 0
+}
+
+test_install_cmd_without_run_cmd_fails() {
+  # INSTALL_CMD only makes sense alongside RUN_CMD; setting one without the
+  # other is a misconfiguration and must fail closed.
+  local conf=$TMPROOT/conf-install-only.env
+  cat > "$conf" <<EOF
+REPO_URL=$FIXTURE
+COMMIT_SHA=$DEFAULT_SHA
+WORK_DIR=$TMPROOT/work-install-only
+REPO_SUBDIR=sub
+INSTALL_CMD=true
+EOF
+  if "$LAUNCHER" "$conf"; then
+    echo "launcher accepted INSTALL_CMD without RUN_CMD" >&2
+    return 1
+  fi
+  return 0
+}
+
 test_help_flag() {
   "$LAUNCHER" --help >/dev/null
 }
@@ -393,6 +465,9 @@ run_case "repo_subdir_escape_rejected"           test_repo_subdir_escape_rejecte
 run_case "origin_mismatch_rejected"              test_origin_mismatch_rejected
 run_case "child_env_file_passes_through"         test_child_env_file
 run_case "install_runs_before_run"               test_install_runs_before_run
+run_case "default_mode_happy"                    test_default_mode_happy
+run_case "default_mode_missing_script_fails"     test_default_mode_missing_script_fails
+run_case "install_cmd_without_run_cmd_fails"     test_install_cmd_without_run_cmd_fails
 run_case "help_flag"                             test_help_flag
 run_case "release_workflow_attests_image_digest" test_release_workflow_attests_image_digest
 run_case "dockerfile_runtime_is_minimal_launcher" test_dockerfile_runtime_is_minimal_launcher

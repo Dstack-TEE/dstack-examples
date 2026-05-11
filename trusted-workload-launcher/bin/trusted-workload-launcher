@@ -3,8 +3,16 @@
 # specific upstream Git commit.
 #
 # Reads one env-file config, clones the configured repo, hard-pins to the
-# requested commit SHA, runs the configured install step inside the checkout,
-# then exec()s the configured run command so signals reach the child program.
+# requested commit SHA, then hands control to the workload.
+#
+# Default mode (recommended): the workload repo ships an entry point at the
+# fixed path 'tee-launch.sh' (under REPO_SUBDIR if set, else repo root). The
+# launcher runs it with 'bash tee-launch.sh' after checkout, so no install
+# or run command is part of the launcher's trust-bearing config.
+#
+# Advanced mode: setting RUN_CMD in the config overrides the default entry
+# point with a custom command; INSTALL_CMD may optionally precede it. Use
+# this only when the workload repo cannot host its own tee-launch.sh.
 #
 # The launcher is intentionally tiny: it knows nothing about the workload it
 # runs. Its only job is to make the bytes that execute correspond exactly to
@@ -23,8 +31,8 @@ usage() {
 Usage: $PROG <config-file>
 
 The config file is a line-oriented KEY=VALUE env file. It is parsed, NOT
-sourced; the launcher does not eval untrusted config beyond the two values
-INSTALL_CMD and RUN_CMD, which are intentionally executed via 'bash -c'.
+sourced; the launcher only executes (via 'bash -c' / 'bash <script>') the
+workload's own entry point, plus optional INSTALL_CMD / RUN_CMD overrides.
 
 Required keys:
   REPO_URL       Git URL of the pinned repo (https://... or git@...).
@@ -32,17 +40,29 @@ Required keys:
                  Branches, tags, and short SHAs are rejected.
   WORK_DIR       Local directory used as the checkout. Created if missing.
                  Reused across runs if it already contains a clone of REPO_URL.
-  INSTALL_CMD    Shell command to run inside the checkout (after cd into
-                 REPO_SUBDIR if set). Pass an empty string to skip the install
-                 step; the key must still be present for explicitness.
-  RUN_CMD        Shell command to exec inside the checkout. exec() ensures the
-                 child receives signals directly.
 
 Optional keys:
-  REPO_SUBDIR    Path inside the repo to cd into before running INSTALL_CMD and
-                 RUN_CMD. Defaults to the repo root.
+  REPO_SUBDIR    Path inside the repo to cd into before running the entry
+                 point or RUN_CMD. Defaults to the repo root.
   CHILD_ENV_FILE Path to a separate KEY=VALUE env file. Each key listed there
-                 is exported into the environment of INSTALL_CMD and RUN_CMD.
+                 is exported into the environment of the entry point / RUN_CMD.
+  RUN_CMD        Advanced: shell command to exec instead of the workload's
+                 default ./tee-launch.sh. Use only when the workload repo
+                 cannot host its own entry script.
+  INSTALL_CMD    Advanced: shell command to run before RUN_CMD. Only valid
+                 together with RUN_CMD.
+
+Default mode (recommended):
+  The workload repo provides a bash script at the fixed path
+  '<REPO_SUBDIR>/tee-launch.sh' (or at the repo root if REPO_SUBDIR is unset).
+  The launcher runs it with 'bash tee-launch.sh' after checking out
+  COMMIT_SHA; no exec bit on the file is required. All install/build/run
+  logic lives in that script, so it is covered by source provenance of the
+  pinned commit and is NOT a trust-bearing field in the launcher config.
+
+Advanced mode:
+  Set RUN_CMD to override the default entry point. INSTALL_CMD is optional
+  and only allowed alongside RUN_CMD.
 
 Lines starting with '#' and blank lines are ignored. Values may be wrapped in
 matching single or double quotes; one layer of surrounding quotes is stripped.
@@ -68,8 +88,11 @@ require_tool() {
 require_tool git
 
 # Parse the config file line-by-line. We never source it, so a config cannot
-# inject arbitrary commands during parsing. INSTALL_CMD and RUN_CMD are the
-# only values that are later executed, and they go through 'bash -c'.
+# inject arbitrary commands during parsing. In default mode, the only bytes
+# the launcher executes are those of tee-launch.sh fetched at the pinned
+# COMMIT_SHA (and therefore covered by source provenance of the workload
+# repo). In advanced mode, INSTALL_CMD and RUN_CMD are executed via
+# 'bash -c'; those values are trust-bearing config and must be audited.
 parse_config() {
   local config_file=$1
   [[ -f $config_file ]] || die "config file not found: $config_file"
@@ -118,9 +141,14 @@ validate_config() {
   [[ -n $CFG_REPO_URL ]]   || die "missing required config key: REPO_URL"
   [[ -n $CFG_COMMIT_SHA ]] || die "missing required config key: COMMIT_SHA"
   [[ -n $CFG_WORK_DIR ]]   || die "missing required config key: WORK_DIR"
-  [[ $CFG_INSTALL_CMD_SET -eq 1 ]] || die "missing required config key: INSTALL_CMD (use INSTALL_CMD= to skip)"
-  [[ $CFG_RUN_CMD_SET -eq 1 ]]     || die "missing required config key: RUN_CMD"
-  [[ -n $CFG_RUN_CMD ]] || die "RUN_CMD must not be empty"
+
+  # INSTALL_CMD is only meaningful alongside RUN_CMD (advanced mode).
+  if [[ $CFG_INSTALL_CMD_SET -eq 1 && $CFG_RUN_CMD_SET -ne 1 ]]; then
+    die "INSTALL_CMD requires RUN_CMD; either set RUN_CMD too (advanced mode) or remove INSTALL_CMD and ship a tee-launch.sh in the workload repo"
+  fi
+  if [[ $CFG_RUN_CMD_SET -eq 1 && -z $CFG_RUN_CMD ]]; then
+    die "RUN_CMD must not be empty"
+  fi
 
   # Refuse anything that isn't a full commit hash. Branches, tags, and short
   # SHAs are rejected because they let upstream rewrites silently change which
@@ -211,10 +239,15 @@ main() {
   if [[ -n $CFG_REPO_SUBDIR ]]; then
     log "subdir:   $CFG_REPO_SUBDIR"
   fi
-  log "install:  ${CFG_INSTALL_CMD:-<empty, skipped>}"
-  log "run:      $CFG_RUN_CMD"
   if [[ -n $CFG_CHILD_ENV_FILE ]]; then
     log "envfile:  $CFG_CHILD_ENV_FILE"
+  fi
+  if [[ $CFG_RUN_CMD_SET -eq 1 ]]; then
+    log "mode:     advanced (RUN_CMD)"
+    [[ -n $CFG_INSTALL_CMD ]] && log "install:  $CFG_INSTALL_CMD"
+    log "run:      $CFG_RUN_CMD"
+  else
+    log "mode:     default (workload repo tee-launch.sh)"
   fi
 
   ensure_repo_at_commit
@@ -230,15 +263,22 @@ main() {
     apply_child_env "$CFG_CHILD_ENV_FILE"
   fi
 
-  if [[ -n $CFG_INSTALL_CMD ]]; then
-    log "running install in $target"
-    bash -c "$CFG_INSTALL_CMD"
-  else
-    log "INSTALL_CMD is empty; skipping install step"
+  if [[ $CFG_RUN_CMD_SET -eq 1 ]]; then
+    if [[ -n $CFG_INSTALL_CMD ]]; then
+      log "running install in $target"
+      bash -c "$CFG_INSTALL_CMD"
+    fi
+    log "exec in $target: $CFG_RUN_CMD"
+    exec bash -c "$CFG_RUN_CMD"
   fi
 
-  log "exec in $target: $CFG_RUN_CMD"
-  exec bash -c "$CFG_RUN_CMD"
+  # Default mode: the workload repo provides its own entry script. We pass it
+  # to 'bash' rather than exec it directly so the exec bit is not required;
+  # the bytes are pinned by COMMIT_SHA and covered by source provenance.
+  local entry=tee-launch.sh
+  [[ -f $entry ]] || die "default entry point '$entry' not found in $target; either add it to the workload repo at the pinned commit, or set RUN_CMD in the launcher config"
+  log "exec in $target: bash $entry"
+  exec bash "$entry"
 }
 
 main "$@"

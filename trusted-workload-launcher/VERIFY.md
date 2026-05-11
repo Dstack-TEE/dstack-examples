@@ -4,40 +4,46 @@ How a relying party verifies that a dstack CVM is running
 `trusted-workload-launcher` and that the workload commit executed inside the
 TEE is the one they audited.
 
-## Quick path (5 steps)
+## Quick path (default mode, 4 steps)
 
-For a verifier who already trusts dstack's attestation tooling, the whole
-chain comes down to:
+In default mode the workload repo provides its own `tee-launch.sh` at the
+pinned commit, so the trust-bearing config is just `REPO_URL + COMMIT_SHA`
+and the install/run command chain disappears from the verifier's checklist.
+The whole chain is:
 
 ```mermaid
 flowchart LR
-    A[dstack attestation] --> B[image digest<br/>+ compose hash]
-    B --> C[Sigstore attestation<br/>for launcher image]
-    C --> D[GitHub workflow<br/>+ repo + commit]
-    B --> E[config bytes<br/>+ COMMIT_SHA]
-    E --> F[upstream repo<br/>at COMMIT_SHA]
+    A[dstack attestation] --> B[launcher image digest<br/>+ REPO_URL<br/>+ COMMIT_SHA]
+    B --> C[Sigstore attestation<br/>for launcher image digest<br/>= dstack-examples@ref/SHA]
+    B --> D[upstream repo at COMMIT_SHA<br/>incl. tee-launch.sh]
 ```
 
-1. **Pull the dstack attestation** for the CVM with
-   `phala cvms attestation --cvm-id <id> --json`, and verify the TDX quote
-   with the dstack verifier (or trust Phala Cloud's verifier for the lite
-   path).
-2. **Read the attested compose** out of the quote. The launcher image
-   digest and the inline `configs:` block containing `REPO_URL` and
-   `COMMIT_SHA` both live there; both are covered by the dstack
-   `compose-hash` measurement.
-3. **Verify launcher image provenance.** Check the Sigstore attestation on
-   the image digest: it must be signed by the
-   `Dstack-TEE/dstack-examples` GitHub Actions workflow that produced it,
-   from a known repo, ref, and commit.
-4. **Confirm the pinned workload commit** by checking out the upstream
-   repo at `COMMIT_SHA` and reviewing it.
-5. **Spot-check runtime logs** — `phala logs --cvm-id <id>` should show
-   `HEAD verified: <COMMIT_SHA>`. Logs are corroborating only; the trust
-   root is steps 1–4.
+1. **Verify the dstack attestation.**
+   `phala cvms attestation --cvm-id <id> --json` and feed the TDX quote
+   into the dstack verifier (or trust the Phala Cloud verifier as a lite
+   path). Read out the deployed launcher image digest and the attested
+   `REPO_URL` + `COMMIT_SHA`.
+2. **Verify launcher image provenance via Sigstore.** Confirm the image
+   digest from step 1 carries a build-provenance attestation signed by
+   the expected `Dstack-TEE/dstack-examples` GitHub Actions workflow at
+   the ref / commit you audited.
+3. **Audit the upstream commit.** Check out the workload repo at
+   `COMMIT_SHA` and review it. In default mode this single review covers
+   the workload code *and* its entry point `tee-launch.sh`; no separate
+   install/run command audit is needed.
+4. **Spot-check runtime logs.** `phala logs --cvm-id <id>` should show
+   `HEAD verified: <COMMIT_SHA>` and `exec in <dir>: bash tee-launch.sh`.
+   Logs are corroborating only; the trust root is steps 1–3.
 
-If all five line up, the bytes executing in the TEE are exactly the
+If all four line up, the bytes executing in the TEE are exactly the
 upstream commit you audited, produced by an audited launcher.
+
+> **Advanced mode adds one step.** If the launcher config sets `RUN_CMD`
+> (and optionally `INSTALL_CMD`) instead of relying on `tee-launch.sh`,
+> those strings are trust-bearing config: read them from the attested
+> compose in step 1 and audit them as if they were source code at the
+> pinned commit. The simplification of the default mode is exactly that
+> this extra step does not exist.
 
 The rest of this document explains how the chain works and what to do at
 each step.
@@ -56,16 +62,18 @@ downstream image; the image digest then covers both launcher and pin.
 ```mermaid
 flowchart LR
     L[launcher image<br/>@sha256:&lt;L&gt;] --> CMP
-    P[config bytes<br/>REPO_URL<br/>COMMIT_SHA<br/>RUN_CMD] -.inline configs:.-> CMP
+    P[config bytes<br/>REPO_URL<br/>COMMIT_SHA] -.inline configs:.-> CMP
     CMP[docker-compose.yml] --> CH[compose-hash<br/>= sha256 app_compose]
     CH --> Q[dstack attestation<br/>TDX quote]
 ```
 
 The compose YAML references the generic launcher image by digest and
 provides the launcher's config via a compose `configs:` block (with
-`content:` inline). dstack measures the resulting `app_compose` JSON into
-the quote as the `compose-hash` event, so changing either the image
-reference or the config bytes changes the attestation.
+`content:` inline). In default mode the config is just `REPO_URL` +
+`COMMIT_SHA` + `WORK_DIR`; in advanced mode it also carries `RUN_CMD`
+(and optionally `INSTALL_CMD`). Either way dstack measures the resulting
+`app_compose` JSON into the quote as the `compose-hash` event, so changing
+either the image reference or the config bytes changes the attestation.
 
 This is also the surface that dstack KMS policy governs: a CVM can only
 unwrap KMS-protected secrets while running a compose whose hash matches
@@ -167,17 +175,21 @@ evidence of tampering.
 
 ### 4. Extract and audit the workload pin
 
-Parse the `configs:` content from step 2 and read `REPO_URL`,
-`COMMIT_SHA`, `INSTALL_CMD`, `RUN_CMD` (and optional `REPO_SUBDIR` /
-`CHILD_ENV_FILE`). Then:
+Parse the `configs:` content from step 2 and read `REPO_URL` and
+`COMMIT_SHA` (plus optional `REPO_SUBDIR` / `CHILD_ENV_FILE`). In default
+mode there are no `INSTALL_CMD` / `RUN_CMD` strings to audit — the entry
+point is the fixed-path `tee-launch.sh` in the workload repo, which is
+covered by source provenance of the pinned commit. In advanced mode
+(`RUN_CMD` present) also read `RUN_CMD` and any `INSTALL_CMD` and treat
+them as trust-bearing config.
 
 ```sh
 git -C <workload-checkout> rev-parse --verify <COMMIT_SHA>
 ```
 
 Confirm the upstream repo at `REPO_URL` contains `COMMIT_SHA`, and review
-the workload at that commit. This is the code that actually serves
-traffic.
+the workload at that commit, including `tee-launch.sh` in default mode.
+This is the code that actually serves traffic.
 
 ### 5. Spot-check runtime logs
 
@@ -185,16 +197,19 @@ traffic.
 phala logs --cvm-id <id> -n 200
 ```
 
-Expected:
+Default mode expected:
 
 ```
 [trusted-workload-launcher] checking out <COMMIT_SHA>
 [trusted-workload-launcher] HEAD verified: <COMMIT_SHA>
-[trusted-workload-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: <RUN_CMD>
+[trusted-workload-launcher] mode:     default (workload repo tee-launch.sh)
+[trusted-workload-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: bash tee-launch.sh
 ```
 
-These show the launcher reached the post-checkout state. They are not
-signed, so they don't replace steps 1–4 — they corroborate.
+Advanced mode shows the explicit `RUN_CMD` instead of `bash tee-launch.sh`
+on the last line. Either way these lines show the launcher reached the
+post-checkout state. They are not signed, so they don't replace
+steps 1–4 — they corroborate.
 
 A workload that needs signed runtime evidence should produce its own
 attested output (see [Limitations](#limitations)).
@@ -202,7 +217,11 @@ attested output (see [Limitations](#limitations)).
 ## Reference: production smoke transcript
 
 A real verification of this example was exercised against production
-Phala on 2026-05-11 using the recommended compose-mounted-config path:
+Phala on 2026-05-11 using the recommended compose-mounted-config path.
+The pinned upstream (`octocat/Hello-World`) does not host a
+`tee-launch.sh`, so the smoke used **advanced mode** to set `RUN_CMD`
+inline; default-mode behavior is covered by the launcher's own test
+suite. The compose-hash binding it demonstrates is identical:
 
 | Field | Value |
 | --- | --- |
