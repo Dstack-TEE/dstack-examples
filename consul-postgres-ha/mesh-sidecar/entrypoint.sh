@@ -21,9 +21,9 @@
 #                          proxy-defaults, postgres service-resolver,
 #                          and a default-allow intentions stub
 #
-# Phase-1 supervision policy: any one inner process dying takes the
-# whole container down. Compose `restart: on-failure` brings it back
-# in ~5s, well inside Patroni's 30s lock TTL.
+# Supervision policy: any one inner process dying takes the whole
+# container down. Compose `restart: on-failure` brings it back in
+# ~5s, well inside Patroni's 30s lock TTL.
 
 set -euo pipefail
 exec 2>&1
@@ -114,8 +114,8 @@ CONSUL_ARGS=(
   "${RETRYJOIN[@]}"
   -data-dir=/consul/data
   -hcl='connect { enabled = true }'
-  # Stage-1 WORKAROUND: GOSSIP_KEY is generated in Terraform and
-  # broadcast to every CVM via env. Stage-2 attestation will replace
+  # WORKAROUND: GOSSIP_KEY is generated in Terraform and broadcast
+  # to every CVM via env. Attestation-rooted admission will replace
   # this with TEE-rooted material — see design/attestation-admission.md.
   -encrypt="${GOSSIP_KEY:?GOSSIP_KEY required}"
   -log-level=INFO

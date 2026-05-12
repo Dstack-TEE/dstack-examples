@@ -333,9 +333,9 @@ format.
 - …all confidential traffic above it is **already encrypted by Envoy
   mTLS** (Layer 3), so the wire is safe even if someone could see the
   UDP datagrams.
-- **Consul gossip** is encrypted via `-encrypt` (Stage-1 workaround:
-  key generated in Terraform and broadcast via env; Stage-2
-  attestation will replace this with TEE-rooted material). RPC is
+- **Consul gossip** is encrypted via `-encrypt` (workaround: key
+  generated in Terraform and broadcast via env; attestation-rooted
+  admission will replace this with TEE-derived material). RPC is
   plaintext. Both are confined to inside the overlay, but a full
   setup would also configure TLS for RPC. See [ROBUSTNESS.md](ROBUSTNESS.md).
 

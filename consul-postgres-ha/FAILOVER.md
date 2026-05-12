@@ -1,8 +1,8 @@
-# Stage 4 — failover demo
+# Failover demo
 
 A reproducible recipe for the soft-kill leader-failover scenario, plus the
 measured timeline from a real run on the live cluster (2026-05-03).
-This demonstrates that stage 4's HA story is end-to-end working: Patroni
+This demonstrates that the HA story is end-to-end working: Patroni
 elects via Consul KV when the leader's lock expires, a replica is
 promoted, writes resume on the new leader, and the old leader rejoins
 cheaply (WAL replay + streaming, no full pg_basebackup) once it comes

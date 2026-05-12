@@ -38,8 +38,8 @@ just an Envoy sidecar.
 
 This is "shell init", not s6-overlay. If we hit real-world flap-storms
 where one inner process dying often takes the whole container down, the
-upgrade path is per-process supervision via s6 — but for phase 1 it
-doesn't pay its complexity.
+upgrade path is per-process supervision via s6 — but today it doesn't
+pay its complexity.
 
 ## Debugging
 

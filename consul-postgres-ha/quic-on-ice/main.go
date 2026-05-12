@@ -1,7 +1,8 @@
 // quic-on-ice — smoke test that proves QUIC can run over a pion/ice.Conn.
 //
 // Two processes coordinate through the same /publish + /poll signaling
-// broker the rest of stage 4 uses. They establish one ICE pair, then on
+// broker that the rest of the example uses. They establish one ICE
+// pair, then on
 // top of that single pion/ice.Conn one side runs quic-go's Listen, the
 // other Dial. We open one stream, transfer N MB of random data, hash
 // both ends, compare.

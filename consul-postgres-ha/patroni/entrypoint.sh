@@ -7,10 +7,10 @@
 # its primary_conninfo points at the local service VIP `postgres-master`,
 # which the local Envoy proxies to whoever is the current leader.
 #
-# Stage-1 WORKAROUND: superuser + replication passwords come from
+# WORKAROUND: superuser + replication passwords come from
 # Terraform-generated env (PATRONI_SUPERUSER_PW, PATRONI_REPLICATION_PW)
-# broadcast identically to every worker. Stage-2 attestation will
-# replace this with TEE-rooted material; see
+# broadcast identically to every worker. Attestation-rooted admission
+# will replace this with TEE-rooted material; see
 # design/attestation-admission.md.
 
 set -e

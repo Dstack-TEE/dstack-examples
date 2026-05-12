@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 4 — workload-aware rolling update driver.
+# Workload-aware rolling update driver.
 #
 # Until phala-cloud#243 lands `phala_app.update_policy`, the platform's
 # in-place app update touches all replicas in unspecified order. That's

@@ -138,8 +138,9 @@ type Config struct {
 }
 
 func loadConfig() *Config {
-	// Stage-4 sources of truth, with fallback to stage-1 envs so this
-	// binary is back-compatible with the older deploy shape:
+	// Primary sources of truth (with env fallback so this binary
+	// stays runnable in a bare-metal smoke test outside the dstack
+	// runtime):
 	//
 	//   - SELF identity comes from /run/instance/info.json written by
 	//     the bootstrap-secrets init container (which read it from the
@@ -150,7 +151,7 @@ func loadConfig() *Config {
 	//   - PEERS_JSON still comes via env — cluster.tf computes it from
 	//     the `replicas` count and re-applies on topology change,
 	//     which propagates to every CVM via Phala's in-place compose
-	//     update path (verified in disk-persistence shakedown).
+	//     update path.
 
 	cfg := &Config{
 		SelfID:       readSelfID(),
@@ -167,8 +168,9 @@ func loadConfig() *Config {
 	return cfg
 }
 
-// readSelfID prefers /run/instance/info.json (stage-4) over PEER_ID env
-// (stage-1 compat). The JSON is written by bootstrap-secrets and gives
+// readSelfID prefers /run/instance/info.json over PEER_ID env (the
+// env path is kept so this binary stays runnable in a bare-metal
+// smoke test). The JSON is written by bootstrap-secrets and gives
 // us a per-CVM identifier rooted in the platform.
 func readSelfID() string {
 	if b, err := os.ReadFile("/run/instance/info.json"); err == nil {
@@ -193,8 +195,8 @@ func readSelfID() string {
 //      coordinator path). When this is present it MUST win, because
 //      the local TEE-derived value won't match what coturn is checking
 //      against.
-//   2. /run/secrets/turn (stage-4 TEE-derived path; matches the
-//      embedded coordinator's coturn which reads the same file).
+//   2. /run/secrets/turn (TEE-derived path; matches the embedded
+//      coordinator's coturn which reads the same file).
 //
 // Order matters: env beats file so that "use external coturn" can be
 // configured purely at the cluster.tf layer.
@@ -1122,7 +1124,7 @@ func turnCreds(secret string, ttl time.Duration) (string, string) {
 }
 
 // =============================================================================
-// signaling — same wire format as phase-0/icetest
+// signaling — wire format shared with the coordinator's broker
 // =============================================================================
 
 type Message struct {

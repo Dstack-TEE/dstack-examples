@@ -40,8 +40,8 @@ services:
       - SIGNALING_URL=${SIGNALING_URL}
       - TURN_HOST=${TURN_HOST}
       - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
-      # Stage-1 WORKAROUND: gossip key generated in Terraform and
-      # broadcast identically to every CVM. See cluster.tf.
+      # WORKAROUND: gossip key generated in Terraform and broadcast
+      # identically to every CVM. See cluster.tf.
       - GOSSIP_KEY=${GOSSIP_KEY}
       # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay
       # candidates, routing all peer traffic through the coturn server.
@@ -71,8 +71,8 @@ services:
     # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
     # must use the same value to land in the same cluster. Postgres
     # binds the canonical 127.0.0.1:5432; Patroni REST on 127.0.0.1:8008.
-    # Stage-1 WORKAROUND: superuser + replication passwords generated
-    # in Terraform and broadcast identically to every worker. See
+    # WORKAROUND: superuser + replication passwords generated in
+    # Terraform and broadcast identically to every worker. See
     # cluster.tf.
     environment:
       - CLUSTER_NAME=${CLUSTER_NAME}

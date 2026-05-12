@@ -27,7 +27,7 @@ peers' ICE candidates; no data ever passes through it once peers
 connect. Per-CVM and per-cluster secrets are split: the TURN HMAC is
 derived per-CVM from dstack KMS, while cluster-wide-identical
 material (gossip key, Patroni passwords) is generated in Terraform
-and broadcast via env until Stage-2 attestation-admission lands.
+and broadcast via env until attestation-rooted admission lands.
 Connect CA uses Consul's built-in CA provider — root in Raft, no
 external derivation needed.
 
@@ -142,11 +142,11 @@ and the Terraform structure as-is.
   admission credential is the next architectural step.
 * The cluster's gossip key, Patroni superuser password, and
   replication password are **generated in Terraform and broadcast
-  via env to every CVM**. This is a Stage-1 workaround — those
-  bytes live in `terraform.tfstate` and pass through whoever runs
-  `apply`. Stage-2 attestation-admission
+  via env to every CVM** — a workaround, because those bytes live
+  in `terraform.tfstate` and pass through whoever runs `apply`. The
+  attestation-rooted admission design
   ([`design/attestation-admission.md`](design/attestation-admission.md))
-  replaces this with TEE-rooted material that no human ever sees.
+  replaces this with TEE-derived material that no human ever sees.
 
 ## Filed upstream
 

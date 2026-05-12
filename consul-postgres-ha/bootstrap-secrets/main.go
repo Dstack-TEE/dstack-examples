@@ -1,4 +1,4 @@
-// bootstrap-secrets — stage 4 init container.
+// bootstrap-secrets — init container.
 //
 // One-shot. Runs to completion before any other service starts on a CVM.
 // Responsibilities:
@@ -28,9 +28,8 @@
 //      `condition: service_completed_successfully` can release the
 //      next services.
 //
-// The keystone of the stage-4 design is here: this is the only piece
-// that holds plaintext secret material, and it does so entirely
-// inside the TEE. The deploy host never sees them.
+// This is the only piece that holds plaintext secret material, and
+// it does so entirely inside the TEE. The deploy host never sees them.
 
 package main
 
@@ -71,14 +70,14 @@ func main() {
 
 	// 2. Derive per-app secrets via dstack KMS.
 	//
-	// Stage-1 WORKAROUND scope note: gossip key, Patroni superuser
-	// password, and Patroni replication password are NOT derived
-	// here — they would be different bytes on every CVM (each CVM
-	// is its own phala_app with its own app_id, and GetKey is rooted
-	// at app_id), so per-CVM derivation can't produce the
-	// cluster-wide identical material those consumers need. They
-	// come from Terraform-generated env instead. See cluster.tf and
-	// design/attestation-admission.md for the Stage-2 fix.
+	// WORKAROUND scope note: gossip key, Patroni superuser password,
+	// and Patroni replication password are NOT derived here — they
+	// would be different bytes on every CVM (each CVM is its own
+	// phala_app with its own app_id, and GetKey is rooted at app_id),
+	// so per-CVM derivation can't produce the cluster-wide identical
+	// material those consumers need. They come from Terraform-
+	// generated env instead. See cluster.tf and
+	// design/attestation-admission.md for the principled fix.
 	//
 	// What's still derived here is intentionally narrow:
 	//   turn:    handed to mesh-conn for coturn auth (the actual
@@ -216,7 +215,7 @@ func mustEnv(k string) string {
 // First match wins. Returns the slot index. Slot ownership is
 // permanent for the InstanceID's lifetime; cleanup of stale slots
 // (when an instance is permanently retired) is a separate operator
-// task — note in stage-4 README.
+// task — see the example README.
 func claimOrdinal(cfg *Config, instanceID string) (int, error) {
 	if cfg.ConsulHTTPAddr == "" {
 		return 0, fmt.Errorf("CONSUL_HTTP_ADDR required for non-coordinator role")

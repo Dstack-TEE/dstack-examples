@@ -51,7 +51,7 @@ ours, they're the parts that *must* be made robust by hand.
 | Coordinator host dies             | New peers can't bootstrap. **Existing ICE pairs keep working** (no data flows through this box once handshake is done). New retries from existing peers fail until it's back. | bring it back; peers reconnect on their own. |
 | Coordinator ufw / network change  | Same as above.                                                       | restore ports 3478/udp+tcp, 5349/tcp, 7000/tcp, 49152-49999/udp. |
 | TURN shared secret leaks          | Anyone can use the box as an open TURN relay (cost / abuse risk).    | rotate `TURN_SHARED_SECRET` in coordinator + every CVM env, redeploy. |
-| Signalling broker is unauthenticated | Any external actor can publish/poll messages, spoof candidates, intercept ICE handshakes. Currently low-impact only because we're solo. | gate `/publish` + `/poll` on attestation-derived identity (Stage 4 work). |
+| Signalling broker is unauthenticated | Any external actor can publish/poll messages, spoof candidates, intercept ICE handshakes. Currently low-impact only because we're solo. | gate `/publish` + `/poll` on attestation-derived identity. |
 | dstack provider NAT changes type (e.g. cone → symmetric) | ICE picks TURN relay path. ~150 ms RTT instead of ~6 ms. **Functionality unchanged.** | none needed; coturn covers this fallback. |
 | Underlying CVM dies               | That peer's services drop out. Consul will mark it `failed` after gossip timeout, Envoy LB removes it within seconds. | redeploy; the rest of the cluster is unaffected. |
 
@@ -200,7 +200,7 @@ The mitigations are mostly testing discipline:
 | Envoy sidecar dies               | All in-flight mTLS connections through it drop. App's calls to `127.0.0.1:19000` get connection refused. | container restart. ~5 s downtime per peer. |
 | Connect CA root expiry           | All sidecar leaf certs go invalid; whole mesh stops. | `consul connect ca set-config` to rotate root, or default 5-year root won't bite us in this experiment. |
 | Connect intention misconfigured (e.g. accidental deny) | Some traffic blocked silently. Sidecar denies are reported as `RBAC: access denied` in Envoy logs. | rotate intention; xDS picks it up in seconds (already demoed). |
-| **RPC TLS not set** | RPC is plaintext on the overlay. Threat is bounded by the QUIC overlay below it (peer ⇄ peer end-to-end encrypted), so on-the-wire taps don't see it; in-CVM containers that bind `127.0.0.1` to the agent's RPC port would. | Stage-2 work: derive a small CA from attestation-rooted material and configure Consul TLS using it. |
+| **RPC TLS not set** | RPC is plaintext on the overlay. Threat is bounded by the QUIC overlay below it (peer ⇄ peer end-to-end encrypted), so on-the-wire taps don't see it; in-CVM containers that bind `127.0.0.1` to the agent's RPC port would. | Derive a small CA from attestation-rooted material and configure Consul TLS using it — design lives in `design/attestation-admission.md`. |
 | ttl.sh image expiry | After 24h, a CVM restart can't pull our images. New deploys silently fail to pull. | move to a real registry (GHCR, Phala internal, local registry on the public box). |
 
 ### Risk shape
@@ -232,13 +232,13 @@ depth.
 - **Real registry** — Sigstore-attested GHCR images via
   `.github/workflows/consul-postgres-ha-publish.yml`. See
   `PUBLISHING.md`.
-- **Gossip key wired in (Stage-1 workaround)** — `cluster.tf`
+- **Gossip key wired in (workaround)** — `cluster.tf`
   generates a `random_bytes` and broadcasts it to every CVM via
   env; `mesh-sidecar/entrypoint.sh` passes it as
   `consul agent -encrypt=…`. Same shape used for the Patroni
   superuser + replication passwords. The keys live in
   `terraform.tfstate`; eliminating that exposure is part of the
-  Stage-2 attestation-admission work
+  attestation-admission work
   (`design/attestation-admission.md`).
 
 ## Cross-layer concerns
@@ -312,7 +312,7 @@ are the next plateau.
 
 The deeper open question — **anyone with `terraform.tfstate` can
 read the cluster's gossip key and Patroni passwords** — is
-deliberately deferred to Stage 2 (attestation admission), where
+deliberately deferred to the attestation-admission work, where
 peers prove TEE residency and shared cluster material is rooted
 in attestation rather than handed in by the deployer.
 
@@ -328,9 +328,9 @@ in attestation rather than handed in by the deployer.
 - **Real registry** — Sigstore-attested GHCR images via
   `.github/workflows/consul-postgres-ha-publish.yml`.
 - **Gossip key + Patroni passwords are now cluster-wide identical
-  (Stage-1 workaround)** — generated in Terraform and broadcast
-  to every phala_app via env. Stage-2 attestation will replace
-  this with TEE-rooted material.
+  (workaround)** — generated in Terraform and broadcast to every
+  phala_app via env. Attestation-rooted admission will replace
+  this with TEE-derived material.
 
 ## "Are we playing too many tricks?"
 

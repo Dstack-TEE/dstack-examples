@@ -1,9 +1,10 @@
 # Runs on the user-provided public-IP host (NOT a dstack CVM).
-# Provides STUN/TURN for ICE traversal and (for Phase 0) a tiny signaling
-# broker so the two test CVMs can swap ICE candidates.
+# Provides STUN/TURN for ICE traversal and a tiny signaling broker so
+# CVMs can swap ICE candidates during mesh-conn bootstrap.
 #
-# Image tags are deliberately unpinned during Phase 0 iteration; pin to
-# sha256 digests before stage-1 deploy.
+# Image tags pin to `:latest` from GHCR for clarity here; pin to
+# `:sha-<full-sha>` (or a digest) for production deploys — see
+# PUBLISHING.md.
 
 services:
   coturn:
@@ -26,11 +27,8 @@ services:
       - --fingerprint
 
   signaling:
-    image: golang:1.22-alpine
+    image: ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-signaling:latest
     restart: unless-stopped
-    working_dir: /src
-    volumes:
-      - ../phase0/icetest:/src
-    command: ["sh", "-c", "cd /src && go mod download && go run . -mode=signaling -addr=:7000"]
+    command: ["-mode=signaling", "-addr=:7000"]
     ports:
       - "7000:7000"

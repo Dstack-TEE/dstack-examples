@@ -1,4 +1,4 @@
-// Phase-0 ICE feasibility test.
+// ICE signalling broker + connectivity smoke test.
 //
 // Single binary with two modes:
 //   - signaling: tiny HTTP broker that ferries ICE candidates + ufrag/pwd
@@ -7,9 +7,11 @@
 //     candidates via signaling, establishes connectivity, sends echo
 //     packets, and prints which candidate pair won + RTT samples.
 //
-// The point: confirm whether a dstack CVM can hole-punch UDP to another
-// dstack CVM (best case: srflx<->srflx), or whether ICE is forced onto
-// the relay path (TURN) by dstack's network model.
+// The peer mode is a connectivity smoke test — it confirms whether a
+// dstack CVM can hole-punch UDP to another dstack CVM (best case:
+// srflx<->srflx), or whether ICE is forced onto the relay path (TURN)
+// by dstack's network model. mesh-conn uses this same broker as its
+// rendezvous in production.
 
 package main
 
@@ -393,7 +395,7 @@ func publish(signalingURL, from, to, typ, data string) {
 
 func makeTurnCreds(secret string, ttl time.Duration) (string, string) {
 	exp := time.Now().Add(ttl).Unix()
-	user := fmt.Sprintf("%d:phase0", exp)
+	user := fmt.Sprintf("%d:icetest", exp)
 	h := hmac.New(sha1.New, []byte(secret))
 	h.Write([]byte(user))
 	pass := base64.StdEncoding.EncodeToString(h.Sum(nil))

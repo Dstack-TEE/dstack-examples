@@ -1,6 +1,6 @@
-# Stage 4 — image publishing & verification
+# Image publishing & verification
 
-The stage-4 example needs four container images deployed in lockstep:
+This example needs four container images deployed in lockstep:
 `mesh-sidecar`, `patroni`, `webdemo`, `signaling`. CI publishes them to
 GHCR with Sigstore-backed GitHub Build Provenance; consumers pin by
 tag (or, better, by digest) and verify provenance with

@@ -22,7 +22,7 @@ anywhere. A peer running a **rolled-back or compromised image** can
 rejoin too — nobody asks "what are you running?" before admitting
 the connection. That's a meaningful gap for a TEE-rooted system.
 
-### Stage-1 workaround that this work replaces
+### Workaround that this work replaces
 
 Because each `phala_app` resource has its own `app_id` and dstack
 `GetKey` is rooted at `app_id`, per-CVM derivation produces

@@ -31,7 +31,7 @@ terraform {
 
 provider "phala" {}
 
-# ---------- Cluster-wide shared secrets (Stage-1 WORKAROUND) ----------
+# ---------- Cluster-wide shared secrets (WORKAROUND) ----------
 #
 # These three secrets MUST be byte-identical across every CVM that
 # joins the cluster (gossip auth, Patroni replication, Patroni superuser).
@@ -41,11 +41,12 @@ provider "phala" {}
 # phala_app.coordinator/worker) and dstack's GetKey() is rooted at
 # app_id, so per-CVM derivation produces DIFFERENT bytes on each peer.
 #
-# Until Stage-2 attestation-rooted admission lands (see
+# Until attestation-rooted admission lands (see
 # `consul-postgres-ha/design/attestation-admission.md`), we generate
 # them in Terraform and hand the same bytes to every phala_app via
 # env. Trade-off accepted: anyone with read access to terraform.tfstate
-# (or the apply host's memory) sees plaintext keys. Stage 2 closes this.
+# (or the apply host's memory) sees plaintext keys. The attestation
+# work closes this.
 #
 # Connect CA root is NOT in this list — Consul's built-in CA provider
 # generates the root in Raft on first quorum, no external derivation
@@ -193,7 +194,7 @@ resource "phala_app" "coordinator" {
     TURN_HOST           = var.external_coordinator_host
     TURN_SHARED_SECRET  = var.external_turn_secret
     MESH_SIDECAR_IMAGE  = var.mesh_sidecar_image
-    # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
+    # WORKAROUND — see `random_bytes` block at top of file.
     GOSSIP_KEY           = random_bytes.gossip_key.base64
     MESH_CONN_RELAY_ONLY = var.mesh_conn_relay_only
     MESH_CONN_DEBUG_ICE  = var.mesh_conn_debug_ice
@@ -237,7 +238,7 @@ resource "phala_app" "worker" {
     MESH_SIDECAR_IMAGE = var.mesh_sidecar_image
     WEBDEMO_IMAGE      = var.webdemo_image
     PATRONI_IMAGE      = var.patroni_image
-    # Stage-1 WORKAROUND — see `random_bytes` block at top of file.
+    # WORKAROUND — see `random_bytes` block at top of file.
     GOSSIP_KEY             = random_bytes.gossip_key.base64
     PATRONI_SUPERUSER_PW   = random_bytes.patroni_superuser_pw.hex
     PATRONI_REPLICATION_PW = random_bytes.patroni_replication_pw.hex
