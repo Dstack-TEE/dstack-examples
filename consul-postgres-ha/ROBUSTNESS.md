@@ -97,80 +97,13 @@ whose direct path goes down can't fail over to TURN until it's back".
 | Resource exhaustion (many TCP streams) | QUIC per-session limits kick in (256 streams default); new TCP streams to that peer fail. UDP and existing TCP unaffected. | bump `AcceptBacklog` / `MaxIncomingStreams` if it ever hits us at scale. |
 | Head-of-line blocking | A big TCP write on one stream briefly delays a UDP datagram or another TCP stream. Imperceptible at Consul scale. | None needed today. If a future workload becomes jitter-sensitive, split into two ICE conns per pair (UDP-only + TCP-only). |
 
-### The ICE auth-race convergence bug — the one real open issue
-
-`dialICE` both publishes its local auth (ufrag+pwd) via the signalling
-broker and waits on the remote auth from the broker. On a peer
-restart or fresh bring-up, both sides republish in close succession.
-mesh-conn's protection against consuming a stale auth is to compare
-the most-recently-seen remote auth against the one it's currently
-dialing against; if a fresher auth arrives mid-dial, the in-flight
-attempt is cancelled and `runPeerLink` retries after 5 s.
-
-What goes wrong is that **both peers do this symmetrically**:
-
-```
-peer-A consumed=X publishes auth Y → dials with peer-B's X
-peer-B sees A's Y, supersedes its X-bound dial, publishes new auth Z
-peer-A sees B's Z, supersedes its Y-bound dial
-peer-B sees A's next auth, supersedes again
-…
-```
-
-The 5 s back-off doesn't break the symmetry, so the loop never
-converges. Observed in live testing on 2026-05-13: multiple worker↔
-coordinator and worker↔worker pairs flapping for 7+ minutes without
-stabilizing, even with `MESH_CONN_RELAY_ONLY=1` set (so it's not a
-NAT-direct-path issue). Per-peer log signature:
-
-```
-[<peer>] ice state: Checking
-[<peer>] fresh auth (ufrag=Y) supersedes consumed (ufrag=X) — aborting attempt
-[<peer>] link failed: ice: connecting canceled by caller — retrying in 5s
-[<peer>] ice state: Closed
-```
-
-The previous commit message acknowledged this: `cc5a12d fix(consul-
-postgres-ha): partial — cancel in-flight ICE dial on fresher peer
-auth`. The cancellation logic is correct; the convergence isn't.
-
-Practical impact: when this happens, the affected peer pair never
-forms a working link, which means the Consul agent on one side
-can't reach the server tier (Raft RPC on `:8300`), Envoy can't fetch
-its xDS config, and any cross-peer Connect call through that pair
-fails. Patroni leader election still works (Consul KV is on the
-working pairs), but replica `pg_basebackup` fails because the
-replica's local Envoy has no endpoint for `postgres-master`.
-
-**Possible fix shapes**:
-
-- **Asymmetric back-off keyed on peer ID lexicographic order.** The
-  side with the *higher* peer-id waits 5 s before redialing; the
-  *lower* side dials immediately. Breaks the symmetry; one side
-  always wins the auth race within one cycle.
-- **Don't supersede if the new auth came from a poll happening
-  during the in-flight dial.** Today's logic supersedes on any newer
-  auth; a tighter rule would only supersede if the auth changed for
-  a reason other than "the remote peer also just restarted." Harder
-  to define; the asymmetric back-off is simpler.
-- **A "settling" window after publishing auth.** Don't act on a
-  remote auth that arrives in the first ~1 s after we publish ours;
-  the remote is probably reacting to our publish, not to a peer
-  restart we should respect.
-
-The first of these is the cheapest experiment. Needs a focused
-mesh-conn debugging session with `MESH_CONN_DEBUG_ICE=1` traces from
-a fresh repro, looking at which side initiates each supersession.
-
 ### Recommended fixes
 
-1. **The ICE auth-race convergence bug above** — top priority. Blocks
-   end-to-end live verification of every recent refactor.
-2. **Set a QUIC read deadline on the UDP-stream pumps**, so if a
+1. **Set a QUIC read deadline on the UDP-stream pumps**, so if a
    stream silently stalls (QUIC keep-alive happens at session
    level, not stream level), the pump returns and `runPeerLink`
    restarts.
-3. **Tune QUIC `MaxStreamWindowSize`** if we ever need higher
+2. **Tune QUIC `MaxStreamWindowSize`** if we ever need higher
    throughput; default is 256 KB which is fine for now.
 
 ### Already shipped
@@ -185,6 +118,39 @@ a fresh repro, looking at which side initiates each supersession.
   bounce. Verified by inspection of `mesh-conn/main.go:817-822` and
   `:1006-1016`; the original bug described in earlier revisions of
   this doc is closed.
+
+- **ICE auth-race convergence.** When two peers handshake in near-
+  simultaneous restart (the normal startup case on a fresh cluster
+  or after a redeploy), the supersession check in `pollLoop` —
+  "fresh peer auth aborts the in-flight dial against a now-stale
+  consumed value" — used to fire symmetrically on both sides, and
+  every aborted attempt's retry rebuilt the `ice.Agent` (mandatory
+  because pion's `Restart()` doesn't support re-`Dial`; see
+  `peerSession` docstring), which republished a fresh auth, which
+  re-superseded the peer's next attempt, ad infinitum. Observed on
+  2026-05-13 as worker↔coordinator and worker↔worker pairs flapping
+  for 7+ minutes per pair, blocking Patroni replica `pg_basebackup`
+  (replicas' local Envoys had no endpoint for `postgres-master`).
+
+  Fixed with two coupled changes in `runPeerLink` and `pollLoop`:
+  asymmetric retry back-off (lex-smaller peer waits 2 s, larger
+  waits 5 s — see `retryBackoff` in `mesh-conn/main.go`) and a
+  3-second grace window on the supersession check (`supersedeGrace`)
+  so an in-flight handshake gets a fair chance to converge before a
+  peer-side credential roll can abort it. The pair composes: the
+  back-off asymmetry guarantees one side's retry is the
+  authoritative auth publisher per cycle; the grace window absorbs
+  early-race noise that otherwise re-enters the supersede loop
+  before either retry can settle.
+
+  Regression net: `mesh-conn/main_test.go::TestAuthRaceConvergence`
+  is a deterministic in-process loopback harness that forges a
+  fresh-auth from the peer while a real handshake is in flight.
+  Before the fix, the test fails 32/33 of 33 trials (the survivor
+  was a "link came up before forge arrived" race in the original
+  single-shot variant). After the fix it passes 50/50 with the
+  sustained-forge variant gated on the `onAttemptStarted` hook,
+  which guarantees the forge lands inside the in-flight window.
 
 ## Layer 2 — mesh-conn forwarder
 
@@ -228,17 +194,21 @@ The mitigations are mostly testing discipline:
 
 ### Recommended fixes
 
-1. **Add a loopback integration test** that runs mesh-conn ↔
-   mesh-conn locally with a real signalling broker on `127.0.0.1`.
-   Catches protocol-level regressions (3-byte header, port plan)
-   without burning CVMs. The unit tests in `validate_test.go` cover
-   config-time bugs but not the wire format.
-2. **Periodic metrics** — counters for streams open/closed, bytes
+1. **Periodic metrics** — counters for streams open/closed, bytes
    in/out per port. A `/metrics` endpoint or even just stderr every
    30 s.
 
 ### Already shipped
 
+- **Loopback integration test for mesh-conn** — `mesh-conn/main_test.go`
+  boots two `Mesh` instances against an inlined `/publish` + `/poll`
+  broker on `httptest.NewServer`, drives a real pion/ice handshake on
+  host loopback candidates, and asserts `link up` within a 30 s
+  deadline. Three cases: green-path single handshake, the auth-race
+  regression test (forges fresh peer auth mid-handshake), and a real
+  Mesh-restart convergence test. Catches both the auth-race
+  convergence regression and any future protocol-level break in the
+  3-byte stream header or per-port plumbing.
 - **PEERS_JSON validation at startup** — `validatePeers()` in
   `mesh-conn/main.go` runs before any goroutine starts and fails
   fast on duplicate IDs, missing self, VIP collisions, or
@@ -367,15 +337,12 @@ In order of worst-impact-per-fix-cost:
 
 1. **Two coordinators** + signed signalling messages (Layer 0).
    Removes the new-join SPOF and closes the metadata-spoof gap.
-2. **Local loopback integration test for mesh-conn** (Layer 2).
-   Unit tests cover the config layer; the wire protocol still has
-   no regression net.
-3. **Periodic metrics on mesh-conn** (Layer 2). Cheap, dramatic
+2. **Periodic metrics on mesh-conn** (Layer 2). Cheap, dramatic
    improvement in operability.
 
 Item 1 is what stands between "fun experiment that demos
-correctly" and "leave it running and forget about it"; items 2–3
-are the next plateau.
+correctly" and "leave it running and forget about it"; item 2 is
+the next plateau.
 
 The deeper open question — **anyone with `terraform.tfstate` can
 read the cluster's gossip key and Patroni passwords** — is
@@ -385,6 +352,9 @@ in attestation rather than handed in by the deployer.
 
 ### Closed since the previous revision
 
+- **ICE auth-race convergence flap** — fixed via asymmetric retry
+  back-off + 3 s grace window on the supersession check. See Layer 1
+  "Already shipped" for the failure analysis and the regression test.
 - **Auth-channel reconnect deadlock** — fixed via fresh
   `peerSession{}` per `dialICE` + drain-then-push on `authCh`.
 - **Three-server Consul** — coordinator deploys with

@@ -12,7 +12,6 @@ in their face.
 
 | Doc | What |
 |---|---|
-| [`ice-auth-race-convergence.md`](ice-auth-race-convergence.md) | mesh-conn's "fresh auth supersedes consumed" cancellation is symmetric — both peers cancel each other indefinitely on near-simultaneous restart, blocking live verification of every recent refactor. Bundles a loopback regression test (the prerequisite for any confidence) with the convergence fix. |
 | [`attestation-admission.md`](attestation-admission.md) | Use dstack TEE attestation as the mesh-conn admission credential, replacing/augmenting the shared TURN HMAC. Phased plan: per-app-id first, Consul-KV-rooted policy later. |
 
 Each doc includes:
