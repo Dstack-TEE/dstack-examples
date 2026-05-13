@@ -375,25 +375,56 @@ func mustEnv(k string) string {
 func main() {
 	flag.Parse()
 	cfg := loadConfig()
-	self := cfg.peerByID(cfg.SelfID)
+	m := newMesh(cfg)
+	m.Run(context.Background())
+}
 
-	others := make([]Peer, 0, len(cfg.Peers)-1)
-	for _, p := range cfg.Peers {
-		if p.ID != cfg.SelfID {
+// Mesh is one runtime instance — one mesh-conn process. Owns the
+// per-peer session registry, signalling URL, and shutdown plumbing.
+// Methods that previously closed over the package-level `sessions`
+// map now receive *Mesh; main() builds one and calls Run().
+//
+// Reason for instance-scoping: the in-process loopback test boots two
+// Mesh values side by side; a package-global session map collides
+// across instances.
+type Mesh struct {
+	cfg  *Config
+	self *Peer
+
+	sessionsMu sync.Mutex
+	sessions   map[string]*peerSession
+
+	// onLinkUp is an optional test hook fired right after each
+	// per-peer "link up" log line. nil in production.
+	onLinkUp func(peerID string)
+}
+
+func newMesh(cfg *Config) *Mesh {
+	return &Mesh{
+		cfg:      cfg,
+		self:     cfg.peerByID(cfg.SelfID),
+		sessions: map[string]*peerSession{},
+	}
+}
+
+func (m *Mesh) Run(ctx context.Context) {
+	others := make([]Peer, 0, len(m.cfg.Peers)-1)
+	for _, p := range m.cfg.Peers {
+		if p.ID != m.cfg.SelfID {
 			others = append(others, p)
 		}
 	}
 	log.Printf("mesh-conn: self=%s vip=%d allowlist=%v other=%d",
-		cfg.SelfID, self.Vip, allowlistPorts(cfg.Allowlist), len(others))
+		m.cfg.SelfID, m.self.Vip, allowlistPorts(m.cfg.Allowlist), len(others))
 
-	go pollLoop(cfg)
+	go m.pollLoop(ctx)
 
 	var wg sync.WaitGroup
 	for _, p := range others {
 		wg.Add(1)
 		go func(p Peer) {
 			defer wg.Done()
-			runPeerLink(cfg, *self, p)
+			m.runPeerLink(ctx, p)
 		}(p)
 	}
 	wg.Wait()
@@ -404,21 +435,40 @@ func main() {
 // per-peer link: ICE conn + bound UDP socket on peer's identity port
 // =============================================================================
 
-func runPeerLink(cfg *Config, self, peer Peer) {
+func (m *Mesh) runPeerLink(ctx context.Context, peer Peer) {
 	// One peerSession per peer for the lifetime of mesh-conn. The
 	// session holds authCh + candidateBuffer + abortAttempt — the
 	// stable wiring pollLoop dispatches through. The ICE agent itself
 	// is rebuilt per attempt inside dialICE (pion's Restart() doesn't
 	// support re-Dial; see peerSession docstring).
-	sess := setupPeerSession(peer.ID)
+	sess := m.setupPeerSession(peer.ID)
 	for {
-		if err := dialAndPump(cfg, self, peer, sess); err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		if err := m.dialAndPump(ctx, peer, sess); err != nil {
 			log.Printf("[%s] link failed: %v — retrying in 5s", peer.ID, err)
-			time.Sleep(5 * time.Second)
+			if !sleepCtx(ctx, 5*time.Second) {
+				return
+			}
 			continue
 		}
 		// dialAndPump returns nil only when the conn closed cleanly.
 		log.Printf("[%s] link closed — reconnecting", peer.ID)
+	}
+}
+
+// sleepCtx sleeps for d or until ctx is cancelled. Returns true if
+// the full sleep completed (so the caller should continue), false if
+// the caller should bail.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -449,12 +499,16 @@ func quicConfig() *quic.Config {
 	}
 }
 
-func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
+func (m *Mesh) dialAndPump(parentCtx context.Context, peer Peer, sess *peerSession) error {
+	cfg := m.cfg
+	self := *m.self
 	// One attemptCtx for the entire attempt — covers dialICE, QUIC dial,
 	// and the long-running pump goroutines. pollLoop and the ICE state
 	// callback both wire abortAttempt to this ctx; cancelling it makes
 	// the whole pile collapse so runPeerLink's 5s retry can re-enter.
-	attemptCtx, abort := context.WithCancel(context.Background())
+	// parentCtx (from Mesh.Run) is the outer shutdown signal; cancelling
+	// it also collapses the attempt.
+	attemptCtx, abort := context.WithCancel(parentCtx)
 	sess.mu.Lock()
 	sess.consumedAuth = [2]string{}
 	sess.abortAttempt = abort
@@ -471,7 +525,7 @@ func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
 	}()
 
 	// 1. Establish ICE + wrap with a counting conn for byte-level telemetry.
-	rawConn, err := dialICE(cfg, peer.ID, sess, attemptCtx)
+	rawConn, err := m.dialICE(peer.ID, sess, attemptCtx)
 	if err != nil {
 		return fmt.Errorf("ice: %w", err)
 	}
@@ -596,6 +650,9 @@ func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
 
 	log.Printf("[%s] link up — peer vip=127.50.0.%d, allowlist=%v (udp=%d, tcp=%d)",
 		peer.ID, peer.Vip, allowlistPorts(cfg.Allowlist), udpPortCount, len(tcpListeners))
+	if m.onLinkUp != nil {
+		m.onLinkUp(peer.ID)
+	}
 
 	// 5. Start pumps. UDP: one bidirectional pump pair per UDP port.
 	//    TCP: one accept-loop per port (each accepted conn opens an
@@ -959,35 +1016,31 @@ type peerSession struct {
 	candidateBuffer []ice.Candidate    // remote candidates seen since last peer-auth; replayed into each new agent
 }
 
-var (
-	sessionsMu sync.Mutex
-	sessions   = map[string]*peerSession{} // key = remote peer id
-)
-
 // currentSession returns the persistent session for remoteID, or nil
 // if setupPeerSession hasn't installed it yet. Used by pollLoop to
 // dispatch incoming messages to the right agent.
-func currentSession(remoteID string) *peerSession {
-	sessionsMu.Lock()
-	defer sessionsMu.Unlock()
-	return sessions[remoteID]
+func (m *Mesh) currentSession(remoteID string) *peerSession {
+	m.sessionsMu.Lock()
+	defer m.sessionsMu.Unlock()
+	return m.sessions[remoteID]
 }
 
 // setupPeerSession allocates the long-lived session shell (authCh,
 // candidateBuffer, mutex) for one peer. The ICE agent itself is built
 // per-attempt inside dialICE — see the peerSession docstring for why
 // per-attempt rather than persistent.
-func setupPeerSession(remoteID string) *peerSession {
+func (m *Mesh) setupPeerSession(remoteID string) *peerSession {
 	sess := &peerSession{
 		authCh: make(chan [2]string, 1),
 	}
-	sessionsMu.Lock()
-	sessions[remoteID] = sess
-	sessionsMu.Unlock()
+	m.sessionsMu.Lock()
+	m.sessions[remoteID] = sess
+	m.sessionsMu.Unlock()
 	return sess
 }
 
-func dialICE(cfg *Config, remoteID string, sess *peerSession, attemptCtx context.Context) (*ice.Conn, error) {
+func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Context) (*ice.Conn, error) {
+	cfg := m.cfg
 	var urls []*stun.URI
 	if cfg.TurnHost != "" {
 		user, pass := turnCreds(cfg.TurnSecret, time.Hour)
@@ -1181,24 +1234,40 @@ func publish(cfg *Config, to, typ, data string) {
 	resp.Body.Close()
 }
 
-func pollLoop(cfg *Config) {
+func (m *Mesh) pollLoop(ctx context.Context) {
+	cfg := m.cfg
+	client := &http.Client{}
 	for {
-		resp, err := http.Get(cfg.SignalingURL + "/poll?peer=" + url.QueryEscape(cfg.SelfID))
+		if ctx.Err() != nil {
+			return
+		}
+		req, _ := http.NewRequestWithContext(ctx,
+			http.MethodGet,
+			cfg.SignalingURL+"/poll?peer="+url.QueryEscape(cfg.SelfID),
+			nil)
+		resp, err := client.Do(req)
 		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
 			log.Printf("poll err: %v", err)
-			time.Sleep(time.Second)
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
 			continue
 		}
 		var msgs []Message
 		if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
 			log.Printf("poll decode: %v", err)
 			resp.Body.Close()
-			time.Sleep(time.Second)
+			if !sleepCtx(ctx, time.Second) {
+				return
+			}
 			continue
 		}
 		resp.Body.Close()
-		for _, m := range msgs {
-			sess := currentSession(m.From)
+		for _, msg := range msgs {
+			sess := m.currentSession(msg.From)
 			if sess == nil {
 				// setupPeerSession hasn't installed this remote yet;
 				// drop. runPeerLink installs all peer sessions at
@@ -1206,11 +1275,11 @@ func pollLoop(cfg *Config) {
 				// from a non-peer id (mis-configured cluster).
 				continue
 			}
-			switch m.Type {
+			switch msg.Type {
 			case "auth":
-				parts := strings.SplitN(m.Data, ":", 2)
+				parts := strings.SplitN(msg.Data, ":", 2)
 				if len(parts) != 2 {
-					log.Printf("[%s] bad auth %q", m.From, m.Data)
+					log.Printf("[%s] bad auth %q", msg.From, msg.Data)
 					continue
 				}
 				newAuth := [2]string{parts[0], parts[1]}
@@ -1235,7 +1304,7 @@ func pollLoop(cfg *Config) {
 					sess.consumedAuth != zero &&
 					sess.consumedAuth != newAuth {
 					log.Printf("[%s] fresh auth (ufrag=%s) supersedes consumed (ufrag=%s) — aborting attempt",
-						m.From, newAuth[0], sess.consumedAuth[0])
+						msg.From, newAuth[0], sess.consumedAuth[0])
 					sess.abortAttempt()
 				}
 				sess.mu.Unlock()
@@ -1250,9 +1319,9 @@ func pollLoop(cfg *Config) {
 				}
 				sess.authCh <- newAuth
 			case "candidate":
-				cand, err := ice.UnmarshalCandidate(m.Data)
+				cand, err := ice.UnmarshalCandidate(msg.Data)
 				if err != nil {
-					log.Printf("[%s] bad candidate: %v", m.From, err)
+					log.Printf("[%s] bad candidate: %v", msg.From, err)
 					continue
 				}
 				// Buffer first, then dispatch to the live agent if any.
@@ -1269,7 +1338,7 @@ func pollLoop(cfg *Config) {
 				sess.mu.Unlock()
 				if agent != nil {
 					if err := agent.AddRemoteCandidate(cand); err != nil {
-						log.Printf("[%s] AddRemoteCandidate: %v", m.From, err)
+						log.Printf("[%s] AddRemoteCandidate: %v", msg.From, err)
 					}
 				}
 			}
