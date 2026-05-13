@@ -13,14 +13,14 @@ auditable image digest and an attested config that names the workload
 commit. Whether the workload at that commit is itself trustworthy is up to
 the auditor.
 
-By convention, **the workload repo provides its own bash entry point at the
-fixed path `tee-launch.sh`** (default mode). This keeps install/build/run
-logic inside the workload repo, where it is covered by source provenance of
-the pinned `COMMIT_SHA` and is **not** a trust-bearing field in the
-launcher config. A verifier therefore audits two things: the launcher
-image's identity, and the `REPO_URL` + `COMMIT_SHA` pair (plus
-`REPO_SUBDIR` when used, since it selects *which* `tee-launch.sh` runs)
-in the attested config.
+By convention, **the workload repo provides its own bash entry point at
+`entrypoint.sh`** (default mode). This keeps install/build/run logic inside
+the workload repo, where it is covered by source provenance of the pinned
+`COMMIT_SHA` and is **not** a trust-bearing field in the launcher config.
+A verifier therefore audits two things: the launcher image's identity, and
+the `REPO_URL` + `COMMIT_SHA` pair (plus `REPO_SUBDIR` and
+`ENTRYPOINT_SCRIPT` when used, since each selects *which* script runs) in
+the attested config.
 
 The launcher image is **generic**: its digest attests the launcher's
 implementation, not the workload. The workload identity comes from the
@@ -69,7 +69,7 @@ launcher config file  ──►  workload pin
 
                        ──►  workload running inside the TEE
                            = workload repo at commit U,
-                             starting from its tee-launch.sh
+                             starting from its entrypoint.sh
 ```
 
 The published launcher image is a **generic** runner: the same image digest
@@ -115,7 +115,7 @@ trusted-workload-launcher <config-file>
 The launcher is a single bash script (`bin/trusted-workload-launcher`). It
 depends only on `bash`, `git`, and POSIX coreutils. It is **not** sourced
 and **does not source** the config. In default mode, the only bytes it
-executes are those of the workload repo's `tee-launch.sh` at the pinned
+executes are those of the workload repo's `entrypoint.sh` at the pinned
 `COMMIT_SHA`. In advanced mode (see below), it additionally executes the
 configured `INSTALL_CMD` / `RUN_CMD` via `bash -c`.
 
@@ -139,28 +139,29 @@ no shell expansion in the parse step.
 | Key | Meaning |
 | --- | --- |
 | `REPO_SUBDIR` | Relative directory inside the repo to `cd` into before running the entry point or `RUN_CMD`. Must not be absolute and must not contain `..`. |
-| `CHILD_ENV_FILE` | Path to a separate env file. Each `KEY=VALUE` line is `export`ed into the environment seen by `tee-launch.sh` / `INSTALL_CMD` / `RUN_CMD`. The file is parsed line-by-line just like the main config (not sourced). |
-| `RUN_CMD` | **Advanced.** Shell command to exec instead of the default `tee-launch.sh`. Use only when the workload repo cannot host its own entry script. |
+| `ENTRYPOINT_SCRIPT` | Relative path (inside `REPO_SUBDIR` or repo root) to the bash entry script for default mode. Defaults to `entrypoint.sh`. Must not be absolute and must not contain `..`. Trust-bearing in default mode — like `REPO_SUBDIR`, it selects which script runs. |
+| `CHILD_ENV_FILE` | Path to a separate env file. Each `KEY=VALUE` line is `export`ed into the environment seen by `entrypoint.sh` / `INSTALL_CMD` / `RUN_CMD`. The file is parsed line-by-line just like the main config (not sourced). |
+| `RUN_CMD` | **Advanced.** Shell command to exec instead of the default `entrypoint.sh`. Use only when the workload repo cannot host its own entry script. |
 | `INSTALL_CMD` | **Advanced.** Shell command to run before `RUN_CMD`. Only valid alongside `RUN_CMD`. |
 
-### Default mode: `tee-launch.sh` in the workload repo
+### Default mode: `entrypoint.sh` in the workload repo
 
 Recommended for every workload you control. The workload repo provides a
-bash script at the fixed path `tee-launch.sh` (at the repo root, or at
-`REPO_SUBDIR/tee-launch.sh` if `REPO_SUBDIR` is set). The launcher runs it
-with `bash tee-launch.sh` after checkout — **no executable bit is
+bash script at the fixed path `entrypoint.sh` (at the repo root, or at
+`REPO_SUBDIR/entrypoint.sh` if `REPO_SUBDIR` is set). The launcher runs it
+with `bash entrypoint.sh` after checkout — **no executable bit is
 required**. All install/build/run logic lives in that script.
 
 In this mode the trust-bearing config in the launcher's config file is
 `REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` if used, since it selects
-which `tee-launch.sh` runs). `WORK_DIR` is local plumbing — it names
+which `entrypoint.sh` runs). `WORK_DIR` is local plumbing — it names
 where on the in-TEE filesystem to keep the checkout — and is not
 trust-bearing. `CHILD_ENV_FILE` (and any env it provides) can change the
 script's runtime behavior but does not change the bytes that run; if the
 deployment uses it, audit it the same way you audit any other runtime
 configuration the deployment ships with.
 
-Because `tee-launch.sh`'s bytes are pinned by `COMMIT_SHA` and stored in
+Because `entrypoint.sh`'s bytes are pinned by `COMMIT_SHA` and stored in
 the workload repo, they are covered by source provenance of the pinned
 commit. The verifier does not need to extract or audit any command string
 out of the launcher config.
@@ -168,7 +169,7 @@ out of the launcher config.
 ### Advanced mode: explicit `RUN_CMD` / `INSTALL_CMD`
 
 Use this when the workload repo cannot be modified to add a
-`tee-launch.sh` (e.g. you are pinning a third-party repo unchanged).
+`entrypoint.sh` (e.g. you are pinning a third-party repo unchanged).
 Setting `RUN_CMD` switches the launcher into advanced mode; if you need
 more than one command, set `INSTALL_CMD` to run before `RUN_CMD`. Each is
 a single-line shell string and the launcher does not implement multi-line
@@ -186,7 +187,7 @@ audited alongside `COMMIT_SHA`.
 * Will not: accept short SHAs. A truncated SHA could resolve ambiguously if
   the upstream history changes.
 * Will not: source the config or `eval` config values. In default mode the
-  launcher executes `bash tee-launch.sh` from the pinned commit; in advanced
+  launcher executes `bash entrypoint.sh` from the pinned commit; in advanced
   mode it executes `INSTALL_CMD` / `RUN_CMD` via `bash -c`. Nothing else
   from the config reaches a shell.
 
@@ -194,7 +195,7 @@ audited alongside `COMMIT_SHA`.
 
 See [`examples/web-app.conf`](./examples/web-app.conf). Adapt `REPO_URL`,
 `COMMIT_SHA`, and (if you need it) `REPO_SUBDIR` for your workload, and
-make sure the workload repo has a `tee-launch.sh` at the pinned commit.
+make sure the workload repo has a `entrypoint.sh` at the pinned commit.
 
 ```sh
 ./bin/trusted-workload-launcher ./examples/web-app.conf
@@ -202,7 +203,7 @@ make sure the workload repo has a `tee-launch.sh` at the pinned commit.
 
 The launcher logs the resolved repo, commit, workdir, and selected mode at
 startup, then logs the verified `HEAD` after checkout, before handing
-control to `tee-launch.sh` (or `INSTALL_CMD` / `RUN_CMD` in advanced mode).
+control to `entrypoint.sh` (or `INSTALL_CMD` / `RUN_CMD` in advanced mode).
 
 ## Deploying with dstack
 
@@ -211,11 +212,25 @@ so the dstack attestation binds to the exact launcher bytes you audited.
 How the config gets in front of the launcher depends on which binding from
 the trust model above you chose.
 
+### Mounting the dstack socket
+
+If the workload uses the dstack SDK (Rust, Python, etc.) to request KMS
+keys or TDX quotes — the recommended pattern for workloads that need
+in-TEE identity — the dstack agent's Unix socket must be visible inside
+the workload container. By default the SDK looks at `/var/run/dstack.sock`.
+Mount it in every compose snippet below; the snippets already include the
+mount.
+
+If your workload talks to a non-default dstack endpoint, set
+`DSTACK_LLM_ROUTER_DSTACK_ENDPOINT` (or whatever endpoint variable your
+workload reads) via `CHILD_ENV_FILE` rather than baking it into the
+launcher config — it is runtime configuration, not a trust-bearing field.
+
 ### Local development (host bind-mount)
 
-Convenient for iterating on the config. **Not for production**: the host can
-swap the mounted file at any time and nothing about that swap is reflected
-in the dstack attestation.
+Convenient for iterating on the config. **Not for production**: the host
+can swap the mounted file at any time and nothing about that swap is
+reflected in the dstack attestation.
 
 ```yaml
 services:
@@ -225,18 +240,19 @@ services:
     volumes:
       - ./web-app.conf:/etc/trusted-workload-launcher/config.conf:ro
       - workload-checkout:/var/lib/trusted-workload-launcher
+      - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
 volumes:
   workload-checkout:
 ```
 
-### Production option A: attest the config via dstack compose
+### Production option A (recommended): attest the config via dstack compose
 
-Inline the config inside the compose file (or reference a sibling file that
-participates in the compose hash). dstack measures the compose into the
-attested app config, so a verifier can compare the deployed compose against
-the one they audited:
+Inline the config inside the compose file (or reference a sibling file
+that participates in the compose hash). dstack measures the compose into
+the attested app config, so a verifier can compare the deployed compose
+against the one they audited:
 
 ```yaml
 services:
@@ -248,6 +264,7 @@ services:
         target: /etc/trusted-workload-launcher/config.conf
     volumes:
       - workload-checkout:/var/lib/trusted-workload-launcher
+      - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
 configs:
@@ -277,8 +294,9 @@ CMD ["/etc/trusted-workload-launcher/config.conf"]
 ```
 
 Deploy that derived image (pinned by its own `@sha256:…`). The derived
-image digest now implies both the launcher and the workload pin, and the
-dstack attestation over the image digest is sufficient.
+image digest now implies both the launcher and the workload pin. Still
+mount `/var/run/dstack.sock` from the host into the workload container in
+the deploying compose if the workload uses the dstack SDK.
 
 ## Tests
 

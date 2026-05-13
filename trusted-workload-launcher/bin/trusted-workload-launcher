@@ -6,13 +6,14 @@
 # requested commit SHA, then hands control to the workload.
 #
 # Default mode (recommended): the workload repo ships an entry point at the
-# fixed path 'tee-launch.sh' (under REPO_SUBDIR if set, else repo root). The
-# launcher runs it with 'bash tee-launch.sh' after checkout, so no install
-# or run command is part of the launcher's trust-bearing config.
+# path named by ENTRYPOINT_SCRIPT (default 'entrypoint.sh'), under REPO_SUBDIR
+# if set else the repo root. The launcher runs it with 'bash <script>' after
+# checkout, so no install or run command is part of the launcher's trust-
+# bearing config.
 #
 # Advanced mode: setting RUN_CMD in the config overrides the default entry
 # point with a custom command; INSTALL_CMD may optionally precede it. Use
-# this only when the workload repo cannot host its own tee-launch.sh.
+# this only when the workload repo cannot host its own entrypoint.sh.
 #
 # The launcher is intentionally tiny: it knows nothing about the workload it
 # runs. Its only job is to make the bytes that execute correspond exactly to
@@ -42,23 +43,27 @@ Required keys:
                  Reused across runs if it already contains a clone of REPO_URL.
 
 Optional keys:
-  REPO_SUBDIR    Path inside the repo to cd into before running the entry
-                 point or RUN_CMD. Defaults to the repo root.
-  CHILD_ENV_FILE Path to a separate KEY=VALUE env file. Each key listed there
-                 is exported into the environment of the entry point / RUN_CMD.
-  RUN_CMD        Advanced: shell command to exec instead of the workload's
-                 default ./tee-launch.sh. Use only when the workload repo
-                 cannot host its own entry script.
-  INSTALL_CMD    Advanced: shell command to run before RUN_CMD. Only valid
-                 together with RUN_CMD.
+  REPO_SUBDIR       Path inside the repo to cd into before running the entry
+                    point or RUN_CMD. Defaults to the repo root.
+  ENTRYPOINT_SCRIPT Relative path inside REPO_SUBDIR (or the repo root) to the
+                    bash entry script for default mode. Defaults to
+                    'entrypoint.sh'. Must not be absolute or contain '..'.
+  CHILD_ENV_FILE    Path to a separate KEY=VALUE env file. Each key listed
+                    there is exported into the environment of the entry point
+                    / RUN_CMD.
+  RUN_CMD           Advanced: shell command to exec instead of the workload's
+                    default entry point. Use only when the workload repo
+                    cannot host its own entry script.
+  INSTALL_CMD       Advanced: shell command to run before RUN_CMD. Only valid
+                    together with RUN_CMD.
 
 Default mode (recommended):
-  The workload repo provides a bash script at the fixed path
-  '<REPO_SUBDIR>/tee-launch.sh' (or at the repo root if REPO_SUBDIR is unset).
-  The launcher runs it with 'bash tee-launch.sh' after checking out
-  COMMIT_SHA; no exec bit on the file is required. All install/build/run
-  logic lives in that script, so it is covered by source provenance of the
-  pinned commit and is NOT a trust-bearing field in the launcher config.
+  The workload repo provides a bash script at '<REPO_SUBDIR>/<entry>', where
+  <entry> is ENTRYPOINT_SCRIPT (default 'entrypoint.sh'). The launcher runs
+  it with 'bash <entry>' after checking out COMMIT_SHA; no exec bit on the
+  file is required. All install/build/run logic lives in that script, so it
+  is covered by source provenance of the pinned commit and is NOT a trust-
+  bearing field in the launcher config.
 
 Advanced mode:
   Set RUN_CMD to override the default entry point. INSTALL_CMD is optional
@@ -89,10 +94,11 @@ require_tool git
 
 # Parse the config file line-by-line. We never source it, so a config cannot
 # inject arbitrary commands during parsing. In default mode, the only bytes
-# the launcher executes are those of tee-launch.sh fetched at the pinned
-# COMMIT_SHA (and therefore covered by source provenance of the workload
-# repo). In advanced mode, INSTALL_CMD and RUN_CMD are executed via
-# 'bash -c'; those values are trust-bearing config and must be audited.
+# the launcher executes are those of the entry script (ENTRYPOINT_SCRIPT,
+# default 'entrypoint.sh') fetched at the pinned COMMIT_SHA and therefore
+# covered by source provenance of the workload repo. In advanced mode,
+# INSTALL_CMD and RUN_CMD are executed via 'bash -c'; those values are
+# trust-bearing config and must be audited.
 parse_config() {
   local config_file=$1
   [[ -f $config_file ]] || die "config file not found: $config_file"
@@ -101,6 +107,7 @@ parse_config() {
   CFG_COMMIT_SHA=
   CFG_WORK_DIR=
   CFG_REPO_SUBDIR=
+  CFG_ENTRYPOINT_SCRIPT=
   CFG_CHILD_ENV_FILE=
   CFG_INSTALL_CMD=
   CFG_RUN_CMD=
@@ -125,13 +132,14 @@ parse_config() {
       fi
     fi
     case $key in
-      REPO_URL)        CFG_REPO_URL=$val ;;
-      COMMIT_SHA)      CFG_COMMIT_SHA=$val ;;
-      WORK_DIR)        CFG_WORK_DIR=$val ;;
-      REPO_SUBDIR)     CFG_REPO_SUBDIR=$val ;;
-      CHILD_ENV_FILE)  CFG_CHILD_ENV_FILE=$val ;;
-      INSTALL_CMD)     CFG_INSTALL_CMD=$val; CFG_INSTALL_CMD_SET=1 ;;
-      RUN_CMD)         CFG_RUN_CMD=$val; CFG_RUN_CMD_SET=1 ;;
+      REPO_URL)          CFG_REPO_URL=$val ;;
+      COMMIT_SHA)        CFG_COMMIT_SHA=$val ;;
+      WORK_DIR)          CFG_WORK_DIR=$val ;;
+      REPO_SUBDIR)       CFG_REPO_SUBDIR=$val ;;
+      ENTRYPOINT_SCRIPT) CFG_ENTRYPOINT_SCRIPT=$val ;;
+      CHILD_ENV_FILE)    CFG_CHILD_ENV_FILE=$val ;;
+      INSTALL_CMD)       CFG_INSTALL_CMD=$val; CFG_INSTALL_CMD_SET=1 ;;
+      RUN_CMD)           CFG_RUN_CMD=$val; CFG_RUN_CMD_SET=1 ;;
       *) die "unknown config key '$key' at $config_file:$lineno" ;;
     esac
   done < "$config_file"
@@ -144,7 +152,7 @@ validate_config() {
 
   # INSTALL_CMD is only meaningful alongside RUN_CMD (advanced mode).
   if [[ $CFG_INSTALL_CMD_SET -eq 1 && $CFG_RUN_CMD_SET -ne 1 ]]; then
-    die "INSTALL_CMD requires RUN_CMD; either set RUN_CMD too (advanced mode) or remove INSTALL_CMD and ship a tee-launch.sh in the workload repo"
+    die "INSTALL_CMD requires RUN_CMD; either set RUN_CMD too (advanced mode) or remove INSTALL_CMD and ship an entrypoint script in the workload repo"
   fi
   if [[ $CFG_RUN_CMD_SET -eq 1 && -z $CFG_RUN_CMD ]]; then
     die "RUN_CMD must not be empty"
@@ -161,6 +169,15 @@ validate_config() {
     case $CFG_REPO_SUBDIR in
       /*)  die "REPO_SUBDIR must be a relative path inside the repo (got: $CFG_REPO_SUBDIR)" ;;
       *..*) die "REPO_SUBDIR must not contain '..' (got: $CFG_REPO_SUBDIR)" ;;
+    esac
+  fi
+
+  # ENTRYPOINT_SCRIPT (default mode only) must be a relative path inside the
+  # repo's working dir; reject absolute paths and any '..' traversal.
+  if [[ -n $CFG_ENTRYPOINT_SCRIPT ]]; then
+    case $CFG_ENTRYPOINT_SCRIPT in
+      /*)   die "ENTRYPOINT_SCRIPT must be a relative path (got: $CFG_ENTRYPOINT_SCRIPT)" ;;
+      *..*) die "ENTRYPOINT_SCRIPT must not contain '..' (got: $CFG_ENTRYPOINT_SCRIPT)" ;;
     esac
   fi
 }
@@ -247,7 +264,8 @@ main() {
     [[ -n $CFG_INSTALL_CMD ]] && log "install:  $CFG_INSTALL_CMD"
     log "run:      $CFG_RUN_CMD"
   else
-    log "mode:     default (workload repo tee-launch.sh)"
+    log "mode:     default (workload repo entry script)"
+    log "entry:    ${CFG_ENTRYPOINT_SCRIPT:-entrypoint.sh}"
   fi
 
   ensure_repo_at_commit
@@ -275,8 +293,8 @@ main() {
   # Default mode: the workload repo provides its own entry script. We pass it
   # to 'bash' rather than exec it directly so the exec bit is not required;
   # the bytes are pinned by COMMIT_SHA and covered by source provenance.
-  local entry=tee-launch.sh
-  [[ -f $entry ]] || die "default entry point '$entry' not found in $target; either add it to the workload repo at the pinned commit, or set RUN_CMD in the launcher config"
+  local entry=${CFG_ENTRYPOINT_SCRIPT:-entrypoint.sh}
+  [[ -f $entry ]] || die "entry script '$entry' not found in $target; either add it to the workload repo at the pinned commit, set ENTRYPOINT_SCRIPT to its actual path, or set RUN_CMD in the launcher config"
   log "exec in $target: bash $entry"
   exec bash "$entry"
 }

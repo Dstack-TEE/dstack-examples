@@ -6,42 +6,50 @@ TEE is the one they audited.
 
 ## Quick path (default mode, 4 steps)
 
-In default mode the workload repo provides its own `tee-launch.sh` at the
+In default mode the workload repo provides its own `entrypoint.sh` at the
 pinned commit, so the trust-bearing config is `REPO_URL + COMMIT_SHA`
-(plus `REPO_SUBDIR` when used, since it selects which `tee-launch.sh`
-runs) and the install/run command chain disappears from the verifier's
-checklist. `WORK_DIR` is local plumbing and is not trust-bearing.
+(plus `REPO_SUBDIR` and `ENTRYPOINT_SCRIPT` when used, since each selects
+which script in the pinned repo gets run) and the install/run command
+chain disappears from the verifier's checklist. `WORK_DIR` is local
+plumbing and is not trust-bearing.
 The whole chain is:
 
 ```mermaid
 flowchart LR
-    A[dstack attestation] --> B[launcher image digest<br/>+ REPO_URL<br/>+ COMMIT_SHA<br/>+ REPO_SUBDIR if used]
+    A[dstack attestation] --> B[launcher image digest<br/>+ REPO_URL<br/>+ COMMIT_SHA<br/>+ REPO_SUBDIR / ENTRYPOINT_SCRIPT if used]
     B --> C[Sigstore attestation<br/>for launcher image digest<br/>= dstack-examples@ref/SHA]
-    B --> D[upstream repo at COMMIT_SHA<br/>incl. tee-launch.sh under REPO_SUBDIR]
+    B --> D[upstream repo at COMMIT_SHA<br/>incl. the chosen entry script]
 ```
 
-1. **Verify the dstack attestation.**
+1. **Verify the dstack attestation, and compare reference values.**
    `phala cvms attestation --cvm-id <id> --json` and feed the TDX quote
    into the dstack verifier (or trust the Phala Cloud verifier as a lite
-   path). Read out the deployed launcher image digest and the attested
-   `REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` if present).
+   path). Then compare the attestation's measurements against
+   pre-published reference values: `mrtd` and `rtmr0`–`rtmr2` against the
+   dstack OS image you expect, the `compose-hash` event against
+   `sha256(tcb_info.app_compose)`, the launcher image digest inside the
+   attested compose against your audited release digest, and the
+   attested `REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` /
+   `ENTRYPOINT_SCRIPT` if present) against the workload pin you intended
+   to deploy. The deep-path checklist below has the exact extraction
+   commands.
 2. **Verify launcher image provenance via Sigstore.** Confirm the image
    digest from step 1 carries a build-provenance attestation signed by
    the expected `Dstack-TEE/dstack-examples` GitHub Actions workflow at
    the ref / commit you audited.
 3. **Audit the upstream commit.** Check out the workload repo at
    `COMMIT_SHA` and review it. In default mode this single review covers
-   the workload code *and* its entry point `tee-launch.sh`; no separate
+   the workload code *and* its entry point `entrypoint.sh`; no separate
    install/run command audit is needed.
 4. **Spot-check runtime logs.** `phala logs --cvm-id <id>` should show
-   `HEAD verified: <COMMIT_SHA>` and `exec in <dir>: bash tee-launch.sh`.
+   `HEAD verified: <COMMIT_SHA>` and `exec in <dir>: bash entrypoint.sh`.
    Logs are corroborating only; the trust root is steps 1–3.
 
 If all four line up, the bytes executing in the TEE are exactly the
 upstream commit you audited, produced by an audited launcher.
 
 > **Advanced mode adds one step.** If the launcher config sets `RUN_CMD`
-> (and optionally `INSTALL_CMD`) instead of relying on `tee-launch.sh`,
+> (and optionally `INSTALL_CMD`) instead of relying on `entrypoint.sh`,
 > those strings are trust-bearing deployment config: read them from the
 > attested compose in step 1 and audit them like any other deployment
 > code — they are not part of the upstream repo at `COMMIT_SHA` and so
@@ -142,6 +150,51 @@ jq -r '.tcb_info.app_compose' attestation.json \
 The image reference is what you compare to your published launcher image
 in step 3; the `configs:` block is what you parse in step 5.
 
+#### Reference values to compare
+
+This step is where reference-value checking actually happens — the
+attestation is only useful insofar as you compare its measurements to a
+known-expected set. Concretely, before signing off on a deployment, decide
+the expected value for each row below, then run the JSON-extraction
+command and assert equality:
+
+| Reference value | Source of truth | Where in `attestation.json` |
+| --- | --- | --- |
+| Launcher image digest | The published image digest at the launcher release you audited (and that step 3 verifies via Sigstore). | The `image:` reference inside `tcb_info.app_compose.docker_compose_file`. |
+| Compose hash | `sha256` of the JSON-encoded `tcb_info.app_compose` you audited locally. | `tcb_info.event_log[] \| select(.event=="compose-hash") \| .event_payload`. |
+| `mrtd` | The TDX measurement of the dstack OS image you expect (published with each dstack OS release). | `tcb_info.mrtd`. |
+| `rtmr0` / `rtmr1` / `rtmr2` | Boot-time measurements of the same dstack OS image. Published with the dstack release alongside `mrtd`. | `tcb_info.rtmr0` / `rtmr1` / `rtmr2`. |
+| `os-image-hash` event | The dstack OS image hash you expect (matches the `mrtd` / `rtmr0..2` set above). | `tcb_info.event_log[] \| select(.event=="os-image-hash") \| .event_payload`. |
+| `app-id` event | Either the on-chain dstack app contract / config ID you registered, or, for KMS-less deployments, the value you accept for this CVM. | `tcb_info.event_log[] \| select(.event=="app-id") \| .event_payload`. |
+
+A one-shot reference-comparison script looks roughly like this:
+
+```sh
+expected_image=docker.io/<org>/trusted-workload-launcher@sha256:<L>
+expected_compose_hash=$(sha256sum < audited-app_compose.json | awk '{print $1}')
+expected_mrtd=<from dstack release notes>
+expected_rtmr0=<from dstack release notes>
+expected_rtmr1=<from dstack release notes>
+expected_rtmr2=<from dstack release notes>
+
+a=attestation.json
+[ "$(jq -r '.tcb_info.mrtd'  $a)"  = "$expected_mrtd"  ] || { echo MRTD mismatch  >&2; exit 1; }
+[ "$(jq -r '.tcb_info.rtmr0' $a)"  = "$expected_rtmr0" ] || { echo RTMR0 mismatch >&2; exit 1; }
+[ "$(jq -r '.tcb_info.rtmr1' $a)"  = "$expected_rtmr1" ] || { echo RTMR1 mismatch >&2; exit 1; }
+[ "$(jq -r '.tcb_info.rtmr2' $a)"  = "$expected_rtmr2" ] || { echo RTMR2 mismatch >&2; exit 1; }
+[ "$(jq -r '.tcb_info.event_log[] | select(.event=="compose-hash") | .event_payload' $a)" \
+  = "$expected_compose_hash" ] || { echo compose-hash mismatch >&2; exit 1; }
+[ "$(jq -r '.tcb_info.app_compose | fromjson | .docker_compose_file' $a | grep -oP 'image:\s*\K\S+')" \
+  = "$expected_image" ] || { echo launcher image mismatch >&2; exit 1; }
+echo OK
+```
+
+`rtmr3` is intentionally not compared as a single reference value because
+it is the running extension over the runtime event log (`app-id`,
+`compose-hash`, `os-image-hash`, instance bring-up events, etc.); verify
+its constituent events individually as above, or replay the event log
+into `rtmr3` if your verifier supports it.
+
 ### 3. Verify launcher image provenance via Sigstore
 
 The `trusted-workload-launcher-release.yml` workflow publishes an
@@ -179,14 +232,15 @@ evidence of tampering.
 ### 4. Extract and audit the workload pin
 
 Parse the `configs:` content from step 2 and read `REPO_URL` and
-`COMMIT_SHA` (plus `REPO_SUBDIR` if present — it selects which
-`tee-launch.sh` is used). `WORK_DIR` is local plumbing only and is not
-part of the trust-bearing config. `CHILD_ENV_FILE` (and any env it
-supplies) does not change the bytes that run; if used, audit it as
-runtime deployment configuration, not as source.
+`COMMIT_SHA` (plus `REPO_SUBDIR` and `ENTRYPOINT_SCRIPT` if present —
+each selects which script in the pinned repo is used). `WORK_DIR` is
+local plumbing only and is not part of the trust-bearing config.
+`CHILD_ENV_FILE` (and any env it supplies) does not change the bytes that
+run; if used, audit it as runtime deployment configuration, not as
+source.
 
 In default mode there are no `INSTALL_CMD` / `RUN_CMD` strings to audit —
-the entry point is the fixed-path `tee-launch.sh` in the workload repo,
+the entry point is the fixed-path `entrypoint.sh` in the workload repo,
 which is covered by source provenance of the pinned commit. In advanced
 mode (`RUN_CMD` present), also read `RUN_CMD` and any `INSTALL_CMD` and
 audit them as trust-bearing deployment config: they are not part of the
@@ -198,7 +252,7 @@ git -C <workload-checkout> rev-parse --verify <COMMIT_SHA>
 ```
 
 Confirm the upstream repo at `REPO_URL` contains `COMMIT_SHA`, and review
-the workload at that commit, including `<REPO_SUBDIR>/tee-launch.sh` in
+the workload at that commit, including `<REPO_SUBDIR>/entrypoint.sh` in
 default mode. This is the code that actually serves traffic.
 
 ### 5. Spot-check runtime logs
@@ -212,15 +266,15 @@ during config summary, then the checkout/verify lines, then the `exec`
 line, so they appear in this order):
 
 ```
-[trusted-workload-launcher] mode:     default (workload repo tee-launch.sh)
+[trusted-workload-launcher] mode:     default (workload repo entrypoint.sh)
 [trusted-workload-launcher] checking out <COMMIT_SHA>
 [trusted-workload-launcher] HEAD verified: <COMMIT_SHA>
-[trusted-workload-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: bash tee-launch.sh
+[trusted-workload-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: bash entrypoint.sh
 ```
 
 Advanced mode logs `mode: advanced (RUN_CMD)` early on, and the last
 `exec in ...:` line shows the explicit `RUN_CMD` instead of
-`bash tee-launch.sh`. Either way these lines show the launcher reached
+`bash entrypoint.sh`. Either way these lines show the launcher reached
 the post-checkout state. They are not signed, so they don't replace
 steps 1–4 — they corroborate.
 
@@ -232,7 +286,7 @@ attested output (see [Limitations](#limitations)).
 A real verification of this example was exercised against production
 Phala on 2026-05-11 using the recommended compose-mounted-config path.
 The pinned upstream (`octocat/Hello-World`) does not host a
-`tee-launch.sh`, so the smoke used **advanced mode** to set `RUN_CMD`
+`entrypoint.sh`, so the smoke used **advanced mode** to set `RUN_CMD`
 inline; default-mode behavior is covered by the launcher's own test
 suite. The compose-hash binding it demonstrates is identical:
 

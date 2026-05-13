@@ -49,7 +49,7 @@ run_case() {
 #   c0: initial empty
 #   c1: adds sub/run.sh and greeting.txt              <-- advanced-mode PIN
 #   c2: adds tip.txt                                  <-- "future" advance
-#   c3: adds sub/tee-launch.sh                        <-- default-mode PIN
+#   c3: adds sub/entrypoint.sh and sub/alt-entry.sh   <-- default-mode PIN
 setup_fixture_repo() {
   local repo=$1
   mkdir -p "$repo"
@@ -79,21 +79,33 @@ SH
   git -C "$repo" add tip.txt
   git -C "$repo" commit -q -m "c2 add tip.txt"
 
-  # tee-launch.sh is intentionally NOT marked executable; the launcher must
+  # entrypoint.sh is intentionally NOT marked executable; the launcher must
   # run it through 'bash <script>' rather than rely on the exec bit.
-  cat > "$repo/sub/tee-launch.sh" <<'SH'
+  cat > "$repo/sub/entrypoint.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
 : "${MARKER_FILE:?MARKER_FILE not set}"
 {
   printf 'mode=default\n'
+  printf 'entry=entrypoint.sh\n'
   printf 'cwd=%s\n' "$PWD"
   printf 'head=%s\n' "$(git rev-parse HEAD)"
   printf 'child_env_extra=%s\n' "${CHILD_ENV_EXTRA-UNSET}"
 } > "$MARKER_FILE"
 SH
-  git -C "$repo" add sub/tee-launch.sh
-  git -C "$repo" commit -q -m "c3 add tee-launch.sh"
+  # A second script under a non-default name, used to exercise ENTRYPOINT_SCRIPT.
+  cat > "$repo/sub/alt-entry.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+: "${MARKER_FILE:?MARKER_FILE not set}"
+{
+  printf 'mode=default\n'
+  printf 'entry=alt-entry.sh\n'
+  printf 'head=%s\n' "$(git rev-parse HEAD)"
+} > "$MARKER_FILE"
+SH
+  git -C "$repo" add sub/entrypoint.sh sub/alt-entry.sh
+  git -C "$repo" commit -q -m "c3 add entrypoint.sh and alt-entry.sh"
 }
 
 FIXTURE=$TMPROOT/fixture-repo
@@ -352,8 +364,8 @@ test_default_mode_happy() {
   local work=$TMPROOT/work-default
   local marker=$TMPROOT/marker-default.txt
   local conf=$TMPROOT/conf-default.env
-  # No INSTALL_CMD, no RUN_CMD: default mode. tee-launch.sh in REPO_SUBDIR is
-  # exec'd by the launcher and produces the marker.
+  # No INSTALL_CMD, no RUN_CMD, no ENTRYPOINT_SCRIPT: default mode picks the
+  # built-in 'entrypoint.sh' under REPO_SUBDIR.
   cat > "$conf" <<EOF
 REPO_URL=$FIXTURE
 COMMIT_SHA=$DEFAULT_SHA
@@ -362,13 +374,14 @@ REPO_SUBDIR=sub
 EOF
   MARKER_FILE=$marker "$LAUNCHER" "$conf" || return 1
   [[ -f $marker ]] || { echo "marker not created" >&2; return 1; }
-  grep -q "mode=default" "$marker" || { echo "default-mode tee-launch.sh did not run" >&2; cat "$marker" >&2; return 1; }
+  grep -q "mode=default" "$marker" || { echo "default-mode entrypoint.sh did not run" >&2; cat "$marker" >&2; return 1; }
+  grep -q "entry=entrypoint.sh" "$marker" || { echo "wrong entry script ran" >&2; cat "$marker" >&2; return 1; }
   grep -q "head=$DEFAULT_SHA" "$marker" || { echo "head not pinned to $DEFAULT_SHA" >&2; cat "$marker" >&2; return 1; }
   return 0
 }
 
 test_default_mode_missing_script_fails() {
-  # PIN_SHA (c1) has run.sh but no tee-launch.sh. In default mode the launcher
+  # PIN_SHA (c1) has run.sh but no entrypoint.sh. In default mode the launcher
   # must refuse to start rather than fall back to anything.
   local conf=$TMPROOT/conf-default-missing.env
   cat > "$conf" <<EOF
@@ -378,7 +391,43 @@ WORK_DIR=$TMPROOT/work-default-missing
 REPO_SUBDIR=sub
 EOF
   if "$LAUNCHER" "$conf"; then
-    echo "launcher should have failed with tee-launch.sh missing" >&2
+    echo "launcher should have failed with entrypoint.sh missing" >&2
+    return 1
+  fi
+  return 0
+}
+
+test_entrypoint_script_override() {
+  # ENTRYPOINT_SCRIPT lets a workload repo with a non-default entry name
+  # opt into default mode without renaming its script.
+  local work=$TMPROOT/work-altentry
+  local marker=$TMPROOT/marker-altentry.txt
+  local conf=$TMPROOT/conf-altentry.env
+  cat > "$conf" <<EOF
+REPO_URL=$FIXTURE
+COMMIT_SHA=$DEFAULT_SHA
+WORK_DIR=$work
+REPO_SUBDIR=sub
+ENTRYPOINT_SCRIPT=alt-entry.sh
+EOF
+  MARKER_FILE=$marker "$LAUNCHER" "$conf" || return 1
+  grep -q "entry=alt-entry.sh" "$marker" || { echo "ENTRYPOINT_SCRIPT override did not run alt-entry.sh" >&2; cat "$marker" >&2; return 1; }
+  grep -q "head=$DEFAULT_SHA" "$marker" || { echo "head not pinned to $DEFAULT_SHA" >&2; cat "$marker" >&2; return 1; }
+  return 0
+}
+
+test_entrypoint_script_escape_rejected() {
+  # ENTRYPOINT_SCRIPT must be a relative path inside the repo; reject '..'.
+  local conf=$TMPROOT/conf-altentry-escape.env
+  cat > "$conf" <<EOF
+REPO_URL=$FIXTURE
+COMMIT_SHA=$DEFAULT_SHA
+WORK_DIR=$TMPROOT/work-altentry-escape
+REPO_SUBDIR=sub
+ENTRYPOINT_SCRIPT=../../etc/passwd
+EOF
+  if "$LAUNCHER" "$conf"; then
+    echo "launcher accepted ENTRYPOINT_SCRIPT containing '..'" >&2
     return 1
   fi
   return 0
@@ -467,6 +516,8 @@ run_case "child_env_file_passes_through"         test_child_env_file
 run_case "install_runs_before_run"               test_install_runs_before_run
 run_case "default_mode_happy"                    test_default_mode_happy
 run_case "default_mode_missing_script_fails"     test_default_mode_missing_script_fails
+run_case "entrypoint_script_override"            test_entrypoint_script_override
+run_case "entrypoint_script_escape_rejected"     test_entrypoint_script_escape_rejected
 run_case "install_cmd_without_run_cmd_fails"     test_install_cmd_without_run_cmd_fails
 run_case "help_flag"                             test_help_flag
 run_case "release_workflow_attests_image_digest" test_release_workflow_attests_image_digest
