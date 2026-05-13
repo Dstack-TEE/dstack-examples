@@ -12,6 +12,7 @@ in their face.
 
 | Doc | What |
 |---|---|
+| [`declarative-services.md`](declarative-services.md) | Adding a microservice should be one HCL block in `cluster.tf`. Today's `mesh-conn` allowlist is hardcoded Go; sidecar registration lives in app binaries; Envoy supervise loops are copy-pasted. This pass makes the service list declarative and generates the rest. |
 | [`attestation-admission.md`](attestation-admission.md) | Use dstack TEE attestation as the mesh-conn admission credential, replacing/augmenting the shared TURN HMAC. Phased plan: per-app-id first, Consul-KV-rooted policy later. |
 
 Each doc includes:
