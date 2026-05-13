@@ -397,6 +397,14 @@ type Mesh struct {
 	// onLinkUp is an optional test hook fired right after each
 	// per-peer "link up" log line. nil in production.
 	onLinkUp func(peerID string)
+
+	// onAttemptStarted is an optional test hook fired when a per-peer
+	// dialICE attempt has consumed the remote auth and is about to
+	// call agent.Dial/Accept. Used by the auth-race test to
+	// synchronise the race-trigger injection with the precise moment
+	// the bug requires (consumedAuth set, dial in flight). nil in
+	// production.
+	onAttemptStarted func(peerID string)
 }
 
 func newMesh(cfg *Config) *Mesh {
@@ -446,9 +454,10 @@ func (m *Mesh) runPeerLink(ctx context.Context, peer Peer) {
 		if ctx.Err() != nil {
 			return
 		}
+		backoff := retryBackoff(m.cfg.SelfID, peer.ID)
 		if err := m.dialAndPump(ctx, peer, sess); err != nil {
-			log.Printf("[%s] link failed: %v — retrying in 5s", peer.ID, err)
-			if !sleepCtx(ctx, 5*time.Second) {
+			log.Printf("[%s] link failed: %v — retrying in %s", peer.ID, err, backoff)
+			if !sleepCtx(ctx, backoff) {
 				return
 			}
 			continue
@@ -456,6 +465,39 @@ func (m *Mesh) runPeerLink(ctx context.Context, peer Peer) {
 		// dialAndPump returns nil only when the conn closed cleanly.
 		log.Printf("[%s] link closed — reconnecting", peer.ID)
 	}
+}
+
+// retryBackoff is the per-peer wait between failed dialAndPump
+// attempts. Asymmetric on peer-id lex order: the side with the
+// lexicographically SMALLER id retries after 2 s, the larger-id side
+// after 5 s. The asymmetry exists to break the convergence bug where
+// two peers indefinitely supersede each other's in-flight handshakes
+// on near-simultaneous restart — see ROBUSTNESS.md "ICE auth-race
+// convergence" for the failure analysis.
+//
+// Mechanism: with a fixed retry both peers republish auth at the
+// same cadence, so each new publish lands in the OTHER side's
+// mid-Checking window (consumedAuth = old peer auth, fresh auth
+// arriving from peer → supersede → abort → retry → publish → repeat).
+// With an asymmetric retry, the lower-id side republishes ~3 s before
+// the higher-id side wakes up. By the time the higher-id side
+// publishes its own auth, the lower side is in the "wait for auth"
+// phase of its next attempt (consumedAuth = zero) and the supersede
+// check `consumedAuth != zero` short-circuits. The new auth is
+// pushed into authCh; both sides consume each other's fresh creds
+// and the next dial converges.
+//
+// No jitter: determinism matters for the regression test, and the
+// lex split alone is sufficient on every observed repro path.
+// The pair-of-numbers (2 s, 5 s) is chosen so the gap (3 s) comfortably
+// straddles pion's slow-path abort window — observed at up to ~1 s
+// from `OnConnectionStateChange Failed` to `dialAndPump` returning
+// — without making the lower side hot-spin.
+func retryBackoff(selfID, peerID string) time.Duration {
+	if selfID < peerID {
+		return 2 * time.Second
+	}
+	return 5 * time.Second
 }
 
 // sleepCtx sleeps for d or until ctx is cancelled. Returns true if
@@ -511,6 +553,7 @@ func (m *Mesh) dialAndPump(parentCtx context.Context, peer Peer, sess *peerSessi
 	attemptCtx, abort := context.WithCancel(parentCtx)
 	sess.mu.Lock()
 	sess.consumedAuth = [2]string{}
+	sess.consumedAt = time.Time{}
 	sess.abortAttempt = abort
 	sess.mu.Unlock()
 	defer func() {
@@ -1012,9 +1055,29 @@ type peerSession struct {
 	mu              sync.Mutex
 	agent           *ice.Agent         // replaced on every dialICE attempt; guarded by mu
 	consumedAuth    [2]string          // ufrag,pwd dialICE pulled off authCh; zero before
+	consumedAt      time.Time          // when consumedAuth was last set; zero before
 	abortAttempt    context.CancelFunc // non-nil for the duration of an attempt
 	candidateBuffer []ice.Candidate    // remote candidates seen since last peer-auth; replayed into each new agent
 }
+
+// supersedeGrace is the minimum time an attempt must have been
+// running with consumedAuth set before pollLoop will supersede it on
+// a fresh peer auth. Inside this window we trust the in-flight ICE
+// handshake to either converge or fail on its own (host loopback
+// converges in ~50 ms; over WAN+TURN it can take a couple of seconds
+// of connectivity checks before settling). Outside the window, fresh
+// auth from the peer is treated as a credible restart signal and is
+// allowed to abort the attempt.
+//
+// Why this is necessary: without a grace window, every fresh-auth
+// arrival aborts the in-flight dial — including auths that arrived
+// for entirely innocuous reasons (peer's pollLoop happened to
+// re-emit, or a delayed broker delivery). After abort, runPeerLink
+// retries; the retry republishes auth; the peer side sees fresh auth
+// and supersedes its own in-flight dial; and the symmetry never
+// breaks. The grace window cuts this loop by absorbing the early-
+// race noise.
+const supersedeGrace = 3 * time.Second
 
 // currentSession returns the persistent session for remoteID, or nil
 // if setupPeerSession hasn't installed it yet. Used by pollLoop to
@@ -1164,10 +1227,15 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 
 	// Record what we're about to dial against, so pollLoop can detect
 	// fresher auth from the peer and abort the attempt. See peerSession
-	// docstring for why this is necessary.
+	// docstring for why this is necessary. consumedAt anchors the
+	// supersede grace window (see supersedeGrace).
 	sess.mu.Lock()
 	sess.consumedAuth = remote
+	sess.consumedAt = time.Now()
 	sess.mu.Unlock()
+	if m.onAttemptStarted != nil {
+		m.onAttemptStarted(remoteID)
+	}
 
 	// 60s safety net; pion's default connectivity-check window is 30s
 	// so if Dial/Accept hasn't succeeded by then the state callback
@@ -1292,8 +1360,11 @@ func (m *Mesh) pollLoop(ctx context.Context) {
 				//      belong to the previous peer epoch and won't
 				//      pair against the new credentials.
 				//   2. If an attempt is currently in flight against
-				//      different consumed creds, abort it; runPeerLink
-				//      retries with a fresh agent + republished auth.
+				//      different consumed creds AND has been running
+				//      long enough (see supersedeGrace) for the
+				//      handshake to have had a fair chance, abort it;
+				//      runPeerLink retries with a fresh agent +
+				//      republished auth.
 				//   3. (Outside mu, below.) Replace the buffered auth
 				//      in authCh so the next dialICE iteration reads
 				//      the freshest value.
@@ -1303,9 +1374,15 @@ func (m *Mesh) pollLoop(ctx context.Context) {
 				if sess.abortAttempt != nil &&
 					sess.consumedAuth != zero &&
 					sess.consumedAuth != newAuth {
-					log.Printf("[%s] fresh auth (ufrag=%s) supersedes consumed (ufrag=%s) — aborting attempt",
-						msg.From, newAuth[0], sess.consumedAuth[0])
-					sess.abortAttempt()
+					elapsed := time.Since(sess.consumedAt)
+					if elapsed >= supersedeGrace {
+						log.Printf("[%s] fresh auth (ufrag=%s) supersedes consumed (ufrag=%s) after %s — aborting attempt",
+							msg.From, newAuth[0], sess.consumedAuth[0], elapsed.Round(time.Millisecond))
+						sess.abortAttempt()
+					} else {
+						log.Printf("[%s] fresh auth (ufrag=%s) ignored — in-flight attempt has only run %s (< %s grace); newer creds queued for the next attempt",
+							msg.From, newAuth[0], elapsed.Round(time.Millisecond), supersedeGrace)
+					}
 				}
 				sess.mu.Unlock()
 

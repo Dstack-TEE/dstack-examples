@@ -116,12 +116,13 @@ func (b *testBroker) handlePoll(w http.ResponseWriter, r *http.Request) {
 // =============================================================================
 
 type testPeer struct {
-	id        string
-	mesh      *Mesh
-	cancel    context.CancelFunc
-	linkUp    chan string // peer-ID of the OTHER side, sent once per "link up"
-	done      chan struct{}
-	logPrefix string
+	id             string
+	mesh           *Mesh
+	cancel         context.CancelFunc
+	linkUp         chan string // peer-ID of the OTHER side, sent once per "link up"
+	attemptStarted chan string // peer-ID of the OTHER side, sent every time consumedAuth gets set
+	done           chan struct{}
+	logPrefix      string
 }
 
 // newTestPeer builds a Mesh for one side. peers is the full PEERS_JSON
@@ -145,15 +146,22 @@ func newTestPeer(t *testing.T, brokerURL, selfID string, peers []Peer, allowlist
 	}
 	m := newMesh(cfg)
 	tp := &testPeer{
-		id:        selfID,
-		mesh:      m,
-		linkUp:    make(chan string, 64),
-		done:      make(chan struct{}),
-		logPrefix: "[" + selfID + "] ",
+		id:             selfID,
+		mesh:           m,
+		linkUp:         make(chan string, 64),
+		attemptStarted: make(chan string, 64),
+		done:           make(chan struct{}),
+		logPrefix:      "[" + selfID + "] ",
 	}
 	m.onLinkUp = func(peerID string) {
 		select {
 		case tp.linkUp <- peerID:
+		default:
+		}
+	}
+	m.onAttemptStarted = func(peerID string) {
+		select {
+		case tp.attemptStarted <- peerID:
 		default:
 		}
 	}

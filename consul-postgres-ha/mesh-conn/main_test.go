@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 )
@@ -48,26 +47,6 @@ func (b *testBroker) publishAuth(from, to, ufrag, pwd string) {
 	b.push(to, Message{From: from, Type: "auth", Data: ufrag + ":" + pwd})
 }
 
-// waitBothPublishedAuth waits until both peers have observed each
-// other's auth (visible in the log as "ice state: Checking" or similar
-// progress). On a green path, this is the point at which an injected
-// fresh-auth will actually supersede a consumed value.
-//
-// We use a log-grep ("ice state:") because it's the cheapest progress
-// signal that mesh-conn already emits per peer.
-func waitForChecking(t *testing.T, sink *testLogSink, peerID string, deadline time.Duration) error {
-	t.Helper()
-	needle := fmt.Sprintf("[%s] ice state: Checking", peerID)
-	endByT := time.Now().Add(deadline)
-	for time.Now().Before(endByT) {
-		if strings.Contains(sink.String(), needle) {
-			return nil
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return fmt.Errorf("timed out waiting for %q in logs", needle)
-}
-
 // TestAuthRaceConvergence is the regression test for the ICE auth-race
 // convergence bug.
 //
@@ -104,25 +83,48 @@ func TestAuthRaceConvergence(t *testing.T) {
 	a.start(ctx)
 	b.start(ctx)
 
-	// Wait until both peers have reached the connectivity-check phase —
-	// this is the moment where sess.consumedAuth is non-zero on both
-	// sides and a fresh-auth injection will trigger the supersession
-	// path. Without this wait, the injection might race ahead of the
-	// auth consumption and just get dropped.
-	if err := waitForChecking(t, sink, "peer-B", 5*time.Second); err != nil {
-		// Peer-A's log line names the OTHER side ("peer-B"), so we
-		// wait for "[peer-B] ice state: Checking" which is logged from
-		// inside peer-A's Mesh.
-		t.Fatalf("peer-A never reached Checking: %v\n\nlogs:\n%s", err, sink.String())
-	}
-	if err := waitForChecking(t, sink, "peer-A", 5*time.Second); err != nil {
-		t.Fatalf("peer-B never reached Checking: %v\n\nlogs:\n%s", err, sink.String())
+	// Wait until peer-A has actually consumed peer-B's real auth and
+	// is about to call agent.Dial. The onAttemptStarted hook fires at
+	// exactly that moment inside dialICE (after `sess.consumedAuth =
+	// remote`, before `agent.Dial`/`Accept`). Injecting the forge
+	// before this point would just race the broker queue and possibly
+	// be the value peer-A consumes from authCh — that would dial
+	// against fake creds and never reach Checking. Injecting after
+	// this point guarantees we land inside the in-flight window the
+	// supersession check guards.
+	select {
+	case <-a.attemptStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("peer-A never consumed remote auth\n\nlogs:\n%s", sink.String())
 	}
 
-	// Inject a forged fresh-auth from peer-B to peer-A. This impersonates
-	// "peer-B restarted while peer-A was mid-Dial" and triggers the
-	// supersession path in peer-A's pollLoop.
-	broker.publishAuth("peer-B", "peer-A", "fakeufragXYZ123", "fakepwdABCDEF0123456789012")
+	// Sustained forge injection: a single forge can land after the
+	// loopback ICE check completes (~10–60 ms window) and slip a
+	// "passed" result through without exercising the bug. A burst of
+	// 20 forges at 50 ms intervals plugs that window without
+	// poisoning the original authCh (peer-A has already consumed
+	// peer-B's real auth before we start). On the BROKEN code the
+	// first forge that arrives while peer-A is still in connectivity-
+	// check triggers the supersession path; from there the symmetric
+	// retry-and-republish loop never converges. On the FIXED code the
+	// grace window absorbs every forge and the legitimate ICE check
+	// completes.
+	forgeCtx, stopForge := context.WithCancel(ctx)
+	t.Cleanup(stopForge)
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; i < 20; i++ {
+			ufrag := fmt.Sprintf("forge%04dABCDEFGH", i)
+			pwd := fmt.Sprintf("forgepwd%04dABCDEFGHIJKLMNOPQRSTU", i)
+			broker.publishAuth("peer-B", "peer-A", ufrag, pwd)
+			select {
+			case <-forgeCtx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
 
 	// Now assert that despite the race kick, both peers eventually
 	// converge to link-up within 30 s. Before the fix this fails the
