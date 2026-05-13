@@ -3,27 +3,51 @@
 #
 # This is the entire platform plumbing for a CVM, in one process tree:
 #   1. bootstrap-secrets — one-shot init; writes /run/instance/info.json
-#                          (identity only — no per-protocol ports anymore)
+#                          (identity only — no per-protocol ports)
 #   2. ip addr add       — provisions peer-VIP loopback aliases for every
-#                          peer in PEERS_JSON, and service-VIP aliases for
-#                          every entry in UPSTREAMS_JSON (workers only)
-#   3. mesh-conn         — QUIC-on-pion/ICE overlay; binds the static
-#                          allowlist {21000, 21001, 8300, 8301} on every
-#                          OTHER peer's VIP and forwards
+#                          peer in PEERS_JSON, and service-VIP aliases
+#                          for every entry in SERVICES_JSON (workers only)
+#   3. mesh-conn         — QUIC-on-pion/ICE overlay; binds the allowlist
+#                          (per-service sidecar ports + {8300, 8301})
+#                          on every OTHER peer's VIP and forwards
 #   4. consul agent      — server (coordinators) or client (workers).
 #                          bind=127.0.0.1, advertise=127.50.0.<self-vip>;
 #                          retry-joins to coords' VIPs on serf port
-#   5. envoy × 2         — workers only. One Envoy per Connect sidecar:
-#                          21000 for webdemo, 21001 for postgres. Stock
-#                          Consul Connect requires one sidecar per service,
-#                          hence two Envoy processes.
+#   5. envoy × N         — workers only. One Envoy per producer-side
+#                          sidecar (one per unique canonical port in
+#                          SERVICES_JSON). Each Envoy gets a distinct
+#                          --base-id and admin-port.
 #   6. config entries    — coordinator-0 only, after quorum: writes
-#                          proxy-defaults, postgres service-resolver,
-#                          and a default-allow intentions stub
+#                          proxy-defaults, per-parent subset resolvers,
+#                          per-subset redirect resolvers, and per-parent
+#                          default-allow intentions — all generated from
+#                          SERVICES_JSON, no per-workload code paths.
+#
+# SERVICES_JSON shape (single source of truth; cluster.tf generates this):
+#
+#   [
+#     {
+#       "name":             "webdemo",     # Consul service name + /etc/hosts alias
+#       "port":             8080,          # canonical app port (127.0.0.1:port)
+#       "subset":           null,          # optional subset filter
+#       "vip":              10,            # service-VIP last octet (127.10.0.vip)
+#       "sidecar_port":     21000,         # Envoy public mTLS port (shared per backend)
+#       "parent":           "webdemo",     # parent Consul service name
+#       "registers_parent": true           # platform registers parent service inline
+#     },
+#     ...
+#   ]
+#
+# Services with the same canonical `port` collapse onto one backend
+# (one sidecar_port, one Envoy). `registers_parent=false` means the
+# workload auto-registers its parent service under its own scope; the
+# platform only registers a standalone connect-proxy pointing at it,
+# and the workload owns any role-tag mutation on the sidecar via the
+# Consul agent HTTP API.
 #
 # Supervision policy: any one inner process dying takes the whole
 # container down. Compose `restart: on-failure` brings it back in
-# ~5s, well inside Patroni's 30s lock TTL.
+# ~5s, well inside typical leader-lock TTLs.
 
 set -euo pipefail
 exec 2>&1
@@ -59,19 +83,34 @@ for vip in $(jq -r '.[].vip' <<<"$PEERS_JSON"); do
 done
 log "peer VIPs provisioned: $(jq -r '[.[].vip]' <<<"$PEERS_JSON")"
 
-# Service VIPs (workers only): 127.10.0.<vip>/32 per declared upstream.
-# UPSTREAMS_JSON shape: [{"name": "postgres-master", "vip": 20, "port": 5432}, ...]
-# Each entry gets a loopback alias; the actual Envoy listener on
-# (127.10.0.<vip>, port) is created later when the sidecar Envoy starts.
-UPSTREAMS_JSON="${UPSTREAMS_JSON:-[]}"
+# Service VIPs (workers only): one 127.10.0.<vip>/32 alias per logical
+# service entry, including subset entries (postgres-master + -replica
+# each get their own VIP, so they resolve to distinct consumer-side
+# Envoy listeners even when they share a producer-side sidecar).
+SERVICES_JSON="${SERVICES_JSON:-[]}"
 if [ "$ROLE" = "worker" ]; then
-  for vip in $(jq -r '.[].vip' <<<"$UPSTREAMS_JSON"); do
+  for vip in $(jq -r '.[].vip' <<<"$SERVICES_JSON"); do
     ip addr add "127.10.0.${vip}/32" dev lo 2>/dev/null || true
   done
-  log "service VIPs provisioned: $(jq -r '[.[] | "\(.name)=127.10.0.\(.vip):\(.port)"]' <<<"$UPSTREAMS_JSON")"
+  log "service VIPs provisioned: $(jq -r '[.[] | "\(.name)=127.10.0.\(.vip):\(.port)"]' <<<"$SERVICES_JSON")"
 fi
 
-# ---- 3. mesh-conn (background, long-running) ----
+# ---- 3. mesh-conn allowlist + start ----
+# MESH_CONN_ALLOWLIST: per-backend sidecar_ports (unique because
+# services sharing a canonical port collapse onto one sidecar) plus
+# the two static Consul-infra ports (8300 RPC, 8301 gossip). mesh-conn
+# reads this from env at startup; the substance — which ports cross
+# peer boundaries — is declared in cluster.tf, not in mesh-conn code.
+MESH_CONN_ALLOWLIST=$(
+  jq -c '
+    ( [ .[] | .sidecar_port ] | unique | map({port: ., udp: false}) )
+    +
+    [ {port: 8300, udp: false}, {port: 8301, udp: true} ]
+  ' <<<"$SERVICES_JSON"
+)
+export MESH_CONN_ALLOWLIST
+log "mesh-conn allowlist: $MESH_CONN_ALLOWLIST"
+
 log "starting mesh-conn"
 /usr/local/bin/mesh-conn 2>&1 | prefix mesh-conn &
 MESH=$!
@@ -103,8 +142,8 @@ CONSUL_ARGS=(
   #     loopback → Consul receives directly. No mesh-conn hop.
   -bind="127.50.0.${SELF_VIP}"
   -advertise="127.50.0.${SELF_VIP}"
-  # HTTP API + gRPC stay loopback-only — apps and Patroni use them
-  # from inside the same network namespace, never via the mesh.
+  # HTTP API + gRPC stay loopback-only — apps and workload entrypoints
+  # use them from inside the same network namespace, never via the mesh.
   -client=127.0.0.1
   -serf-lan-port=8301
   -server-port=8300
@@ -149,161 +188,172 @@ wait_consul_ready() {
   done
 }
 
-# ---- 5. workers: register postgres sidecar + launch both Envoys ----
+# ---- 5. workers: register one Consul service+sidecar per backend, launch Envoys ----
 ENVOYS=()
 if [ "$ROLE" = "worker" ]; then
   log "waiting for local consul agent..."
   wait_consul_ready
 
-  # Register the standalone postgres Connect sidecar proxy. The proxy's
-  # destination_service_name is `postgres` (the parent service Patroni
-  # auto-registers); inbound mTLS for `postgres` lands here and is
-  # forwarded to local 127.0.0.1:5432. Service-resolver entries map
-  # `postgres-master`/`postgres-replica` to subsets of `postgres`
-  # filtered by the role tag Patroni stamps on each registration.
-  POSTGRES_MASTER_VIP=$(jq -r '.[] | select(.name=="postgres-master") | .vip' <<<"$UPSTREAMS_JSON")
-  POSTGRES_REPLICA_VIP=$(jq -r '.[] | select(.name=="postgres-replica") | .vip' <<<"$UPSTREAMS_JSON")
-  # Patroni's auto-registered parent service uses CLUSTER_NAME as the
-  # service name (Patroni-internal "scope"). The Connect sidecar
-  # terminates inbound mTLS for that same name; consumers reach it via
-  # the postgres-master/-replica service-resolver redirects below.
-  cat > /tmp/postgres-sidecar.json <<EOF
-{
-  "Kind": "connect-proxy",
-  "ID": "postgres-sidecar-${PEER_ID}",
-  "Name": "postgres-sidecar-proxy",
-  "Address": "127.50.0.${SELF_VIP}",
-  "Port": 21001,
-  "Tags": [],
-  "Proxy": {
-    "DestinationServiceName": "${CLUSTER_NAME}",
-    "LocalServiceAddress": "127.0.0.1",
-    "LocalServicePort": 5432,
-    "Upstreams": [
-      {
-        "DestinationName": "postgres-master",
-        "LocalBindAddress": "127.10.0.${POSTGRES_MASTER_VIP}",
-        "LocalBindPort": 5432
-      },
-      {
-        "DestinationName": "postgres-replica",
-        "LocalBindAddress": "127.10.0.${POSTGRES_REPLICA_VIP}",
-        "LocalBindPort": 5432
-      }
-    ]
-  }
-}
-EOF
-  # Re-register on every boot via the agent HTTP API (PUT-idempotent).
-  # The `consul services register` CLI uses a different file format
-  # (HCL-style with a top-level `service` block); the HTTP API takes
-  # the flat capital-letter JSON above and is consistent with how
-  # webdemo registers itself.
-  log "registering postgres-sidecar-proxy (port=21001)"
-  until curl -fsS -X PUT --data-binary @/tmp/postgres-sidecar.json \
-           http://127.0.0.1:8500/v1/agent/service/register; do
-    log "postgres-sidecar-proxy register failed; retrying"
-    sleep 2
-  done
-
-  # Wait for Connect CA to be able to mint leaf certs. Servers don't
-  # need Envoy to form quorum (Raft RPC rides peer VIPs as plain TCP),
-  # but workers can't start their sidecars until a server can issue.
-  # The leaf-cert API is HTTP-only — there is no `consul connect ca
-  # leaf` CLI subcommand (only get-config / set-config).
-  log "waiting for connect CA to be ready..."
-  until curl -fsS "http://127.0.0.1:8500/v1/agent/connect/ca/leaf/${CLUSTER_NAME}" >/dev/null 2>&1; do
-    sleep 2
-  done
-  log "connect CA ready"
-
-  # Webdemo Envoy supervise loop. We use `consul connect envoy
-  # -bootstrap` to generate the JSON, then exec envoy ourselves; this
-  # bypasses Consul's Envoy version-compatibility check (Envoy 1.30
-  # bundled with the sidecar image isn't on Consul 1.19's supported
-  # list, but the bootstrap config is fine). Webdemo registers its own
-  # SidecarService block from webdemo/main.go; the bootstrap call
-  # blocks until that registration is in place.
+  # Iterate unique backends — one per distinct sidecar_port. For each
+  # backend we render one Consul registration JSON and one Envoy
+  # supervise loop. The two patterns are folded inline because they
+  # only diverge in how Consul resolves the parent service:
   #
-  # `set +e` because envoy crashes mid-startup count as expected events
-  # the while loop handles by retrying — outer `set -e` would bubble
-  # them up as a "child exited" → container teardown.
-  (
-    set +eo pipefail
-    while true; do
-      if consul connect envoy \
-            -sidecar-for="webdemo-${PEER_ID}" \
-            -admin-bind="127.0.0.1:19000" \
-            -bootstrap \
-            > /tmp/envoy-webdemo.json 2>/dev/null; then
-        # --base-id distinguishes this envoy from the postgres one
-        # below; otherwise both fight over the default base-id=0
-        # hot-restart domain socket and one fails with EADDRINUSE.
-        envoy -c /tmp/envoy-webdemo.json -l info --base-id 1 2>&1
-      else
-        echo "[envoy-webdemo] waiting for webdemo sidecar registration..."
-      fi
+  #   pattern A (registers_parent=true):  inline SidecarService on
+  #     the parent service (webdemo-style). The PUT below registers
+  #     BOTH the parent service AND its sidecar in one shot.
+  #
+  #   pattern B (registers_parent=false): standalone connect-proxy
+  #     registration — the parent service is auto-registered by the
+  #     workload itself under its `scope`; the platform just stands up
+  #     the Envoy proxy that fronts it.
+  BACKENDS=$(jq -c '
+    group_by(.sidecar_port) | map({
+      sidecar_port:     .[0].sidecar_port,
+      port:             .[0].port,
+      parent:           .[0].parent,
+      registers_parent: .[0].registers_parent,
+      # Upstreams = all logical services sharing this backend. Each
+      # one gets its own consumer-side Envoy listener on its VIP.
+      # Distinct VIPs across backends mean every Envoy can bind its
+      # upstream listeners without colliding with other Envoys.
+      upstreams: [.[] | {
+        DestinationName:  .name,
+        LocalBindAddress: ("127.10.0." + (.vip|tostring)),
+        LocalBindPort:    .port
+      }]
+    })
+  ' <<<"$SERVICES_JSON")
+
+  BACKEND_IDX=0
+  while IFS= read -r BACKEND; do
+    [ -z "$BACKEND" ] && continue
+
+    PARENT=$(jq -r '.parent' <<<"$BACKEND")
+    SIDECAR_PORT=$(jq -r '.sidecar_port' <<<"$BACKEND")
+    LOCAL_PORT=$(jq -r '.port' <<<"$BACKEND")
+    REGISTERS_PARENT=$(jq -r '.registers_parent' <<<"$BACKEND")
+    UPSTREAMS=$(jq -c '.upstreams' <<<"$BACKEND")
+    BASE_ID=$((BACKEND_IDX + 1))
+    ADMIN_PORT=$((19000 + BACKEND_IDX))
+    SIDECAR_ID="${PARENT}-sidecar-${PEER_ID}"
+    SPEC_FILE="/tmp/sidecar-${PARENT}.json"
+    ENVOY_BOOT="/tmp/envoy-${PARENT}.json"
+
+    if [ "$REGISTERS_PARENT" = "true" ]; then
+      # Pattern A: platform owns the parent service AND its sidecar.
+      # TCP check on the canonical port — generic across HTTP/non-HTTP
+      # workloads; passes once the app's listener is up. SidecarService
+      # inline means a single PUT registers both records.
+      jq -n \
+        --arg name "$PARENT" \
+        --arg id "${PARENT}-${PEER_ID}" \
+        --arg peer "$PEER_ID" \
+        --argjson port "$LOCAL_PORT" \
+        --arg vip "$SELF_VIP" \
+        --argjson sport "$SIDECAR_PORT" \
+        --argjson upstreams "$UPSTREAMS" '{
+          Name: $name,
+          ID: $id,
+          Address: "127.0.0.1",
+          Port: $port,
+          Tags: ["peer=" + $peer],
+          Check: {
+            TCP: ("127.0.0.1:" + ($port|tostring)),
+            Interval: "10s",
+            Timeout: "2s",
+            DeregisterCriticalServiceAfter: "1m"
+          },
+          Connect: {
+            SidecarService: {
+              Address: ("127.50.0." + $vip),
+              Port: $sport,
+              Proxy: {
+                LocalServiceAddress: "127.0.0.1",
+                LocalServicePort: $port,
+                Upstreams: $upstreams
+              }
+            }
+          }
+        }' > "$SPEC_FILE"
+      ENVOY_ARGS=(-sidecar-for="${PARENT}-${PEER_ID}")
+    else
+      # Pattern B: workload auto-registers the parent under its
+      # `scope`; platform registers a standalone connect-proxy pointing
+      # at it. Role/state tags on the sidecar (e.g. master/replica) are
+      # managed by the workload itself via the Consul agent HTTP API;
+      # the subset resolvers below filter on those tags.
+      jq -n \
+        --arg id "$SIDECAR_ID" \
+        --arg name "${PARENT}-sidecar-proxy" \
+        --arg parent "$PARENT" \
+        --arg vip "$SELF_VIP" \
+        --argjson port "$LOCAL_PORT" \
+        --argjson sport "$SIDECAR_PORT" \
+        --argjson upstreams "$UPSTREAMS" '{
+          Kind: "connect-proxy",
+          ID: $id,
+          Name: $name,
+          Address: ("127.50.0." + $vip),
+          Port: $sport,
+          Tags: [],
+          Proxy: {
+            DestinationServiceName: $parent,
+            LocalServiceAddress: "127.0.0.1",
+            LocalServicePort: $port,
+            Upstreams: $upstreams
+          }
+        }' > "$SPEC_FILE"
+      ENVOY_ARGS=(-proxy-id="$SIDECAR_ID")
+    fi
+
+    # Re-register on every boot via the agent HTTP API (PUT-idempotent).
+    log "registering ${PARENT} sidecar (port=${SIDECAR_PORT}, base-id=${BASE_ID})"
+    until curl -fsS -X PUT --data-binary @"$SPEC_FILE" \
+             http://127.0.0.1:8500/v1/agent/service/register; do
+      log "${PARENT} sidecar register failed; retrying"
       sleep 2
     done
-  ) 2>&1 | prefix envoy-webdemo &
-  ENVOYS+=("$!")
 
-  # Postgres Envoy supervise loop, same pattern. Bootstrap from the
-  # standalone connect-proxy registration above.
-  (
-    set +eo pipefail
-    while true; do
-      if consul connect envoy \
-            -proxy-id="postgres-sidecar-${PEER_ID}" \
-            -admin-bind="127.0.0.1:19001" \
-            -bootstrap \
-            > /tmp/envoy-postgres.json 2>/dev/null; then
-        # See note on --base-id in the webdemo envoy block above.
-        envoy -c /tmp/envoy-postgres.json -l info --base-id 2 2>&1
-      else
-        echo "[envoy-postgres] waiting for ca leaf / proxy registration..."
-      fi
+    # Wait for Connect CA to be able to mint leaf certs — done once
+    # per backend, but the operation is idempotent so the extra polls
+    # on subsequent backends are cheap.
+    log "waiting for connect CA to be ready (backend=${PARENT})..."
+    until curl -fsS "http://127.0.0.1:8500/v1/agent/connect/ca/leaf/${CLUSTER_NAME}" >/dev/null 2>&1; do
       sleep 2
     done
-  ) 2>&1 | prefix envoy-postgres &
-  ENVOYS+=("$!")
 
-  # Role watcher: mirror Patroni's current role into the postgres-
-  # sidecar registration's Tags. Service-resolver subset filters
-  # (Service.Tags contains "master") apply to the SIDECAR registration,
-  # not to Patroni's parent service. So we poll Patroni's REST API
-  # (127.0.0.1:8008, shared via network_mode: host) and re-PUT the
-  # sidecar with Tags=["master"] / ["replica"] on role change. Patroni
-  # itself drives the role via its DCS leader-lock; this loop just
-  # mirrors that into a shape Connect EDS understands.
-  #
-  # Initial state: Tags=[] (the registration above). Until the watcher
-  # runs at least once, postgres-master and postgres-replica EDS
-  # return empty. The first iteration runs ~5s after Patroni REST
-  # comes up; consumers pre-watch will reconnect when EDS populates.
-  (
-    set +eo pipefail
-    PREV=""
-    while true; do
-      sleep 5
-      ROLE=$(curl -fsS --max-time 2 http://127.0.0.1:8008/ 2>/dev/null \
-              | jq -r '.role // empty' 2>/dev/null)
-      case "$ROLE" in
-        master|primary)               TAG="master"  ;;
-        replica|standby_leader|sync_standby) TAG="replica" ;;
-        *)                            continue ;;
-      esac
-      [ "$TAG" = "$PREV" ] && continue
-      jq --arg t "$TAG" '.Tags = [$t]' /tmp/postgres-sidecar.json \
-         > /tmp/postgres-sidecar.tagged.json
-      if curl -fsS -X PUT --data-binary @/tmp/postgres-sidecar.tagged.json \
-              http://127.0.0.1:8500/v1/agent/service/register; then
-        echo "[role-watcher] postgres-sidecar tag: $PREV -> $TAG (patroni role=$ROLE)"
-        PREV="$TAG"
-      fi
-    done
-  ) 2>&1 | prefix role-watcher &
-  ENVOYS+=("$!")
+    # Envoy supervise loop. `consul connect envoy -bootstrap` generates
+    # the JSON, then we exec envoy ourselves; this bypasses Consul's
+    # Envoy version-compat check (Envoy 1.30 isn't on Consul 1.19's
+    # supported list, but the bootstrap config itself is fine).
+    #
+    # `set +e` because envoy crashes mid-startup count as expected
+    # events the while loop handles by retrying — outer `set -e` would
+    # bubble them up as a "child exited" → container teardown.
+    #
+    # --base-id distinguishes each envoy from its siblings; otherwise
+    # they fight over the default base-id=0 hot-restart domain socket
+    # and one fails with EADDRINUSE.
+    (
+      set +eo pipefail
+      while true; do
+        if consul connect envoy \
+              "${ENVOY_ARGS[@]}" \
+              -admin-bind="127.0.0.1:${ADMIN_PORT}" \
+              -bootstrap \
+              > "$ENVOY_BOOT" 2>/dev/null; then
+          envoy -c "$ENVOY_BOOT" -l info --base-id "$BASE_ID" 2>&1
+        else
+          echo "[envoy-${PARENT}] waiting for sidecar registration / leaf cert..."
+        fi
+        sleep 2
+      done
+    ) 2>&1 | prefix "envoy-${PARENT}" &
+    ENVOYS+=("$!")
+
+    BACKEND_IDX=$((BACKEND_IDX + 1))
+  done < <(jq -c '.[]' <<<"$BACKENDS")
 fi
 
 # ---- 6. coordinator-0: write Connect config entries (idempotent) ----
@@ -326,45 +376,60 @@ Name = "global"
 Config { protocol = "tcp" }
 HCL
 
-    # Postgres subset definitions. Patroni auto-registers the parent
-    # service under its `scope` (= CLUSTER_NAME) with role tags
-    # (master|replica); subsets pick the right instances by tag, and
-    # the redirect resolvers expose consumer-facing names that are
-    # independent of Patroni's scope.
-    consul config write - <<HCL || true
+    # Per-parent subset resolvers: for every parent service that has
+    # any subset-bearing logical names, declare the subset filters on
+    # the parent. The filter pulls instances whose Service.Tags
+    # contains the subset name; the workload's own entrypoint writes
+    # those tags onto its sidecar registration (pattern B).
+    jq -c '
+      group_by(.parent)
+      | map({
+          parent: .[0].parent,
+          subsets: [ .[] | select(.subset != null) | .subset ] | unique
+        })
+      | map(select(.subsets | length > 0))
+      | .[]
+    ' <<<"$SERVICES_JSON" | while IFS= read -r row; do
+      [ -z "$row" ] && continue
+      parent=$(jq -r '.parent' <<<"$row")
+      subsets_hcl=$(jq -r '.subsets | map("  " + . + " = { Filter = \"Service.Tags contains \\\"" + . + "\\\"\" }") | join("\n")' <<<"$row")
+      consul config write - <<HCL || true
 Kind    = "service-resolver"
-Name    = "${CLUSTER_NAME}"
+Name    = "${parent}"
 Subsets = {
-  master  = { Filter = "Service.Tags contains \"master\"" }
-  replica = { Filter = "Service.Tags contains \"replica\"" }
+${subsets_hcl}
 }
 HCL
+    done
 
-    consul config write - <<HCL || true
+    # Per-subset redirect resolvers: each subset-bearing logical name
+    # gets a service-resolver that redirects to its parent + subset.
+    # That's what makes `postgres-master:5432` resolve to the master
+    # subset of the parent service.
+    jq -c '.[] | select(.subset != null)' <<<"$SERVICES_JSON" | while IFS= read -r row; do
+      [ -z "$row" ] && continue
+      name=$(jq -r '.name' <<<"$row")
+      parent=$(jq -r '.parent' <<<"$row")
+      subset=$(jq -r '.subset' <<<"$row")
+      consul config write - <<HCL || true
 Kind     = "service-resolver"
-Name     = "postgres-master"
-Redirect { Service = "${CLUSTER_NAME}", ServiceSubset = "master" }
+Name     = "${name}"
+Redirect { Service = "${parent}", ServiceSubset = "${subset}" }
 HCL
+    done
 
-    consul config write - <<HCL || true
-Kind     = "service-resolver"
-Name     = "postgres-replica"
-Redirect { Service = "${CLUSTER_NAME}", ServiceSubset = "replica" }
-HCL
-
-    # Default-allow intentions for now. Tightening this to per-pair
+    # Default-allow intentions per parent. Tightening this to per-pair
     # allow + default-deny is straightforward but out of scope here;
     # see design/attestation-admission.md for the longer-term shape.
-    consul config write - <<HCL || true
+    jq -r '[.[].parent] | unique | .[]' <<<"$SERVICES_JSON" | while IFS= read -r parent; do
+      [ -z "$parent" ] && continue
+      consul config write - <<HCL || true
 Kind = "service-intentions"
-Name = "${CLUSTER_NAME}"
+Name = "${parent}"
 Sources = [{ Name = "*", Action = "allow" }]
 HCL
-    consul config write - <<'HCL' || true
-Kind = "service-intentions"
-Name = "webdemo"
-Sources = [{ Name = "*", Action = "allow" }]
-HCL
+    done
+
     log "config-entry writer: done"
   ) 2>&1 | prefix consul-config &
 fi
