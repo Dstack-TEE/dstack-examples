@@ -153,18 +153,80 @@ locals {
   # COORDINATOR_VIPS — comma-separated for serf retry-join.
   coordinator_vips = join(",", [for p in local.peers : tostring(p.vip) if p.role == "coordinator"])
 
-  # Service VIPs: 127.10.0.<vip>/32 — one per Connect upstream a
-  # worker consumes. Three services in this template (extend by
-  # adding entries here + Connect upstreams in the sidecar config):
-  #   webdemo          for the cross-peer fan-out demo
-  #   postgres-master  the Patroni leader, leader-aware via subset filter
-  #   postgres-replica any Patroni replica
-  service_vips = [
-    { name = "webdemo", vip = 10, port = 8080 },
-    { name = "postgres-master", vip = 20, port = 5432 },
-    { name = "postgres-replica", vip = 21, port = 5432 },
+  # ---------- Service declarations ----------
+  #
+  # local.services is the single source of truth for every microservice
+  # on the mesh. Adding a service is one entry here; the platform
+  # sidecar reads SERVICES_JSON at startup and generates everything
+  # downstream (loopback aliases, /etc/hosts, Consul registrations,
+  # Envoy supervise loops, mesh-conn allowlist).
+  #
+  #   name    Consul service name (also the /etc/hosts alias).
+  #   port    Canonical app port. App binds 127.0.0.1:port; the local
+  #           Envoy upstream listener binds 127.10.0.<vip>:port.
+  #   subset  Optional. When set, this entry is a subset filter on a
+  #           shared backend (the postgres-master/-replica split is the
+  #           only case today). Entries sharing the same `port` collapse
+  #           into one producer-side sidecar — same Envoy public
+  #           listener, same Connect-mTLS endpoint, just different
+  #           service-resolver names with different subset filters.
+  services_raw = [
+    { name = "webdemo", port = 8080, subset = null },
+    { name = "postgres-master", port = 5432, subset = "master" },
+    { name = "postgres-replica", port = 5432, subset = "replica" },
   ]
-  upstreams_json = jsonencode(local.service_vips)
+
+  # Backends = unique canonical ports in declaration order. Each
+  # backend gets ONE producer-side sidecar at sidecar_port=21000+idx.
+  # Logical names sharing a backend (e.g. postgres-master + -replica)
+  # ride the same Envoy public listener; their distinct names live
+  # purely in service-resolver redirects on the Consul side.
+  service_ports = distinct([for s in local.services_raw : s.port])
+
+  port_sidecar = {
+    for idx, p in local.service_ports : tostring(p) => 21000 + idx
+  }
+
+  # Parent service name per backend. If at least one entry at this
+  # port has subset=null, that entry's `name` is the parent (the
+  # platform sidecar registers a Consul service with Connect.SidecarService
+  # inline — pattern A, webdemo case). If every entry has a subset,
+  # the parent is var.cluster_name (pattern B — Patroni-style: the
+  # parent service is auto-registered by the workload itself under
+  # its `scope`, so the platform only registers a standalone
+  # connect-proxy pointing at it).
+  port_parent = {
+    for p in local.service_ports : tostring(p) => try(
+      [for s in local.services_raw : s.name if s.port == p && s.subset == null][0],
+      var.cluster_name,
+    )
+  }
+
+  # Whether the platform registers the parent service itself.
+  # False = the workload (e.g. Patroni) auto-registers its parent.
+  port_registers_parent = {
+    for p in local.service_ports : tostring(p) =>
+    length([for s in local.services_raw : s if s.port == p && s.subset == null]) > 0
+  }
+
+  # Final per-service descriptors. VIP octets allocated 10+ordinal so
+  # subset entries each get their own 127.10.0.<vip>/32 loopback alias
+  # + /etc/hosts entry — that's what makes `postgres-master:5432` and
+  # `postgres-replica:5432` resolve to different consumer-side Envoy
+  # listeners even when they share a producer-side sidecar.
+  services = [
+    for idx, s in local.services_raw : {
+      name             = s.name
+      port             = s.port
+      subset           = s.subset
+      vip              = 10 + idx
+      sidecar_port     = local.port_sidecar[tostring(s.port)]
+      parent           = local.port_parent[tostring(s.port)]
+      registers_parent = local.port_registers_parent[tostring(s.port)]
+    }
+  ]
+
+  services_json = jsonencode(local.services)
 }
 
 # ---------- Coordinator ----------
@@ -228,7 +290,7 @@ resource "phala_app" "worker" {
   env = {
     CLUSTER_NAME       = var.cluster_name
     PEERS_JSON         = local.peers_json
-    UPSTREAMS_JSON     = local.upstreams_json
+    SERVICES_JSON      = local.services_json
     WORKER_ORDINAL     = tostring(each.value)
     EXPECTED_REPLICAS  = var.worker_replicas + var.coordinator_replicas
     COORDINATOR_VIPS   = local.coordinator_vips
@@ -252,6 +314,20 @@ resource "phala_app" "worker" {
 
   wait_for_ready       = true
   wait_timeout_seconds = 600
+
+  # Plan-time check: every (name, subset) tuple in local.services must
+  # be unique. Catches typos like declaring two `webdemo` entries, or
+  # two `postgres-master` entries with the same subset. Backends
+  # (services sharing a canonical port) intentionally collapse onto
+  # one sidecar_port; that's not flagged.
+  lifecycle {
+    precondition {
+      condition = length(local.services) == length(distinct([
+        for s in local.services : "${s.name}/${s.subset == null ? "" : s.subset}"
+      ]))
+      error_message = "local.services has duplicate (name, subset) entries — each logical service name (with its subset) must be unique."
+    }
+  }
 
   depends_on = [phala_app.coordinator]
 }

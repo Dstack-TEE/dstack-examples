@@ -3,11 +3,14 @@
 # A "worker" CVM ends up running exactly three containers:
 #
 #   sidecar   bundled platform plumbing — bootstrap-secrets, mesh-conn,
-#             consul (client), and TWO envoys (one per Connect sidecar:
-#             webdemo on 21000, postgres on 21001). Provisions per-peer
-#             VIP loopback aliases on 127.50.0.0/24 and per-service VIP
-#             aliases on 127.10.0.0/24 at startup, so needs NET_ADMIN.
-#   patroni   the workload — Postgres + Patroni leader/replica.
+#             consul (client), and one Envoy per backend declared in
+#             SERVICES_JSON (services sharing a canonical port share a
+#             backend). Provisions per-peer VIP loopback aliases on
+#             127.50.0.0/24 and per-service VIP aliases on
+#             127.10.0.0/24 at startup, so needs NET_ADMIN.
+#   patroni   the workload — Postgres + Patroni leader/replica. Also
+#             hosts the role-watcher that mirrors Patroni's current
+#             role onto the postgres sidecar's Service.Tags.
 #   webdemo   tiny example app sitting on the mesh; swap for your
 #             own service when adapting this template.
 
@@ -28,12 +31,16 @@ services:
       - WORKER_ORDINAL=${WORKER_ORDINAL}
       - EXPECTED_REPLICAS=${EXPECTED_REPLICAS}
       # PEERS_JSON shape: [{id, vip}] — vip is the last octet in
-      # 127.50.0.0/24. mesh-conn binds the static infra-port allowlist
-      # on every other peer's VIP; entrypoint provisions the aliases.
+      # 127.50.0.0/24. mesh-conn binds the runtime allowlist on every
+      # other peer's VIP; entrypoint provisions the aliases.
       - PEERS_JSON=${PEERS_JSON}
-      # UPSTREAMS_JSON shape: [{name, vip, port}] — service VIPs the
-      # local Envoy will bind for its declared Connect upstreams.
-      - UPSTREAMS_JSON=${UPSTREAMS_JSON}
+      # SERVICES_JSON shape: [{name, port, subset, vip, sidecar_port,
+      # parent, registers_parent}] — single source of truth for every
+      # microservice on the mesh. The sidecar generates Consul
+      # registrations, Envoy supervise loops, /etc/hosts aliases, and
+      # mesh-conn's allowlist from this one env. Editing local.services
+      # in cluster.tf is the only place adding a service touches.
+      - SERVICES_JSON=${SERVICES_JSON}
       # COORDINATOR_VIPS: comma-separated list of coordinators' peer
       # VIPs. Workers retry-join 127.50.0.<vip>:8301 (serf) for each.
       - COORDINATOR_VIPS=${COORDINATOR_VIPS}
@@ -71,6 +78,10 @@ services:
     # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
     # must use the same value to land in the same cluster. Postgres
     # binds the canonical 127.0.0.1:5432; Patroni REST on 127.0.0.1:8008.
+    # The Patroni entrypoint also hosts the role-watcher loop that
+    # mirrors Patroni's current role into the postgres-sidecar
+    # registration's Service.Tags (workload-specific, lives here
+    # instead of in the platform sidecar).
     # WORKAROUND: superuser + replication passwords generated in
     # Terraform and broadcast identically to every worker. See
     # cluster.tf.
@@ -78,11 +89,14 @@ services:
       - CLUSTER_NAME=${CLUSTER_NAME}
       - PATRONI_SUPERUSER_PW=${PATRONI_SUPERUSER_PW}
       - PATRONI_REPLICATION_PW=${PATRONI_REPLICATION_PW}
-      # Service VIPs for /etc/hosts — patroni needs to resolve
-      # postgres-master to the local service VIP so its replication
-      # source string ("primary_conninfo") routes through the local
-      # Envoy → mesh → leader's Postgres.
-      - UPSTREAMS_JSON=${UPSTREAMS_JSON}
+      # SERVICES_JSON: service VIPs for /etc/hosts (patroni needs to
+      # resolve postgres-master to its local Envoy upstream so
+      # primary_conninfo routes through the mesh), AND the sidecar
+      # registration shape the role-watcher re-PUTs with tags.
+      - SERVICES_JSON=${SERVICES_JSON}
+      # PEERS_JSON: role-watcher needs SELF_VIP to set Address on the
+      # sidecar registration.
+      - PEERS_JSON=${PEERS_JSON}
     volumes:
       - /tmp/dstack-runtime/instance:/run/instance:ro
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
@@ -97,17 +111,15 @@ services:
     restart: unless-stopped
     environment:
       - PEERS_JSON=${PEERS_JSON}
-      - UPSTREAMS_JSON=${UPSTREAMS_JSON}
+      - SERVICES_JSON=${SERVICES_JSON}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
         export PEER_ID=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json)
-        export SELF_VIP=$$(echo "$$PEERS_JSON" | jq -r --arg id "$$PEER_ID" '.[] | select(.id == $$id) | .vip')
         # Append service-VIP /etc/hosts entries — each container has
         # its own /etc/hosts (network_mode: host doesn't share it).
-        echo "$$UPSTREAMS_JSON" | jq -r '.[] | "127.10.0.\(.vip)  \(.name)"' >> /etc/hosts
-        export CONSUL_HTTP_ADDR=127.0.0.1:8500
+        echo "$$SERVICES_JSON" | jq -r '.[] | "127.10.0.\(.vip)  \(.name)"' >> /etc/hosts
         exec webdemo
     volumes:
       - /tmp/dstack-runtime/instance:/run/instance:ro
