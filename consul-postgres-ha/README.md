@@ -122,20 +122,81 @@ consul-postgres-ha/
 
 ## Adapting to your own workload
 
-Three things make this opinionated for Patroni; everything else is
-generic platform plumbing.
+The mesh is **declarative**: `local.services` in `cluster.tf` is the
+single source of truth, and the platform sidecar generates Consul
+registrations, Envoy supervise loops, loopback aliases, `/etc/hosts`
+entries, and `mesh-conn`'s peer-VIP allowlist from it. Adding a
+microservice is one HCL block plus an image; no edits to `mesh-conn`,
+the sidecar entrypoint, your app's source, or the CI workflow.
 
-| Patroni-specific | Lives in |
+### Add a service: worked example
+
+Say you want a billing service on port 9090 that the existing
+`webdemo` calls into. End-to-end:
+
+1. **Declare it in `cluster.tf`** — append one entry to
+   `local.services`:
+
+   ```hcl
+   services_raw = [
+     { name = "webdemo",          port = 8080, subset = null    },
+     { name = "postgres-master",  port = 5432, subset = "master" },
+     { name = "postgres-replica", port = 5432, subset = "replica" },
+     { name = "billing",          port = 9090, subset = null    },  # ← new
+   ]
+   ```
+
+   This is the only edit to the platform.
+
+2. **Add the image** to `terraform.tfvars` (`billing_image = "..."`),
+   wire a `BILLING_IMAGE` variable + env entry on `phala_app.worker`,
+   and add a `billing` service to `compose/worker.yaml` (modelled on
+   `webdemo` — it just binds `127.0.0.1:9090` and serves).
+
+3. **`terraform apply`**. The provider's in-place env update pushes
+   the new `SERVICES_JSON` to every CVM:
+
+   - `mesh-conn`'s allowlist extends to `{21000, 21001, 21002,
+     8300, 8301}` automatically — `MESH_CONN_ALLOWLIST` is computed
+     from `SERVICES_JSON` in `mesh-sidecar/entrypoint.sh`.
+   - Workers provision `127.10.0.13/32 dev lo`, append
+     `127.10.0.13 billing` to `/etc/hosts`, and start a third Envoy
+     supervise loop with `--base-id 3 -admin-bind 127.0.0.1:19002`.
+   - Coordinator-0 writes a default-allow intention for `billing`
+     and any subset/redirect resolvers implied by the declaration.
+
+4. **From any container on any peer**, `curl http://billing:9090/...`
+   load-balances across all peers' `billing` instances over Connect
+   mTLS. No application-side service-discovery code.
+
+### What the convention does for you
+
+| Field on each entry | What it controls |
 |---|---|
-| The Patroni image itself | `patroni/` |
-| Patroni env block + REST/Postgres port choices | `compose/worker.yaml` |
-| Postgres service VIPs + Connect upstreams | `cluster-example/cluster.tf` (`local.service_vips`) |
-| Postgres Connect sidecar registration + Envoy launch | `mesh-sidecar/entrypoint.sh` |
+| `name` | Consul service name + `/etc/hosts` alias. Apps dial `${name}:${port}`. |
+| `port` | Canonical app port. App binds `127.0.0.1:port`. Two entries sharing a port collapse onto one **backend** (one Envoy supervise loop, one `sidecar_port`, one Connect-mTLS endpoint) — that's how `postgres-master` and `postgres-replica` ride the same Patroni instance. |
+| `subset` | Optional Consul service-subset filter (matches `Service.Tags`). Each subset-bearing entry generates a redirect resolver to the parent backend. Patroni's role-watcher (in `patroni/entrypoint.sh`) updates those tags on role flips. |
 
-To run something else (a Redis cluster, a Kafka broker, your own
-stateful service): swap those three pieces, leave `mesh-conn`,
-`bootstrap-secrets`, `consul`, `sidecar`, the coordinator topology,
-and the Terraform structure as-is.
+VIP octets and `sidecar_port` numbers are computed in HCL from
+declaration order — first service gets `vip=10 sidecar_port=21000`,
+second `vip=11 sidecar_port=21001`, and so on. Plan-time validation
+catches duplicate `(name, subset)` tuples.
+
+### Workload-specific pieces remaining
+
+Only two files contain workload-specific logic after this refactor:
+
+| Workload-specific | Lives in |
+|---|---|
+| The Patroni image itself + role-watcher loop | `patroni/` |
+| Patroni env block (`CLUSTER_NAME`, replication passwords, etc.) | `compose/worker.yaml` |
+
+`mesh-sidecar/entrypoint.sh` contains zero per-workload code paths —
+grep it for `patroni` or `webdemo` and you get nothing. To run
+something other than Patroni (Redis, Kafka, your own service): replace
+the `patroni` compose service and image with your own, edit
+`local.services` to declare its names + ports, and leave the rest of
+the platform plumbing untouched.
 
 ## Key operational properties
 

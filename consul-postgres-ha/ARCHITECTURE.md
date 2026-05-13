@@ -78,9 +78,10 @@ above. Two carved-out loopback `/24`s, allocated cluster-wide:
   worker consumes (e.g. webdemo, postgres-master, postgres-replica).
   Identifies *what service* an app is calling.
 
-mesh-conn binds a small **static infra-port allowlist** on every
+mesh-conn binds a small **platform-supplied allowlist** on every
 *other* peer's VIP and forwards each accepted connection to the right
-remote peer over the QUIC link:
+remote peer over the QUIC link. With the 3-service example
+(webdemo + postgres-master/-replica) the allowlist is:
 
 | Port  | Used by                                               | Proto       |
 |-------|-------------------------------------------------------|-------------|
@@ -89,11 +90,16 @@ remote peer over the QUIC link:
 | 8300  | Consul server RPC (server-to-server, client-to-server)| TCP         |
 | 8301  | Consul serf-LAN gossip                                | UDP + TCP   |
 
-The allowlist is static and small by design — mesh-conn knows
-**peers, not services**. Apps never dial peer VIPs; only Envoy and
-Consul-agent do, and both speak well-known platform ports. Adding a
-port to the allowlist is a code change in `mesh-conn/main.go`, not
-a runtime catalog watch.
+The allowlist is intentionally minimal — mesh-conn knows **peers,
+not services**. Apps never dial peer VIPs; only Envoy and Consul-agent
+do, and both speak well-known platform ports.
+
+The allowlist is **platform-generated, not Go-const**: per-service
+Connect-sidecar ports come from `local.services` in `cluster.tf`, get
+collapsed into per-backend `sidecar_port`s, and the platform sidecar
+emits `MESH_CONN_ALLOWLIST` env (JSON `[{port, udp}, …]`) at startup.
+mesh-conn reads it once and binds accordingly. Adding a service is an
+HCL edit in `cluster.tf`; mesh-conn never has to be rebuilt.
 
 ```
                   inside worker-3 CVM (network_mode: host)
