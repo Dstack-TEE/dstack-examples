@@ -34,6 +34,22 @@ external derivation needed.
 For the full topology and layering walkthrough, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+### The three address spaces (you'll see these everywhere)
+
+Apps and operators run into three loopback ranges in this example. Knowing
+which one to use is most of the mental model:
+
+| Range | What it means | Who binds it | Who dials it |
+|---|---|---|---|
+| `127.0.0.1:<port>` | "The local instance of this service on *this* CVM." Postgres on `:5432`, Consul HTTP on `:8500`, Patroni REST on `:8008`, etc. — every CVM binds the same canonical ports. | The app process itself (Patroni, Consul, webdemo). | The local Envoy sidecar (and ad-hoc debugging via `docker exec`). |
+| `127.10.0.<svc>:<port>` | "A service I consume." One per Connect upstream declared in `cluster.tf`. The `/etc/hosts` file maps service names (`postgres-master`, `webdemo`) to these. | The **local Envoy sidecar**, one listener per declared upstream. | **Your app**. App calls `postgres-master:5432` → `getaddrinfo` → `127.10.0.20:5432` → Envoy → remote service. |
+| `127.50.0.<peer>:<port>` | "A peer's loopback, reachable via mesh-conn over QUIC." Platform-internal: only Envoy-public listeners and Consul agents ever talk here. | `mesh-conn` (per-peer aliases) + the local Consul/Envoy on its self-VIP. | **Never app code.** Envoy uses it to reach remote sidecars (`:21000`/`:21001`); Consul uses it for serf gossip (`:8301`) and Raft RPC (`:8300`). |
+
+App code only ever uses the first two. The peer plane is platform plumbing
+that the example sets up automatically — adding a service to your app's
+upstream list in `cluster.tf` is enough to make `service:port` work from
+inside the app.
+
 ## Quick start (~5 minutes after image push)
 
 Prerequisites:
