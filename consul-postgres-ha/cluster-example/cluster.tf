@@ -164,12 +164,39 @@ locals {
   #   name    Consul service name (also the /etc/hosts alias).
   #   port    Canonical app port. App binds 127.0.0.1:port; the local
   #           Envoy upstream listener binds 127.10.0.<vip>:port.
-  #   subset  Optional. When set, this entry is a subset filter on a
-  #           shared backend (the postgres-master/-replica split is the
-  #           only case today). Entries sharing the same `port` collapse
-  #           into one producer-side sidecar — same Envoy public
-  #           listener, same Connect-mTLS endpoint, just different
-  #           service-resolver names with different subset filters.
+  #   subset  Optional. Set this when a single backend hosts multiple
+  #           role-aware logical services (the postgres-master/replica
+  #           split is the only case today). See below.
+  #
+  # ## Why `subset` exists
+  #
+  # `subset` is native Consul vocabulary — `service-resolver` config
+  # entries filter a parent service's instances by tag, and each
+  # filter is called a subset. We expose the same field here because
+  # the audience for this template is people who use (or are learning)
+  # Consul Connect, and importing Consul's vocabulary lets them map
+  # 1-to-1 between our config and Consul's docs.
+  #
+  # The reason this matters for HA Postgres specifically: Patroni
+  # uses Consul as its distributed lock store (DCS) and registers
+  # itself with the local Consul agent on startup. As leadership
+  # changes, Patroni rewrites the `master` / `replica` tag on its own
+  # service instance — no re-registration, no destroy/recreate. A
+  # `service-resolver` with `Subsets { master = Filter("...master") }`
+  # then routes consumer traffic by tag, transparent to the app.
+  # That's what makes `postgres-master:5432` always reach whoever is
+  # leader right now, with sub-second failover via Consul's EDS push.
+  #
+  # So `subset` is not decoration — it's the field that turns a
+  # static service name (`postgres-master`) into a live, leader-
+  # aware route. Workloads that don't have a leader concept
+  # (webdemo) leave it null and Consul Connect treats the entry as
+  # a plain service-resolver redirect.
+  #
+  # See README.md "Adapting to your own workload" for the
+  # two-pattern walkthrough (Consul-blind vs Consul-native), and
+  # ARCHITECTURE.md for how tags flow through the EDS data plane on
+  # failover.
   services_raw = [
     { name = "webdemo", port = 8080, subset = null },
     { name = "postgres-master", port = 5432, subset = "master" },

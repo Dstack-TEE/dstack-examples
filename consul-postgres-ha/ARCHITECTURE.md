@@ -228,6 +228,53 @@ followers). The subset filter strips down EDS endpoints to the right
 peer's sidecar, and the `postgres-master` / `postgres-replica`
 service-resolvers redirect to the right subset of `postgres`.
 
+### How the master tag flows through EDS on failover
+
+The subset filter isn't just a static routing rule — it's what makes
+failover transparent at the consumer side. The chain is short and
+worth tracing:
+
+```
+T+0    Patroni promotes worker-5 (leadership lock moves in Consul KV).
+T+~1s  worker-5's role-watcher polls Patroni REST, sees role=master,
+       PUTs the sidecar registration with Tags=["master"].
+       (The old leader's role-watcher does the symmetric flip:
+       Tags=["replica"].)
+T+~1s  Local Consul agent on worker-5 anti-entropies the new tags up
+       to a Consul server.
+T+~1s  Consul server pushes an EDS update to every consumer's Envoy:
+       "for cluster postgres-master, the subset master is now
+       {worker-5's sidecar:21001} — the previous member is gone."
+T+~1s  Each consumer Envoy retargets the postgres-master listener at
+       127.10.0.20:5432. Existing in-flight connections to the old
+       endpoint die; the next connection lands on worker-5.
+```
+
+The whole loop is bounded by Patroni's `loop_wait` (10s default but
+we set the role-watcher to 5s) plus EDS push latency (sub-second on a
+healthy Consul). Failover RTO from the app's perspective is "the time
+my retry-on-disconnect loop takes" — no service-discovery code, no
+DNS update, no client-library failover string. Just an Envoy upstream
+endpoint set that changes underneath the listener.
+
+Two non-obvious consequences of doing it this way:
+
+- **No re-registration churn.** Patroni's instance stays continuously
+  registered in Consul's catalog as it gains and loses leadership.
+  Only the tag changes. A deregister/re-register flow would race
+  health checks and risk a "no member" window.
+- **The platform sidecar is unaware of any of this.** It registered
+  the Connect sidecar-proxy once at startup with no tags; the
+  workload (Patroni) owns the dynamic state. Pattern A workloads
+  (webdemo) never touch the role-watcher path — `subset = null`
+  means there's no tag-dependent EDS filter to update.
+
+If you write your own Consul-native workload (Pattern B — Vault,
+Nomad, custom Raft), the same shape applies: register your parent
+once under `CLUSTER_NAME`, write the tag-flipping loop in your
+workload's entrypoint, declare role-aware `service-resolver` subsets
+in `local.services`, and Connect's EDS plumbing handles the rest.
+
 ## mesh-conn × QUIC — how they work together
 
 The bit that's worth being precise about: mesh-conn is built on top

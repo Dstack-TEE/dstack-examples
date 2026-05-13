@@ -182,6 +182,88 @@ declaration order — first service gets `vip=10 sidecar_port=21000`,
 second `vip=11 sidecar_port=21001`, and so on. Plan-time validation
 catches duplicate `(name, subset)` tuples.
 
+### Two patterns: Consul-blind vs. Consul-native workloads
+
+A workload's relationship to Consul determines how its service-mesh
+entry is shaped. Two patterns cover the realistic cases:
+
+#### Pattern A — Consul-blind workload (`webdemo` is the example)
+
+The app is a plain process that listens on a port. It doesn't know
+Consul exists; it never opens a connection to the local Consul agent;
+it has no leader/follower concept. The **platform sidecar** registers
+the service on the app's behalf, with the canonical port as the
+backend and a standalone Connect-proxy in front of it. There's only
+one parent service, named the same as the entry, no subsets.
+
+Declaration:
+
+```hcl
+{ name = "webdemo", port = 8080, subset = null }
+```
+
+This is the default for "I just wrote a microservice and I want it on
+the mesh." If you have no opinions about leader election, this is the
+shape to use.
+
+#### Pattern B — Consul-native workload (`patroni` is the example)
+
+The app integrates with Consul as part of how it operates — Patroni
+uses Consul's KV store as its leader-election lock and registers
+itself in Consul's service catalog under its `scope` (which we set to
+`CLUSTER_NAME` = `"demo"`). On every failover, Patroni rewrites tags
+(`master` / `replica`) on its own registration. From a single parent
+service we get *multiple* logical names — one per role — each as a
+service-resolver that filters the parent's tags into the subset its
+consumer wants:
+
+```hcl
+{ name = "postgres-master",  port = 5432, subset = "master"  }
+{ name = "postgres-replica", port = 5432, subset = "replica" }
+```
+
+Two entries, same canonical port → one Envoy public listener shared
+across both, two service-resolvers with different subset filters. The
+platform sidecar does **not** register a parent for this case (Patroni
+already did it); it only stamps the Connect sidecar-proxy. The
+role-watcher in `patroni/entrypoint.sh` is the loop that maintains
+tag consistency between Patroni's view of leadership and Consul's
+catalog.
+
+Failover round-trips through this in <1 second:
+
+```
+Patroni promotes worker-5 to leader
+      ↓
+worker-5's role-watcher writes Tags=["master"] on worker-5's sidecar
+      ↓
+Consul EDS push: subset master = [worker-5's sidecar:21001]
+      ↓
+every consumer's Envoy retargets `postgres-master` to worker-5
+      ↓
+next psql connection lands on worker-5
+```
+
+No DNS update, no service deregistration, no client-side retry-loop.
+That's what `subset` buys you, and it's why this field exists in our
+config even though only one of the three example services uses it.
+
+#### When to pick which
+
+| Question | Pattern A | Pattern B |
+|---|---|---|
+| Does your workload have a built-in Consul integration? | No | Yes |
+| Does your workload register itself with Consul? | No — platform does | Yes — workload does |
+| Does your workload have leader election? | No | Probably yes |
+| Will tags on the service change at runtime? | No | Yes (the workload rewrites them) |
+| Number of `local.services` entries per workload? | One | One per role |
+| Need a `subset` field? | No (`subset = null`) | One per role |
+
+If you're not sure, you're probably building Pattern A. Pattern B is
+specifically for "this thing has its own opinions about leader
+election that need to surface to consumers" — Patroni, Vault, Nomad,
+custom raft-based services.
+
 ### Workload-specific pieces remaining
 
 Only two files contain workload-specific logic after this refactor:
