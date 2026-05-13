@@ -97,13 +97,80 @@ whose direct path goes down can't fail over to TURN until it's back".
 | Resource exhaustion (many TCP streams) | QUIC per-session limits kick in (256 streams default); new TCP streams to that peer fail. UDP and existing TCP unaffected. | bump `AcceptBacklog` / `MaxIncomingStreams` if it ever hits us at scale. |
 | Head-of-line blocking | A big TCP write on one stream briefly delays a UDP datagram or another TCP stream. Imperceptible at Consul scale. | None needed today. If a future workload becomes jitter-sensitive, split into two ICE conns per pair (UDP-only + TCP-only). |
 
+### The ICE auth-race convergence bug — the one real open issue
+
+`dialICE` both publishes its local auth (ufrag+pwd) via the signalling
+broker and waits on the remote auth from the broker. On a peer
+restart or fresh bring-up, both sides republish in close succession.
+mesh-conn's protection against consuming a stale auth is to compare
+the most-recently-seen remote auth against the one it's currently
+dialing against; if a fresher auth arrives mid-dial, the in-flight
+attempt is cancelled and `runPeerLink` retries after 5 s.
+
+What goes wrong is that **both peers do this symmetrically**:
+
+```
+peer-A consumed=X publishes auth Y → dials with peer-B's X
+peer-B sees A's Y, supersedes its X-bound dial, publishes new auth Z
+peer-A sees B's Z, supersedes its Y-bound dial
+peer-B sees A's next auth, supersedes again
+…
+```
+
+The 5 s back-off doesn't break the symmetry, so the loop never
+converges. Observed in live testing on 2026-05-13: multiple worker↔
+coordinator and worker↔worker pairs flapping for 7+ minutes without
+stabilizing, even with `MESH_CONN_RELAY_ONLY=1` set (so it's not a
+NAT-direct-path issue). Per-peer log signature:
+
+```
+[<peer>] ice state: Checking
+[<peer>] fresh auth (ufrag=Y) supersedes consumed (ufrag=X) — aborting attempt
+[<peer>] link failed: ice: connecting canceled by caller — retrying in 5s
+[<peer>] ice state: Closed
+```
+
+The previous commit message acknowledged this: `cc5a12d fix(consul-
+postgres-ha): partial — cancel in-flight ICE dial on fresher peer
+auth`. The cancellation logic is correct; the convergence isn't.
+
+Practical impact: when this happens, the affected peer pair never
+forms a working link, which means the Consul agent on one side
+can't reach the server tier (Raft RPC on `:8300`), Envoy can't fetch
+its xDS config, and any cross-peer Connect call through that pair
+fails. Patroni leader election still works (Consul KV is on the
+working pairs), but replica `pg_basebackup` fails because the
+replica's local Envoy has no endpoint for `postgres-master`.
+
+**Possible fix shapes**:
+
+- **Asymmetric back-off keyed on peer ID lexicographic order.** The
+  side with the *higher* peer-id waits 5 s before redialing; the
+  *lower* side dials immediately. Breaks the symmetry; one side
+  always wins the auth race within one cycle.
+- **Don't supersede if the new auth came from a poll happening
+  during the in-flight dial.** Today's logic supersedes on any newer
+  auth; a tighter rule would only supersede if the auth changed for
+  a reason other than "the remote peer also just restarted." Harder
+  to define; the asymmetric back-off is simpler.
+- **A "settling" window after publishing auth.** Don't act on a
+  remote auth that arrives in the first ~1 s after we publish ours;
+  the remote is probably reacting to our publish, not to a peer
+  restart we should respect.
+
+The first of these is the cheapest experiment. Needs a focused
+mesh-conn debugging session with `MESH_CONN_DEBUG_ICE=1` traces from
+a fresh repro, looking at which side initiates each supersession.
+
 ### Recommended fixes
 
-1. **Set a QUIC read deadline on the UDP-stream pumps**, so if a
+1. **The ICE auth-race convergence bug above** — top priority. Blocks
+   end-to-end live verification of every recent refactor.
+2. **Set a QUIC read deadline on the UDP-stream pumps**, so if a
    stream silently stalls (QUIC keep-alive happens at session
    level, not stream level), the pump returns and `runPeerLink`
    restarts.
-2. **Tune QUIC `MaxStreamWindowSize`** if we ever need higher
+3. **Tune QUIC `MaxStreamWindowSize`** if we ever need higher
    throughput; default is 256 KB which is fine for now.
 
 ### Already shipped

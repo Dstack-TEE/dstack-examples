@@ -54,7 +54,11 @@ inside the app.
 
 Prerequisites:
 
-- A Phala Cloud account with API credentials at `~/.phala-cloud/credentials.json`.
+- A Phala Cloud API key for the account you want this cluster billed to.
+  Get one from the Phala dashboard (Settings → API Keys) or use the
+  one already in your `~/.phala-cloud/credentials.json` profile if
+  you've used `phala` CLI before — but **pick a specific token**,
+  don't let it follow whatever profile is currently selected.
 - A Linux box with a public IP for the external coordinator (coturn + signaling).
 - The four container images (`mesh-sidecar`, `patroni`, `webdemo`,
   `signaling`) either already published to GHCR (via the CI workflow
@@ -66,9 +70,11 @@ cd consul-postgres-ha/cluster-example
 cp terraform.tfvars.example terraform.tfvars
 $EDITOR terraform.tfvars   # set gateway_domain, image refs, external_*
 
-export PHALA_CLOUD_API_KEY=$(python3 -c "
-import json; d=json.load(open('$HOME/.phala-cloud/credentials.json'))
-print(d['profiles'][d['current_profile']]['token'])")
+# Set this explicitly to a specific account's token. Do NOT auto-pull
+# from credentials.json's `current_profile` — that follows whichever
+# account you last `phala auth login`-ed into, and a wrong-account
+# deploy is silent until you spot it in the dashboard.
+export PHALA_CLOUD_API_KEY=phak_...
 
 terraform init
 terraform apply -parallelism=1   # phala-cloud#247 needs serial creates
