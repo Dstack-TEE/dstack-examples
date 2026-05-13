@@ -1,6 +1,6 @@
 // mesh-conn — userspace port-forwarding agent over pion/ice + QUIC.
 //
-// Addressing model: peer VIPs + static infra-port allowlist.
+// Addressing model: peer VIPs + platform-supplied port allowlist.
 //
 //   Every peer is identified by a /8 loopback IP `127.50.0.<vip>`. The
 //   `vip` is a small integer (typically the peer's ordinal in the
@@ -10,29 +10,36 @@
 //   - the entrypoint provisions `127.50.0.<vip>/32 dev lo` for ALL
 //     peers, including self — so dialing self's VIP loops back through
 //     the kernel without crossing mesh-conn.
-//   - mesh-conn binds the static infra-port allowlist on every OTHER
-//     peer's VIP — and forwards each accepted connection to the right
-//     remote peer over QUIC.
+//   - mesh-conn binds the allowlist on every OTHER peer's VIP — and
+//     forwards each accepted connection to the right remote peer over
+//     QUIC.
 //
-// Allowlist (every port in this list, every other peer):
+// Allowlist source: MESH_CONN_ALLOWLIST env, JSON shape `[{port, udp}, …]`.
+// Populated by the platform sidecar entrypoint at startup from
+// SERVICES_JSON (per-service Connect-sidecar ports) plus the two
+// static Consul-infra ports {8300, 8301}. The substance — which ports
+// cross peer boundaries — is platform state declared one level up in
+// `cluster.tf`'s `local.services`; mesh-conn just reads what the
+// platform tells it.
+//
+// Today's defaults (3-service example: webdemo + postgres-master/-replica):
 //
 //   21000  Envoy Connect public mTLS — webdemo sidecar         (TCP)
 //   21001  Envoy Connect public mTLS — postgres sidecar        (TCP)
 //   8300   Consul server RPC                                   (TCP)
 //   8301   Consul serf-LAN gossip                              (UDP + TCP)
 //
+// Sidecar ports come in one-per-backend because stock Consul Connect
+// requires one sidecar Envoy process per Connect-mesh-accessible
+// service. Services sharing a canonical port (postgres-master and
+// postgres-replica both on :5432, same Patroni backend) collapse onto
+// one sidecar; distinct canonical ports get distinct sidecars and
+// distinct allowlist entries.
+//
 // The allowlist is intentionally minimal: only platform infrastructure
 // that needs unmediated peer-to-peer reachability. App-level traffic
 // (including Patroni's Postgres replication) goes through the Connect
 // mesh — mesh-conn knows peers, never services.
-//
-// Sidecar ports come in pairs because stock Consul Connect requires
-// one sidecar Envoy process per Connect-mesh-accessible service:
-// 21000 terminates inbound mTLS for `webdemo`, 21001 terminates inbound
-// mTLS for `postgres`. Both are reserved cluster-wide; any new
-// mesh-accessible service either reuses one of these (by SNI-routing
-// custom Envoy config — out of scope here) or is added explicitly to
-// this list.
 //
 // Wire format on each QUIC stream is unchanged from the old shape:
 // the first 3 bytes are (tag, port-big-endian-uint16), where port is
@@ -100,41 +107,32 @@ func (p *Peer) vipAddr() net.IP {
 	return net.IPv4(127, 50, 0, byte(p.Vip))
 }
 
-// infraPort is one entry in the static peer-VIP port allowlist. mesh-conn
+// InfraPort is one entry in the peer-VIP port allowlist. mesh-conn
 // binds (peer.vipAddr(), Port) on every OTHER peer for each entry.
-type infraPort struct {
-	Port int
-	UDP  bool // some ports carry UDP (e.g. serf gossip); most are TCP-only
-}
-
-// peerVIPAllowlist is the entire cluster-wide set of ports any host may
-// dial at a peer VIP. Adding a port here is a deliberate, reviewable
-// change — see consul-postgres-ha/ARCHITECTURE.md for the layering
-// invariant ("mesh-conn knows peers, not services").
-var peerVIPAllowlist = []infraPort{
-	{Port: 21000, UDP: false}, // Envoy Connect sidecar — webdemo
-	{Port: 21001, UDP: false}, // Envoy Connect sidecar — postgres
-	{Port: 8300, UDP: false},  // Consul server RPC (server-to-server + client-to-server)
-	{Port: 8301, UDP: true},   // Consul serf-LAN gossip (UDP datagrams + TCP fallback)
-}
-
-// allowedPort reports whether the given port is in the allowlist.
-// Used by the receiver to reject streams targeting unknown ports.
-func allowedPort(port int) bool {
-	for _, ip := range peerVIPAllowlist {
-		if ip.Port == port {
-			return true
-		}
-	}
-	return false
+// JSON-tagged because the value comes in over MESH_CONN_ALLOWLIST env.
+type InfraPort struct {
+	Port int  `json:"port"`
+	UDP  bool `json:"udp"` // some ports carry UDP (e.g. serf gossip); most are TCP-only
 }
 
 type Config struct {
 	SelfID       string
 	Peers        []Peer
+	Allowlist    []InfraPort
 	SignalingURL string
 	TurnHost     string
 	TurnSecret   string
+}
+
+// allowedPort reports whether the given port is in the allowlist.
+// Used by the receiver to reject streams targeting unknown ports.
+func (c *Config) allowedPort(port int) bool {
+	for _, ip := range c.Allowlist {
+		if ip.Port == port {
+			return true
+		}
+	}
+	return false
 }
 
 func loadConfig() *Config {
@@ -162,8 +160,16 @@ func loadConfig() *Config {
 	if err := json.Unmarshal([]byte(mustEnv("PEERS_JSON")), &cfg.Peers); err != nil {
 		log.Fatalf("PEERS_JSON: %v", err)
 	}
-	if err := validatePeers(cfg); err != nil {
-		log.Fatalf("PEERS_JSON: %v", err)
+	// MESH_CONN_ALLOWLIST: JSON list `[{port, udp}, …]` generated by
+	// the platform sidecar entrypoint from SERVICES_JSON (per-service
+	// Connect-sidecar ports) plus the static Consul-infra ports
+	// (8300 RPC + 8301 gossip). This is platform plumbing; developers
+	// edit `local.services` in cluster.tf, not this env.
+	if err := json.Unmarshal([]byte(mustEnv("MESH_CONN_ALLOWLIST")), &cfg.Allowlist); err != nil {
+		log.Fatalf("MESH_CONN_ALLOWLIST: %v", err)
+	}
+	if err := validateConfig(cfg); err != nil {
+		log.Fatalf("config: %v", err)
 	}
 	return cfg
 }
@@ -215,11 +221,27 @@ func readTurnSecret() string {
 	return ""
 }
 
-// validatePeers fails fast on any silent mis-configuration that would
-// otherwise manifest as confusing runtime failures: collided VIPs,
-// missing self, etc. Bound at startup because a peer's PEERS_JSON is
-// shared with every other peer's configuration and must round-trip
-// identically across the cluster.
+// validateConfig fails fast on any silent mis-configuration that
+// would otherwise manifest as confusing runtime failures: collided
+// peer VIPs, missing self, malformed allowlist, etc. Bound at startup
+// because PEERS_JSON and MESH_CONN_ALLOWLIST are shared cluster-wide
+// state and must round-trip identically across peers.
+func validateConfig(cfg *Config) error {
+	if err := validatePeers(cfg); err != nil {
+		return err
+	}
+	if err := validateAllowlist(cfg); err != nil {
+		return err
+	}
+	// Log a digest of the validated config so operators can check that
+	// every peer in the cluster sees the same PEERS_JSON. Differences
+	// across peers would indicate a deploy-script discrepancy.
+	digest := peersDigest(cfg.Peers)
+	log.Printf("config validated: %d peers, allowlist=%d ports/peer (%v), digest=%s",
+		len(cfg.Peers), len(cfg.Allowlist), allowlistPorts(cfg.Allowlist), digest)
+	return nil
+}
+
 func validatePeers(cfg *Config) error {
 	if len(cfg.Peers) < 2 {
 		return fmt.Errorf("need at least 2 peers in PEERS_JSON, got %d", len(cfg.Peers))
@@ -257,13 +279,27 @@ func validatePeers(cfg *Config) error {
 	if !selfFound {
 		return fmt.Errorf("PEER_ID %q not in PEERS_JSON (peers: %v)", cfg.SelfID, knownIDs(cfg.Peers))
 	}
+	return nil
+}
 
-	// Log a digest of the validated config so operators can check that
-	// every peer in the cluster sees the same PEERS_JSON. Differences
-	// across peers would indicate a deploy-script discrepancy.
-	digest := peersDigest(cfg.Peers)
-	log.Printf("PEERS_JSON validated: %d peers, allowlist=%d ports/peer, digest=%s",
-		len(cfg.Peers), len(peerVIPAllowlist), digest)
+// validateAllowlist fails fast on MESH_CONN_ALLOWLIST malformations:
+// empty list (mesh-conn with nothing to forward is always a config
+// bug), out-of-range ports, or duplicate port entries (would race for
+// the same listener bind at runtime).
+func validateAllowlist(cfg *Config) error {
+	if len(cfg.Allowlist) == 0 {
+		return fmt.Errorf("MESH_CONN_ALLOWLIST is empty — platform sidecar should always emit at least the Consul-infra ports")
+	}
+	seen := map[int]bool{}
+	for i, ip := range cfg.Allowlist {
+		if ip.Port < 1 || ip.Port > 65535 {
+			return fmt.Errorf("allowlist[%d] port=%d out of range (1..65535)", i, ip.Port)
+		}
+		if seen[ip.Port] {
+			return fmt.Errorf("allowlist port %d appears twice — each port may only be entered once", ip.Port)
+		}
+		seen[ip.Port] = true
+	}
 	return nil
 }
 
@@ -276,9 +312,9 @@ func knownIDs(peers []Peer) []string {
 }
 
 // allowlistPorts returns the bare port numbers for log output.
-func allowlistPorts() []int {
-	out := make([]int, len(peerVIPAllowlist))
-	for i, ip := range peerVIPAllowlist {
+func allowlistPorts(allowlist []InfraPort) []int {
+	out := make([]int, len(allowlist))
+	for i, ip := range allowlist {
 		out[i] = ip.Port
 	}
 	return out
@@ -348,7 +384,7 @@ func main() {
 		}
 	}
 	log.Printf("mesh-conn: self=%s vip=%d allowlist=%v other=%d",
-		cfg.SelfID, self.Vip, allowlistPorts(), len(others))
+		cfg.SelfID, self.Vip, allowlistPorts(cfg.Allowlist), len(others))
 
 	go pollLoop(cfg)
 
@@ -501,8 +537,8 @@ func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
 	//    here means the alias didn't get set up.
 	peerVip := peer.vipAddr()
 	udpSocks := map[int]*net.UDPConn{}     // port -> listener (only UDP-bearing ports)
-	tcpListeners := make([]*net.TCPListener, 0, len(peerVIPAllowlist))
-	for _, ip := range peerVIPAllowlist {
+	tcpListeners := make([]*net.TCPListener, 0, len(cfg.Allowlist))
+	for _, ip := range cfg.Allowlist {
 		tl, err := net.ListenTCP("tcp", &net.TCPAddr{IP: peerVip, Port: ip.Port})
 		if err != nil {
 			return fmt.Errorf("tcp listen %s:%d: %w", peerVip, ip.Port, err)
@@ -525,15 +561,15 @@ func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
 	//    loop to handle ad-hoc incoming TCP streams.
 	udpStreams := map[int]*quic.Stream{}
 	allUDPReady := make(chan struct{})
-	errCh := make(chan error, 4*len(peerVIPAllowlist))
+	errCh := make(chan error, 4*len(cfg.Allowlist))
 
 	udpPortCount := len(udpSocks)
 	go func() {
-		errCh <- runAcceptLoop(connCtx, qconn, &self, udpStreams, udpPortCount, allUDPReady)
+		errCh <- runAcceptLoop(connCtx, qconn, cfg, &self, udpStreams, udpPortCount, allUDPReady)
 	}()
 
 	if isClient {
-		for _, ip := range peerVIPAllowlist {
+		for _, ip := range cfg.Allowlist {
 			if !ip.UDP {
 				continue
 			}
@@ -559,12 +595,12 @@ func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
 	}
 
 	log.Printf("[%s] link up — peer vip=127.50.0.%d, allowlist=%v (udp=%d, tcp=%d)",
-		peer.ID, peer.Vip, allowlistPorts(), udpPortCount, len(tcpListeners))
+		peer.ID, peer.Vip, allowlistPorts(cfg.Allowlist), udpPortCount, len(tcpListeners))
 
 	// 5. Start pumps. UDP: one bidirectional pump pair per UDP port.
 	//    TCP: one accept-loop per port (each accepted conn opens an
 	//    ephemeral streamTCP).
-	for _, ip := range peerVIPAllowlist {
+	for _, ip := range cfg.Allowlist {
 		port := ip.Port
 		if ip.UDP {
 			us := udpSocks[port]
@@ -583,7 +619,7 @@ func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
 			}()
 		}
 	}
-	for i, ip := range peerVIPAllowlist {
+	for i, ip := range cfg.Allowlist {
 		tl := tcpListeners[i]
 		port := ip.Port
 		go func() { errCh <- acceptLocalTCP(connCtx, tl, qconn, port) }()
@@ -597,7 +633,7 @@ func dialAndPump(cfg *Config, self, peer Peer, sess *peerSession) error {
 // local Consul / Envoy bound on the peer's own loopback alias). The
 // receiver validates port against the static allowlist; anything
 // else is rejected — that's the only port-knowledge the receiver needs.
-func runAcceptLoop(ctx context.Context, qconn *quic.Conn, self *Peer, udpStreams map[int]*quic.Stream, expectedUDP int, allUDPReady chan struct{}) error {
+func runAcceptLoop(ctx context.Context, qconn *quic.Conn, cfg *Config, self *Peer, udpStreams map[int]*quic.Stream, expectedUDP int, allUDPReady chan struct{}) error {
 	udpRegistered := 0
 	for {
 		s, err := qconn.AcceptStream(ctx)
@@ -612,7 +648,7 @@ func runAcceptLoop(ctx context.Context, qconn *quic.Conn, self *Peer, udpStreams
 		}
 		tag := hdr[0]
 		port := int(hdr[1])<<8 | int(hdr[2])
-		if !allowedPort(port) {
+		if !cfg.allowedPort(port) {
 			log.Printf("stream for non-allowlist port %d (tag=0x%x)", port, tag)
 			s.CancelRead(0)
 			s.Close()
