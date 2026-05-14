@@ -274,8 +274,11 @@ resource "phala_app" "coordinator" {
   docker_compose = file("${path.module}/../compose/coordinator.yaml")
 
   env = {
-    CLUSTER_NAME        = var.cluster_name
-    PEERS_JSON          = local.peers_json
+    CLUSTER_NAME = var.cluster_name
+    PEERS_JSON   = local.peers_json
+    # Coord-0's config-entry writer needs SERVICES_JSON to emit the
+    # per-service service-resolver + intentions entries on bringup.
+    SERVICES_JSON       = local.services_json
     COORDINATOR_ORDINAL = tostring(each.value)
     BOOTSTRAP_EXPECT    = tostring(var.coordinator_replicas)
     COORDINATOR_VIPS    = local.coordinator_vips

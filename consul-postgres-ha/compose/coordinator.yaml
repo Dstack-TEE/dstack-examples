@@ -41,6 +41,16 @@ services:
       - ROLE=coordinator
       - CLUSTER_NAME=${CLUSTER_NAME}
       - PEERS_JSON=${PEERS_JSON}
+      # SERVICES_JSON is the same content workers see — same shape, same
+      # source-of-truth (local.services in cluster.tf). Coordinators
+      # don't run Envoy sidecars, but coord-0 needs the service list so
+      # its config-entry writer can emit per-service service-resolver
+      # entries + intentions on cluster bringup. Without this, the
+      # config-entry writer only writes proxy-defaults/global and the
+      # whole Connect routing layer ends up with no resolvers, which
+      # manifests downstream as replicas' pg_basebackup connections
+      # closing on accept (empty EDS endpoint set).
+      - SERVICES_JSON=${SERVICES_JSON}
       # COORDINATOR_ORDINAL is per-CVM (0..N-1); makes bootstrap-secrets
       # write the right /run/instance/info.json without needing Consul
       # KV (which itself runs on the coordinators — chicken-and-egg).
