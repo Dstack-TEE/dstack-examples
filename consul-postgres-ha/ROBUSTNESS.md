@@ -152,6 +152,42 @@ whose direct path goes down can't fail over to TURN until it's back".
   sustained-forge variant gated on the `onAttemptStarted` hook,
   which guarantees the forge lands inside the in-flight window.
 
+- **pion DisconnectedTimeout / FailedTimeout headroom for the
+  TURN-relay path.** With pion's defaults (5 s + 25 s = 30 s of no
+  inbound from the selected pair before the state callback fires
+  Failed), the relay-only path on `MESH_CONN_RELAY_ONLY=1` clusters
+  flapped on its own roughly every couple of minutes: brief
+  jitter / refresh-window noise at coturn was enough to accumulate
+  a 30 s consent-freshness gap, pion declared Failed,
+  `OnConnectionStateChange` fired `abortAttempt`, QUIC's
+  `accept`/pumps came back with `context canceled`, and `runPeerLink`
+  re-established the link 2–5 s later. The link-pair recovered every
+  cycle, but the churn was visible cluster-wide and any traffic
+  in-flight during the abort window had to retransmit.
+
+  Fixed by setting `DisconnectedTimeout = 30 s` and `FailedTimeout
+  = 60 s` on the `ice.AgentConfig` in `dialICE`. The 60 s Failed
+  budget matches QUIC's `MaxIdleTimeout` so the two layers' notion
+  of "link is dead" converge on the same wall-clock, and a real
+  peer death is still picked up by QUIC's pumps returning errors
+  at 60 s — which is the actual recovery trigger in steady state.
+  The 30 s Disconnected budget is "log-only" (our state callback
+  ignores Disconnected); it just preserves the log signal for slow-
+  recovery cases.
+
+  Failover RTO is unaffected. Failover is gated on Patroni's
+  Consul-KV leader-key TTL (~30 s) plus Consul gossip detection
+  (~10 s) and Envoy xDS update — none of which depend on
+  mesh-conn detecting the dead peer's link quickly. The new leader
+  is reached via a *different* peer link that's already up.
+
+  Regression net: `mesh-conn/main_test.go::TestSteadyStateNoFlap` —
+  loopback two-peer steady-state observation. Default window 5 min;
+  `STEADY_STATE_OBSERVE_SECONDS=N` overrides for the CI 50-trial
+  sweep at 30 s each (passes 50/50). Live verification: 6-CVM
+  relay-only cluster observed for 15+ min post-rollout with zero
+  `ice state: Failed` events on any peer's sidecar log.
+
 ## Layer 2 — mesh-conn forwarder
 
 ### What's there

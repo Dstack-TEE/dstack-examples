@@ -1131,10 +1131,54 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 	// MESH_CONN_DEBUG_ICE=1 turns on pion's verbose ICE-level logging
 	// (connectivity-check requests/responses, STUN attribute parsing,
 	// candidate-pair scoring). Off by default because it's chatty.
+	//
+	// Disconnected/Failed timeouts: pion defaults to 5 s + 25 s (= 30 s
+	// of no inbound from the selected pair before the state callback
+	// fires Failed and our outer code aborts the attempt). That is too
+	// tight for the TURN-relay path. The relay leg adds ~150 ms RTT,
+	// the periodic permission/allocation refreshes can briefly
+	// reorder packet flow at coturn, and pion's own 2 s consent
+	// freshness has no retry budget — a sub-second jitter window
+	// where 1 STUN binding gets lost and another arrives late is
+	// enough to start the disconnected clock, and consecutive jitter
+	// events accumulate against the 30 s budget. We've observed the
+	// resulting "Connected → Disconnected → Failed → Checking →
+	// Connected" cycle every couple of minutes on freshly-deployed
+	// relay-only clusters, with no actual peer death behind it.
+	//
+	// The fix is to give pion enough headroom that only a genuine
+	// relay-path outage (rather than refresh / jitter noise) trips
+	// Failed. We use 30 s + 60 s (= 90 s total) for two reasons:
+	//
+	//  - 60 s for the post-Disconnected portion matches QUIC's
+	//    MaxIdleTimeout — so if a link is genuinely dead, QUIC's
+	//    keepalive will return an error in our pumps at the same
+	//    time pion declares Failed, and either path triggers the
+	//    same retry in runPeerLink. We're not extending the time
+	//    to *recover* from a real failure, just the time to
+	//    *declare* one. Failover RTO is gated on Consul gossip
+	//    detection (~10 s) and Envoy xDS update, not on
+	//    per-peer-link death notice from mesh-conn, so the bump
+	//    is invisible at the RTO budget level.
+	//
+	//  - The Disconnected portion is "log-only" — our state
+	//    callback ignores Disconnected and only acts on Failed —
+	//    so its only effect is the cosmetic length of the
+	//    Disconnected stretch in the log timeline. We keep it at
+	//    30 s rather than 0 so the existing log signal is preserved
+	//    if pion ever does have a sustained outage but recovers.
+	const (
+		iceDisconnectedTimeout = 30 * time.Second
+		iceFailedTimeout       = 60 * time.Second
+	)
+	disconnectedTimeout := iceDisconnectedTimeout
+	failedTimeout := iceFailedTimeout
 	agentCfg := &ice.AgentConfig{
-		Urls:           urls,
-		NetworkTypes:   []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
-		CandidateTypes: candidateTypes,
+		Urls:                urls,
+		NetworkTypes:        []ice.NetworkType{ice.NetworkTypeUDP4, ice.NetworkTypeTCP4},
+		CandidateTypes:      candidateTypes,
+		DisconnectedTimeout: &disconnectedTimeout,
+		FailedTimeout:       &failedTimeout,
 	}
 	if os.Getenv("MESH_CONN_DEBUG_ICE") == "1" {
 		lf := logging.NewDefaultLoggerFactory()
