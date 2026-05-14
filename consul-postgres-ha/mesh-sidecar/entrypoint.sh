@@ -279,6 +279,18 @@ if [ "$ROLE" = "worker" ]; then
       TAGS_JSON='[]'
     fi
 
+    # Defensive cleanup: a prior boot may have used different IDs for
+    # the same logical proxy (e.g. an earlier release of this image
+    # registered Pattern B as `Kind: connect-proxy` with ID
+    # `${parent}-sidecar-${peer}`). Consul-data is a persistent volume
+    # so the stale entries survive container restarts; if they linger
+    # alongside the new inline SidecarService, `consul connect envoy
+    # -sidecar-for` sees two matches and refuses to render. Deregister
+    # known stale IDs idempotently before we PUT the new spec.
+    for stale_id in "${PARENT}-sidecar-${PEER_ID}"; do
+      curl -fsS -X PUT "http://127.0.0.1:8500/v1/agent/service/deregister/${stale_id}" \
+        >/dev/null 2>&1 || true
+    done
     jq -n \
       --arg name "$PARENT" \
       --arg id "$PARENT_ID" \
