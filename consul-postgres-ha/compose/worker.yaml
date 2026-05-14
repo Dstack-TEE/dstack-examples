@@ -78,10 +78,10 @@ services:
     # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
     # must use the same value to land in the same cluster. Postgres
     # binds the canonical 127.0.0.1:5432; Patroni REST on 127.0.0.1:8008.
-    # The Patroni entrypoint also hosts the role-watcher loop that
-    # mirrors Patroni's current role into the postgres-sidecar
-    # registration's Service.Tags (workload-specific, lives here
-    # instead of in the platform sidecar).
+    # Patroni's native Consul integration registers the parent service
+    # `${scope}/${peer}` with role-aware tags; the platform sidecar
+    # pre-registers a stub at the same service_id so consumer-side
+    # Envoy can come up before Patroni has bootstrapped.
     # WORKAROUND: superuser + replication passwords generated in
     # Terraform and broadcast identically to every worker. See
     # cluster.tf.
@@ -91,11 +91,10 @@ services:
       - PATRONI_REPLICATION_PW=${PATRONI_REPLICATION_PW}
       # SERVICES_JSON: service VIPs for /etc/hosts (patroni needs to
       # resolve postgres-master to its local Envoy upstream so
-      # primary_conninfo routes through the mesh), AND the sidecar
-      # registration shape the role-watcher re-PUTs with tags.
+      # primary_conninfo routes through the mesh).
       - SERVICES_JSON=${SERVICES_JSON}
       # PEERS_JSON: role-watcher needs SELF_VIP to set Address on the
-      # sidecar registration.
+      # inline SidecarService entry.
       - PEERS_JSON=${PEERS_JSON}
     volumes:
       - /tmp/dstack-runtime/instance:/run/instance:ro

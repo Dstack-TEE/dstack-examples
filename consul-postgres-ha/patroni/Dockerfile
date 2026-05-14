@@ -6,7 +6,7 @@
 # /etc/patroni.yml and execs `patroni`.
 FROM postgres:16-alpine
 
-RUN apk add --no-cache python3 py3-pip py3-psycopg2 py3-yaml jq tini su-exec
+RUN apk add --no-cache python3 py3-pip py3-psycopg2 py3-yaml jq tini su-exec curl
 
 # python-consul + python-etcd are optional; we only ship the consul DCS.
 RUN pip install --no-cache-dir --break-system-packages \

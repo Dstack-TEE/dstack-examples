@@ -65,8 +65,17 @@ restapi:
 
 consul:
   host: ${CONSUL_HTTP}
-  register_service: true
-  service_check_interval: 5s
+  # Patroni's native register_service is set to false because the
+  # platform sidecar owns the parent service registration (Address,
+  # Port, check). The role-watcher loop below polls Patroni's REST API
+  # and re-PUTs the parent registration with tags ["master"] or
+  # ["replica"] so service-resolver subset filters match. We do this
+  # because Patroni deregisters the service every loop iteration while
+  # `role=uninitialized` (the entire pre-bootstrap window on a
+  # replica), which wipes the registration our connect-proxy depends
+  # on for proxycfg state. With register_service:false Patroni stays
+  # out of the agent's service catalog and just uses Consul as DCS.
+  register_service: false
 
 bootstrap:
   dcs:
@@ -121,26 +130,19 @@ tags:
   clonefrom: false
 EOF
 
-# Role watcher: mirror Patroni's current role into the postgres-sidecar
-# registration's Tags. Lives here (not in the platform sidecar) because
-# the role <-> tag mapping is Patroni-specific knowledge — the platform
-# sidecar registers the proxy with no tags, and only Patroni knows when
-# it has flipped master/replica.
+# Role-watcher: poll Patroni's REST API and re-PUT the parent service
+# registration `${CLUSTER}-${PEER_ID}` with role-aware tags. Consul's
+# /v1/agent/service/register is a complete replace, so each PUT must
+# carry the full spec — same shape the platform sidecar pre-registers,
+# including the inline `Connect.SidecarService` that links the proxy
+# to this parent. Without that field Consul doesn't return the proxy
+# as a Connect endpoint for the parent and the discovery chain
+# resolves to zero hosts.
 #
-# Service-resolver subset filters (`Service.Tags contains "master"`)
-# apply to the SIDECAR registration, not Patroni's parent service. We
-# re-PUT the sidecar via the local consul agent's HTTP API; the PUT is
-# idempotent on (Name, ID), so it acts as an in-place tag update.
-PEERS_JSON_FOR_ROLE="${PEERS_JSON:?PEERS_JSON required (for role-watcher to compute self vip)}"
-SELF_VIP=$(echo "$PEERS_JSON_FOR_ROLE" | jq -r --arg id "$PEER_ID" '.[] | select(.id == $id) | .vip')
-[ -n "$SELF_VIP" ] || { echo "FATAL: $PEER_ID not in PEERS_JSON" >&2; exit 1; }
-
-# Same registration shape the platform sidecar emits in pattern B
-# (standalone connect-proxy, parent=CLUSTER auto-registered by Patroni).
-# We rebuild it here rather than relying on a shared file because the
-# platform sidecar lives in a different container with its own /tmp;
-# reconstructing from SERVICES_JSON + PEERS_JSON keeps this loop
-# self-contained.
+# The subset filters in the service-resolver
+# (`Service.Tags contains "master"` / "replica") match on the parent's
+# tags, so flipping `$TAG` here is what makes `postgres-master:5432`
+# follow the current leader live.
 ROLE_BACKEND=$(
   echo "$SERVICES_JSON" \
     | jq -c --arg parent "$CLUSTER" '
@@ -156,18 +158,22 @@ ROLE_BACKEND=$(
       '
 )
 
+PEERS_JSON_FOR_ROLE="${PEERS_JSON:?PEERS_JSON required (role-watcher needs SELF_VIP)}"
+SELF_VIP=$(echo "$PEERS_JSON_FOR_ROLE" | jq -r --arg id "$PEER_ID" '.[] | select(.id == $id) | .vip')
+[ -n "$SELF_VIP" ] || { echo "FATAL: $PEER_ID not in PEERS_JSON" >&2; exit 1; }
+
 if [ "$(echo "$ROLE_BACKEND" | jq -r '.sidecar_port // "null"')" = "null" ]; then
   echo "[role-watcher] no SERVICES_JSON entry with parent=$CLUSTER — skipping watcher"
 else
-  # Background subshell — tini reaps it when this script's process tree
-  # tears down on container stop. We don't trap or `wait`: the original
-  # design had this loop as a sibling background process in the platform
-  # sidecar, and we preserve that lifecycle here.
   (
+    echo "[role-watcher] starting (service_id=${CLUSTER}-${PEER_ID}, rest=127.0.0.1:${REST_PORT})"
     PREV=""
     while true; do
       sleep 5
-      PATRONI_ROLE=$(curl -fsS --max-time 2 http://127.0.0.1:${REST_PORT}/ 2>/dev/null \
+      # `/` returns 503 on non-leaders (libpq's idiomatic way to advertise
+      # role to load balancers); `/patroni` is 200 on every node and
+      # carries the same JSON.
+      PATRONI_ROLE=$(curl -fsS --max-time 2 "http://127.0.0.1:${REST_PORT}/patroni" 2>/dev/null \
                       | jq -r '.role // empty' 2>/dev/null)
       case "$PATRONI_ROLE" in
         master|primary)                       TAG="master"  ;;
@@ -176,28 +182,38 @@ else
       esac
       [ "$TAG" = "$PREV" ] && continue
       SPEC=$(jq -n \
-        --arg id "${CLUSTER}-sidecar-${PEER_ID}" \
-        --arg name "${CLUSTER}-sidecar-proxy" \
-        --arg parent "$CLUSTER" \
-        --arg vip "$SELF_VIP" \
+        --arg name "$CLUSTER" \
+        --arg id "${CLUSTER}-${PEER_ID}" \
         --arg tag "$TAG" \
-        --argjson backend "$ROLE_BACKEND" '{
-          Kind: "connect-proxy",
-          ID: $id,
+        --arg vip "$SELF_VIP" \
+        --argjson backend "$ROLE_BACKEND" \
+        --argjson port "$PG_PORT" '{
           Name: $name,
-          Address: ("127.50.0." + $vip),
-          Port: $backend.sidecar_port,
+          ID: $id,
+          Address: "127.0.0.1",
+          Port: $port,
           Tags: [$tag],
-          Proxy: {
-            DestinationServiceName: $parent,
-            LocalServiceAddress:    "127.0.0.1",
-            LocalServicePort:       $backend.port,
-            Upstreams:              $backend.upstreams
+          Check: {
+            TCP: ("127.0.0.1:" + ($port|tostring)),
+            Interval: "5s",
+            Timeout: "2s",
+            DeregisterCriticalServiceAfter: "1m"
+          },
+          Connect: {
+            SidecarService: {
+              Address: ("127.50.0." + $vip),
+              Port: $backend.sidecar_port,
+              Proxy: {
+                LocalServiceAddress: "127.0.0.1",
+                LocalServicePort:    $backend.port,
+                Upstreams:           $backend.upstreams
+              }
+            }
           }
         }')
       if printf '%s' "$SPEC" | curl -fsS -X PUT --data-binary @- \
-                                http://${CONSUL_HTTP}/v1/agent/service/register; then
-        echo "[role-watcher] ${CLUSTER}-sidecar tag: $PREV -> $TAG (patroni role=$PATRONI_ROLE)"
+                                "http://${CONSUL_HTTP}/v1/agent/service/register"; then
+        echo "[role-watcher] ${CLUSTER}-${PEER_ID} tag: ${PREV:-<none>} -> $TAG (patroni role=$PATRONI_ROLE)"
         PREV="$TAG"
       fi
     done

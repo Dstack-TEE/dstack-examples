@@ -39,11 +39,18 @@
 #   ]
 #
 # Services with the same canonical `port` collapse onto one backend
-# (one sidecar_port, one Envoy). `registers_parent=false` means the
-# workload auto-registers its parent service under its own scope; the
-# platform only registers a standalone connect-proxy pointing at it,
-# and the workload owns any role-tag mutation on the sidecar via the
-# Consul agent HTTP API.
+# (one sidecar_port, one Envoy). For `registers_parent=false`, the
+# workload owns the *authoritative* parent service registration
+# (tags, health check) under its own `scope` — e.g. Patroni's native
+# Consul integration registers `${scope}/${peer}` with role tags and a
+# REST-API health check. To avoid the chicken-and-egg where the
+# workload can't run (no consumer-side Envoy listener yet) before it
+# has registered (Patroni only registers after pg_basebackup, which
+# needs the listener), the platform pre-registers a *stub* parent
+# service at the same service_id so Consul's proxycfg can populate
+# the connect-proxy's state immediately. The workload's later PUT
+# overwrites the stub in place (same service_id ⇒ idempotent), adding
+# its check and role tags.
 #
 # Supervision policy: any one inner process dying takes the whole
 # container down. Compose `restart: on-failure` brings it back in
@@ -240,78 +247,76 @@ if [ "$ROLE" = "worker" ]; then
     SPEC_FILE="/tmp/sidecar-${PARENT}.json"
     ENVOY_BOOT="/tmp/envoy-${PARENT}.json"
 
+    # Both patterns use a single registration with inline SidecarService:
+    # that's the shape Consul recognises as a Connect-aware service +
+    # its proxy. A bare `Kind: connect-proxy` plus a separate parent
+    # without `Connect.SidecarService` is not enough — Consul won't
+    # return the proxy as a Connect endpoint for the parent, so the
+    # discovery chain resolves to zero hosts and consumer Envoys close
+    # incoming connections immediately.
+    #
+    # The two patterns differ only in service_id and what overwrites
+    # the registration over time:
+    #
+    #   pattern A (webdemo): platform-only. Parent ID is
+    #     "${parent}-${peer}", tagged "peer=${peer}". Nothing else
+    #     touches this registration.
+    #
+    #   pattern B (Patroni): platform pre-registers a "stub" with no
+    #     role tags. Patroni's entrypoint role-watcher re-PUTs the
+    #     same service_id with tags ["master"] / ["replica"] tracked
+    #     from Patroni REST. We keep `register_service: false` in
+    #     patroni.yml so Patroni's own integration stays out of the
+    #     service catalog (it only uses Consul as DCS); see
+    #     patroni/entrypoint.sh for the role-watcher.
+    # Service ID format is `${parent}-${peer}` for both patterns so it
+    # never contains a slash. Slashes in service IDs trip up
+    # `consul connect envoy -sidecar-for` URL handling.
+    PARENT_ID="${PARENT}-${PEER_ID}"
     if [ "$REGISTERS_PARENT" = "true" ]; then
-      # Pattern A: platform owns the parent service AND its sidecar.
-      # TCP check on the canonical port — generic across HTTP/non-HTTP
-      # workloads; passes once the app's listener is up. SidecarService
-      # inline means a single PUT registers both records.
-      jq -n \
-        --arg name "$PARENT" \
-        --arg id "${PARENT}-${PEER_ID}" \
-        --arg peer "$PEER_ID" \
-        --argjson port "$LOCAL_PORT" \
-        --arg vip "$SELF_VIP" \
-        --argjson sport "$SIDECAR_PORT" \
-        --argjson upstreams "$UPSTREAMS" '{
-          Name: $name,
-          ID: $id,
-          Address: "127.0.0.1",
-          Port: $port,
-          Tags: ["peer=" + $peer],
-          Check: {
-            TCP: ("127.0.0.1:" + ($port|tostring)),
-            Interval: "10s",
-            Timeout: "2s",
-            DeregisterCriticalServiceAfter: "1m"
-          },
-          Connect: {
-            SidecarService: {
-              Address: ("127.50.0." + $vip),
-              Port: $sport,
-              Proxy: {
-                LocalServiceAddress: "127.0.0.1",
-                LocalServicePort: $port,
-                Upstreams: $upstreams
-              }
-            }
-          }
-        }' > "$SPEC_FILE"
-      ENVOY_ARGS=(-sidecar-for="${PARENT}-${PEER_ID}")
+      TAGS_JSON='["peer='"$PEER_ID"'"]'
     else
-      # Pattern B: workload auto-registers the parent under its
-      # `scope`; platform registers a standalone connect-proxy pointing
-      # at it. Role/state tags on the sidecar (e.g. master/replica) are
-      # managed by the workload itself via the Consul agent HTTP API;
-      # the subset resolvers below filter on those tags.
-      jq -n \
-        --arg id "$SIDECAR_ID" \
-        --arg name "${PARENT}-sidecar-proxy" \
-        --arg parent "$PARENT" \
-        --arg vip "$SELF_VIP" \
-        --argjson port "$LOCAL_PORT" \
-        --argjson sport "$SIDECAR_PORT" \
-        --argjson upstreams "$UPSTREAMS" '{
-          Kind: "connect-proxy",
-          ID: $id,
-          Name: $name,
-          Address: ("127.50.0." + $vip),
-          Port: $sport,
-          Tags: [],
-          Proxy: {
-            DestinationServiceName: $parent,
-            LocalServiceAddress: "127.0.0.1",
-            LocalServicePort: $port,
-            Upstreams: $upstreams
-          }
-        }' > "$SPEC_FILE"
-      ENVOY_ARGS=(-proxy-id="$SIDECAR_ID")
+      TAGS_JSON='[]'
     fi
 
+    jq -n \
+      --arg name "$PARENT" \
+      --arg id "$PARENT_ID" \
+      --argjson port "$LOCAL_PORT" \
+      --arg vip "$SELF_VIP" \
+      --argjson sport "$SIDECAR_PORT" \
+      --argjson tags "$TAGS_JSON" \
+      --argjson upstreams "$UPSTREAMS" '{
+        Name: $name,
+        ID: $id,
+        Address: "127.0.0.1",
+        Port: $port,
+        Tags: $tags,
+        Check: {
+          TCP: ("127.0.0.1:" + ($port|tostring)),
+          Interval: "10s",
+          Timeout: "2s",
+          DeregisterCriticalServiceAfter: "1m"
+        },
+        Connect: {
+          SidecarService: {
+            Address: ("127.50.0." + $vip),
+            Port: $sport,
+            Proxy: {
+              LocalServiceAddress: "127.0.0.1",
+              LocalServicePort: $port,
+              Upstreams: $upstreams
+            }
+          }
+        }
+      }' > "$SPEC_FILE"
+    ENVOY_ARGS=(-sidecar-for="$PARENT_ID")
+
     # Re-register on every boot via the agent HTTP API (PUT-idempotent).
-    log "registering ${PARENT} sidecar (port=${SIDECAR_PORT}, base-id=${BASE_ID})"
+    log "registering ${PARENT} (id=${PARENT_ID}) + sidecar (port=${SIDECAR_PORT}, base-id=${BASE_ID})"
     until curl -fsS -X PUT --data-binary @"$SPEC_FILE" \
              http://127.0.0.1:8500/v1/agent/service/register; do
-      log "${PARENT} sidecar register failed; retrying"
+      log "${PARENT} register failed; retrying"
       sleep 2
     done
 
