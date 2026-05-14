@@ -258,19 +258,44 @@ before "get Connect cert":
 - Periodic re-attestation independent of token TTL.
 - Cross-cluster federation. Single dstack cluster only.
 
+## Phase 0 findings (verified 2026-05-14)
+
+- **Verification path: `dstack-verifier` HTTP sidecar.** Image
+  `dstacktee/dstack-verifier:latest` (published, ~30 MB pulled).
+  Single `POST /verify` returns structured `is_valid`,
+  `quote_verified`, `event_log_verified`, `os_image_hash_verified`,
+  `tcb_status`, and `app_info.{app_id, compose_hash, instance_id,
+  mrtd, rtmr0..3, key_provider_info, ...}`. App_id arrives extracted —
+  the broker doesn't parse RTMR3 event_log entries itself.
+- **No Rust/C dependency in the broker.** We considered `dcap-qvl`
+  Go bindings; the sidecar approach is dramatically simpler.
+- **Verification cost: ~800 ms – 1 s per call** (5 trials against
+  the dstack repo's fixture quote, first run includes one PCCS
+  cache miss). Within budget for a sidecar-startup-time cost.
+  Cache-worthy for re-attest cycles within token TTL.
+- **Payload sizes**: quote 5 KB hex, event_log ~3.4 KB JSON, total
+  POST body ~17 KB, response 1.5 KB. All easy HTTP.
+- **`GetQuoteResponse` already carries `Quote`, `EventLog`,
+  `ReportData`, `VmConfig`** — every field `dstack-verifier`
+  wants. The sidecar passes the entire response through to the
+  broker, which forwards to dstack-verifier as-is.
+
+The broker shrinks to ~50 LoC of HTTP-pass-through plus an
+`app_id ∈ allowlist` check.
+
 ## Implementation phases
 
-### Phase 0 — investigation & plumbing (~1 day)
+### Phase 0 — investigation (DONE)
 
-- Confirm `dcap-qvl`'s Go binding (or whether the broker shells out
-  to a `dstack-verifier` sidecar). Measure verification cost: a
-  budget of 10 ms per attest is fine; 200 ms is a concern.
-- Wire a stubbed `/v1/admission/challenge` + `/v1/admission/attest`
-  inside `mesh-sidecar` on coordinator role only. Broker always
-  returns 403; existing flow is unaffected.
-- Verify Go SDK `GetQuote(reportData)` works end-to-end on a live
-  dstack CVM; capture an example quote + event_log for offline
-  parsing tests.
+Findings above. The remaining Phase 0 tasks are operational:
+
+- Build a tiny attest-and-dump program; run on one fresh
+  `tdx.small` CVM; confirm a live quote with our own
+  `app_id` extracts cleanly. ~30 min wall clock.
+- Run `dstack-verifier` co-located with `mesh-sidecar` on
+  coordinators. Decide: same container (one more supervised
+  process in `entrypoint.sh`) or sibling docker-compose service.
+  Lean toward sibling — it has its own image and lifecycle.
 
 ### Phase 1 — broker enforces; tokens gate Consul access (~1 week)
 
@@ -304,37 +329,40 @@ before "get Connect cert":
 
 ## Open questions
 
-1. **`dcap-qvl` Go bindings or HTTP sidecar?** `dcap-qvl` is Rust;
-   does it have a Go binding good enough to use, or does the
-   broker just `POST` to a co-located `dstack-verifier` service?
-   The latter adds a process but isolates the C/Rust dependency.
-   Phase 0 should pick.
+Phase 0 resolved the first two big ones (verifier path + cost).
+Remaining:
 
-2. **Where does `admission-policy.hcl` live at runtime?** Options:
+1. **Where does `admission-policy.hcl` live at runtime?** Options:
    (a) rendered into the broker's image at build time (immutable,
    redeploy to change), (b) read from Consul KV (mutable, rotated
    live), (c) read from a file mounted from the host. (a) is
    simplest; (b) supports live rotation; (c) is awkward for dstack.
 
-3. **Token lifetime tradeoffs.** Short TTL (10 min) means tight
+2. **Token lifetime tradeoffs.** Short TTL (10 min) means tight
    revocation but more broker traffic. Long TTL (8 h) means a
    compromised quote / replayed nonce buys longer access. 1 h is
    the proposed default; should it be configurable per-identity?
 
-4. **Genesis CAS race.** Three coordinators race to write
+3. **Genesis CAS race.** Three coordinators race to write
    `cluster/<name>/secrets/initialized`. CAS is the right
    primitive but the loser needs to fall through to "read what
    the winner wrote." Sketch the loop and confirm correctness.
 
-5. **Broker HA.** One broker per coordinator. If a worker can't
+4. **Broker HA.** One broker per coordinator. If a worker can't
    reach any of the three, it can't attest. Probably fine
    (degrades to "new joiners can't join, existing tokens keep
    working") but worth being explicit.
 
-6. **Signaling broker auth.** Out of scope here but worth noting:
+5. **Signaling broker auth.** Out of scope here but worth noting:
    once we have attestation-issued identity keys, the signaling
    broker should require ICE auth messages to be signed by that
    identity. Different design doc.
+
+6. **dstack-verifier image pinning.** Use
+   `dstacktee/dstack-verifier:latest` for now; production deploy
+   should pin a digest. Image build provenance not yet verified —
+   worth checking if there's Sigstore attestation on the upstream
+   tag.
 
 ## Success criteria
 
