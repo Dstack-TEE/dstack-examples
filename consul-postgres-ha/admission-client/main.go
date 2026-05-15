@@ -6,6 +6,7 @@ import (
 	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -18,6 +19,8 @@ import (
 
 	dstack "github.com/Dstack-TEE/dstack/sdk/go/dstack"
 )
+
+var admissionRetryInterval = 2 * time.Second
 
 func main() {
 	var (
@@ -96,15 +99,30 @@ func admit(ctx context.Context, httpClient *http.Client, dstackClient quoteClien
 	if len(brokerURLs) == 0 {
 		return "", fmt.Errorf("no broker URLs configured")
 	}
-	var errs []string
-	for _, brokerURL := range brokerURLs {
-		token, err := admitOne(ctx, httpClient, dstackClient, strings.TrimRight(brokerURL, "/"), identity, statementBytes, vmConfig)
-		if err == nil {
-			return token, nil
+	var lastErrs []string
+	for {
+		if err := ctx.Err(); err != nil {
+			if len(lastErrs) > 0 {
+				return "", fmt.Errorf("admission timed out or was canceled after broker errors: %s", strings.Join(lastErrs, "; "))
+			}
+			return "", err
 		}
-		errs = append(errs, fmt.Sprintf("%s: %v", brokerURL, err))
+		lastErrs = lastErrs[:0]
+		for _, brokerURL := range brokerURLs {
+			brokerURL = strings.TrimRight(brokerURL, "/")
+			token, err := admitOne(ctx, httpClient, dstackClient, brokerURL, identity, statementBytes, vmConfig)
+			if err == nil {
+				return token, nil
+			}
+			if isPermanentAdmissionError(err) {
+				return "", fmt.Errorf("%s: %w", brokerURL, err)
+			}
+			lastErrs = append(lastErrs, fmt.Sprintf("%s: %v", brokerURL, err))
+		}
+		if !sleepContext(ctx, admissionRetryInterval) {
+			return "", fmt.Errorf("admission timed out or was canceled after broker errors: %s", strings.Join(lastErrs, "; "))
+		}
 	}
-	return "", fmt.Errorf("all admission brokers rejected or failed: %s", strings.Join(errs, "; "))
 }
 
 func admitOne(ctx context.Context, httpClient *http.Client, dstackClient quoteClient, brokerURL, identity string, statementBytes []byte, vmConfig string) (string, error) {
@@ -141,7 +159,7 @@ func challenge(ctx context.Context, httpClient *http.Client, brokerURL string) (
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("challenge HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", httpStatusError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
 	}
 	var out struct {
 		Nonce string `json:"nonce"`
@@ -180,7 +198,7 @@ func attest(ctx context.Context, httpClient *http.Client, brokerURL string, payl
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("attest HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		return "", httpStatusError{status: resp.StatusCode, body: strings.TrimSpace(string(body))}
 	}
 	var out struct {
 		ConsulACLToken string `json:"consul_acl_token"`
@@ -231,4 +249,34 @@ func shortHash(h string) string {
 		return h
 	}
 	return h[:12]
+}
+
+type httpStatusError struct {
+	status int
+	body   string
+}
+
+func (e httpStatusError) Error() string {
+	return fmt.Sprintf("HTTP %d: %s", e.status, e.body)
+}
+
+func isPermanentAdmissionError(err error) bool {
+	var statusErr httpStatusError
+	if !errors.As(err, &statusErr) {
+		return false
+	}
+	return statusErr.status == http.StatusBadRequest ||
+		statusErr.status == http.StatusUnauthorized ||
+		statusErr.status == http.StatusForbidden
+}
+
+func sleepContext(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

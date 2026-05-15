@@ -204,11 +204,13 @@ if [ "$ROLE" = "coordinator" ] && [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
   ADMISSION_BROKER_PID=$!
 fi
 
-# Wait for the local agent to accept HTTP requests; everything below
-# (sidecar registration, leaf cert, envoy bootstrap) goes through it.
+# Wait for the local agent to listen on its HTTP socket. This is deliberately
+# a transport-level local check, not a Consul API authorization check and not
+# cluster membership: workers cannot join servers until mesh-conn is up, and
+# ACL-protected agent endpoints can return primary-dc-down before that join.
 wait_consul_ready() {
   local n=0
-  until CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul members >/dev/null 2>&1; do
+  until timeout 1 bash -c "cat < /dev/null > /dev/tcp/${CONSUL_HTTP%:*}/${CONSUL_HTTP##*:}" 2>/dev/null; do
     n=$((n+1))
     if [ $n -gt 60 ]; then
       log "consul agent not reachable after 60s"
@@ -283,7 +285,8 @@ if [ "$ROLE" = "worker" ]; then
         -broker-urls "$BROKER_URLS" \
         -token-file "$TOKEN_FILE" \
         -cluster "$CLUSTER_NAME" \
-        -peer-id "$PEER_ID" 2>&1 | prefix "admission-client-${PARENT}"
+        -peer-id "$PEER_ID" \
+        -timeout 15m 2>&1 | prefix "admission-client-${PARENT}"
       BACKEND_CONSUL_TOKEN=$(cat "$TOKEN_FILE")
     fi
 
@@ -424,7 +427,7 @@ if [ "$ROLE" = "coordinator" ] && [ "$ORDINAL" = "0" ]; then
     wait_consul_ready
     # Wait for the full coordinator quorum to be visible — config-entry
     # writes need a server with leadership and a healthy quorum.
-    until [ "$(consul members 2>/dev/null | awk 'NR>1 && $4=="server" && $3=="alive"' | wc -l)" -ge "${BOOTSTRAP_EXPECT}" ]; do
+    until [ "$(CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul members 2>/dev/null | awk 'NR>1 && $4=="server" && $3=="alive"' | wc -l)" -ge "${BOOTSTRAP_EXPECT}" ]; do
       sleep 2
     done
     log "config-entry writer: quorum ready, writing entries"
