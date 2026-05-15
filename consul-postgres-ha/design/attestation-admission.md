@@ -1,9 +1,9 @@
 # Design: TEE attestation as the service-mesh identity root
 
-**Status**: exploration brief, not accepted. The verifier path is
-resolved, but the admission policy mechanism is still open. Do not
-start Phase 1 implementation from this document without first
-settling the circularity around app-id based policy.
+**Status**: design direction accepted for Phase 1. The verifier path
+is resolved, and the policy root is a Terraform-defined workload
+identity whose allowed revisions are attested `compose_hash` values.
+Upgrade governance remains future work and is documented below.
 
 ## Why this is the load-bearing piece
 
@@ -28,8 +28,9 @@ the current VPC-like overlay model.
 
 The remaining question is narrower: **what should authorize a CVM
 to obtain a Consul Connect identity?** TEE attestation is the right
-primitive, but app-id allowlisting has a deployment-order problem
-that this brief now treats as unresolved.
+primitive. The policy root should be the workload identity defined
+by Terraform, while the evidence should include the measured
+`compose_hash` from dstack.
 
 ## What changes for end users
 
@@ -38,9 +39,9 @@ discussion, an operator who runs `terraform apply`:
 
 - Still sets `TURN_SHARED_SECRET` for NAT traversal. That remains
   the overlay admission key.
-- May see a new runtime admission policy source, but it cannot be
-  baked into the broker image if it depends on dstack app-ids: the
-  app-ids are not known until after Phala has deployed the apps.
+- May see a generated admission policy manifest. The manifest maps
+  Terraform-defined workload identities to allowed `compose_hash`
+  revisions obtained from Phala Cloud preflight.
 - May later stop setting `GOSSIP_KEY`, `PATRONI_SUPERUSER_PW`, and
   `PATRONI_REPLICATION_PW` in `cluster.tf`, but that is a separate
   phase. It is not required to answer the identity-policy question.
@@ -53,25 +54,26 @@ sidecar with a Connect cert. The new machinery is invisible.
 
 Candidate shape: each workload's sidecar, at startup, fetches a TDX
 quote from its local dstack guest-agent. The quote's `report_data`
-binds the sidecar's about-to-be-issued Connect leaf cert pubkey + a
-fresh nonce from the cluster's **admission broker**. The sidecar
-posts the quote + claimed identity + cert pubkey to the broker. The
-broker verifies the quote through `dstack-verifier`, evaluates a
-cluster policy predicate, and on success issues a Consul ACL token
-bound to a SPIFFE-style identity (e.g., `spiffe://demo/postgres`).
-The sidecar uses that token to request a Connect cert from Consul's
-stock CA. From that point on, **the cert chain is the workload's
-identity** — intentions, mTLS verification, EDS endpoint trust all
-flow through the standard Consul Connect machinery.
+binds a canonical admission statement plus a fresh nonce from the
+cluster's **admission broker**. The statement names the claimed
+identity and local dstack identity fields. The sidecar posts the
+quote + claimed identity + statement to the broker. The broker
+verifies the quote through `dstack-verifier`, evaluates a cluster
+policy predicate, and on success issues a Consul ACL token bound to a
+SPIFFE-style identity (e.g., `spiffe://demo/postgres`). The sidecar
+uses that token to request a Connect cert from Consul's stock CA.
+From that point on, **the cert chain is the workload's identity** —
+intentions, mTLS verification, EDS endpoint trust all flow through
+the standard Consul Connect machinery.
 
 ```
   dstack TEE   ┌──── attestation ──── TDX quote + event log
-  per CVM      │                       binding: H(cert pubkey || nonce)
+  per CVM      │                       binding: H(statement || nonce)
                ▼
   admission-broker (on coordinators)
        │ verifies quote chain
        │ reads verifier fields: app_id, compose_hash, mrtd, ...
-       │ checks a policy predicate that is still under design
+       │ checks identity → allowed compose_hash policy
        │ ✓ → mints Consul ACL token bound to a SPIFFE identity
        │ ✗ → rejects with documented error code
        ▼
@@ -123,7 +125,7 @@ POST /v1/admission/challenge
 POST /v1/admission/attest
 Body: {
   "identity":    "spiffe://demo/postgres",  # claimed identity
-  "cert_pubkey": "<X.509 SPKI DER, hex>",   # the Connect cert to be issued
+  "binding":     "<canonical statement bytes, hex>",
   "nonce":       "<echoed from challenge>", # for replay protection
   "quote":       "<TDX quote, hex>",         # from dstack GetQuote()
   "event_log":   "<RTMR event log, JSON>"   # from dstack GetQuote()
@@ -138,22 +140,25 @@ The broker validates:
 1. **Quote chain**: TDX → Intel PCS root, via a sibling
    `dstack-verifier` HTTP service.
 2. **`report_data` binding**: must equal
-   `SHA-512(cert_pubkey || nonce)`. Anything else means the quote
-   was generated for a different handshake; reject.
+   `SHA-512(binding_statement || nonce)`. Anything else means the
+   quote was generated for a different handshake; reject. The broker
+   also verifies that the statement identity equals the claimed
+   identity.
 3. **Nonce freshness**: must be a nonce the broker issued
    recently and hasn't been consumed.
 4. **RTMR replay**: use the Go SDK's `ReplayRTMRs()` helper to
    confirm the event log matches the quote's RTMRs. Otherwise the
    event log could be forged.
 5. **Policy check**: evaluate the claimed `identity` against the
-   chosen policy predicate. `app_id ∈ allowed_app_ids` is one
-   candidate, but not yet accepted because of the Terraform
-   deployment-order problem.
+   generated admission policy. Phase 1 accepts a quote when the
+   identity names a known Terraform workload and the quote's
+   `compose_hash` is in that workload's allowed revision set.
 
 On success: mint a Consul ACL token via the local Consul agent's
-HTTP API, with a policy that grants the right service-identity
-binding (e.g., `service "postgres" { policy = "write" }`). Return
-the token + expiry.
+HTTP API. Every issued token carries the workload's service identity;
+Consul-native workloads may also attach generated ACL policies for
+declared DCS permissions such as `key_prefix "service/<cluster>"`
+and `session_prefix ""`. Return the token + expiry.
 
 ### Genesis & state
 
@@ -174,63 +179,97 @@ policy decision:
   That is a separate secret-distribution design, not a reason to
   block or complicate NAT traversal.
 
-## Policy source and circularity problem
+## Policy source
 
-The original candidate was a small HCL document in
-`cluster-example/admission-policy.hcl`:
+The policy subject is the workload we define in Terraform, not the
+`compose_hash` itself. Multiple workloads may share the same measured
+compose content while differing in non-measured deployment arguments,
+so `compose_hash` is evidence for an approved revision, not the row
+key.
 
-```hcl
-# Each identity is granted only to workloads whose dstack app_id
-# is in the listed set. App-ids come from cluster.tf's
-# `phala_app.{coordinator,worker}` outputs, populated at
-# `terraform apply` time.
+A generated manifest can be small and explicit:
 
-identity "spiffe://demo/coordinator" {
-  allowed_app_ids = var.coordinator_app_ids   # set of 3
-}
-
-identity "spiffe://demo/postgres" {
-  allowed_app_ids = var.worker_app_ids        # set of 3
-}
-
-identity "spiffe://demo/webdemo" {
-  allowed_app_ids = var.worker_app_ids
+```json
+{
+  "cluster": "demo",
+  "policy_epoch": 1,
+  "workloads": [
+    {
+      "workload_id": "demo/coordinator/0",
+      "identity": "spiffe://demo/coordinator",
+      "allowed_compose_hashes": [
+        "1434154969cb663afc5a73393b84cc31a1319ab6c65c9766fadd0c86bb59ef37"
+      ],
+      "evidence": {
+        "app_id": "optional runtime evidence",
+        "kms": "phala"
+      }
+    },
+    {
+      "workload_id": "demo/worker/0/postgres",
+      "identity": "spiffe://demo/postgres",
+      "consul_service": "demo",
+      "consul_permissions": {
+        "key_prefixes": ["service/demo"],
+        "session_write": true
+      },
+      "allowed_compose_hashes": [
+        "9157fe4a3b6da46de49f8e2ce0943dbd43cfb6001eefae6b1bcc2c9d0749c5a4"
+      ]
+    }
+  ]
 }
 ```
 
-The original draft treated this as a small rendering detail. It is
-not: if the policy depends on app-ids, runtime delivery becomes a
-real part of the deployment architecture.
+The manifest should be generated from the same Terraform graph that
+declares the CVMs. The Phala Terraform provider can call the same
+preflight path used before deployment and expose the resulting
+`compose_hash` without creating a VM. That keeps deployment to a
+single ordinary apply: Terraform already knows the workload
+definition, preflight yields the measured revision hash, and the
+broker receives a policy document derived from those same inputs.
 
-This has a real circularity:
+`app_id`, KMS details, TCB fields, and `app-compose.json` remain
+valuable evidence and audit material, but they are not the primary
+policy key in Phase 1. In particular, `app-compose.json` is useful
+for human review and transparency logs because it is the exact byte
+payload dstack measures and it embeds the Docker Compose string.
 
-1. Docker images must be built and referenced before `terraform
-   apply`.
-2. Phala assigns dstack app-ids during deployment.
-3. A broker image with app-ids baked in would need app-ids that do
-   not exist yet.
+## Upgradeability policy server
 
-Runtime rendering can break the cycle, but it introduces deployment
-ordering and longer full applies. Pre-allocating app-ids through a
-Phala API might also break the cycle, but relying on preallocation
-would be a platform-specific workaround unless it is a first-class
-API contract.
+Upgradeability is intentionally not implemented in Phase 1. The hard
+problem is preventing a developer or operator from silently replacing
+part of the mesh with a vulnerable or backdoored revision while
+keeping normal rolling upgrades ergonomic.
 
-Policy candidates to keep exploring:
+The future shape is a policy server that answers whether a workload
+identity may admit a particular `compose_hash` under a policy epoch.
+The coordinator or admission broker verifies the workload quote as
+usual, then asks this policy server for the upgradeability decision.
 
-| Candidate | What it proves | Deployment shape | Concern |
-|---|---|---|---|
-| Runtime app-id allowlist | Quote belongs to one of the deployed Phala apps | Terraform deploys apps, collects app-ids, writes broker-readable runtime policy | Staged apply / policy update cycle |
-| Preallocated app-id allowlist | Same as above | Reserve app-ids before image build / apply | Depends on Phala API semantics; may slow large deploys |
-| Compose hash / MRTD predicate | Workload measured content matches a pre-deployable value | Compute or derive expected measurement before apply, then broker checks `compose_hash` / `mrtd` | Need to verify whether values are deterministic and locally computable |
-| Terraform-issued node enrollment token + quote binding | Node was provisioned by this Terraform deployment and is running in a verified TDX environment | Terraform passes per-node token via env; quote binds token-derived key in `report_data` | Weaker than content identity unless combined with measurement checks |
-| KMS/certificate based identity | Workload identity comes from a Phala/dstack-issued cert chain rather than raw app-id | Broker verifies the cert chain and binds it to the quote | Need to inspect exact KMS cert semantics |
+Possible deployments:
 
-Current direction: do **not** bake policy into the broker image. The
-most promising next investigation is whether `compose_hash` or
-`mrtd` can be computed before deployment and used as the primary
-predicate. That would avoid the app-id circular dependency while
-staying faithful to measured workload identity.
+| Deployment | Shape | Use case |
+|---|---|---|
+| Centralized signed policy server | Operator-controlled server returns signed policy roots / allowed revisions | Simple private clusters and fast iteration |
+| TEE policy bridge | A TEE service reads blockchain / DAO policy storage and serves coordinator-readable decisions | Decentralized governance without putting chain clients in every coordinator |
+| Transparency-log mode | Policy server publishes all admitted revisions and epochs for audit | Human-visible history even when enforcement remains centralized |
+
+Responsibilities for the future server:
+
+- Maintain a stable workload identity namespace independent of
+  `compose_hash`.
+- Return the allowed revision set for each workload identity and
+  policy epoch.
+- Support rollout windows where old and new hashes are both valid.
+- Publish or sign the current policy root so users can notice
+  unexpected upgrade policy changes.
+- Keep an audit trail of admitted revisions and retirements.
+
+Phase 1 should leave a clean integration point for this server but
+should not depend on it. The generated Terraform manifest is enough
+for static revision allowlisting; dynamic upgrade admission is a
+future extension.
 
 ## Sidecar flow at startup (worker case)
 
@@ -239,15 +278,16 @@ get Connect cert → start Envoy. The new flow inserts attestation
 before "get Connect cert":
 
 ```
-1. Generate an ephemeral keypair for the sidecar's Connect cert.
+1. Render a canonical admission statement with claimed identity,
+   local peer identity, dstack app_id, instance_id, and compose_hash.
 
 2. POST /v1/admission/challenge to broker. Receive nonce.
 
-3. report_data = SHA-512(cert_pubkey || nonce)
+3. report_data = SHA-512(binding_statement || nonce)
    Call dstack GetQuote(report_data). Receive quote + event_log.
 
 4. POST /v1/admission/attest to broker with
-   { identity, cert_pubkey, nonce, quote, event_log }.
+   { identity, binding_statement, nonce, quote, event_log }.
 
 5. On 200: receive Consul ACL token. Use it via
    CONSUL_HTTP_TOKEN for all subsequent Consul API calls.
@@ -278,17 +318,26 @@ before "get Connect cert":
 
 - Replacing Consul Connect's CA. Built-in CA still mints leaves;
   the broker just gates the *token* that authorizes cert issuance.
-- Committing to app-id-only enforcement before resolving the policy
-  circularity.
+- App-id-only enforcement. App-id remains optional evidence, not the
+  identity root.
+- Dynamic upgrade policy. Phase 1 uses static generated revision
+  allowlists; a policy server is future work.
+- Direct Connect leaf-cert public-key binding. Stock Consul Connect
+  does not expose the final leaf key before admission; Phase 1 binds
+  the quote to the admission statement and then lets the broker-issued
+  ACL token gate stock cert issuance.
 - Periodic re-attestation independent of token TTL.
 - Cross-cluster federation. Single dstack cluster only.
 
-## Phase 0 findings (verified 2026-05-14)
+## Phase 0 findings (verified 2026-05-14, updated 2026-05-15)
 
-- **Verification path: `dstack-verifier` HTTP sidecar.** Image
-  `dstacktee/dstack-verifier@sha256:3f36162ca8dd2d4207601a6302881de6b497e610eb44050bb0874776fc8ded07`
-  (digest of `latest` as inspected locally on 2026-05-15; published,
-  ~30 MB pulled).
+- **Verification path: `dstack-verifier` HTTP sidecar.** Terraform
+  passes the coordinator verifier image as `dstack_verifier_image`;
+  production should pin this by digest. The live validation uses a
+  verifier image built from upstream dstack commit
+  `df0b302bd6e3dafc54ecf800b3ebc857533fcc6e`, because the published
+  Docker Hub `latest` digest observed on 2026-05-15 lagged the
+  verifier source needed for versioned attestations.
   Single `POST /verify` returns structured `is_valid`,
   `quote_verified`, `event_log_verified`, `os_image_hash_verified`,
   `tcb_status`, and `app_info.{app_id, compose_hash, instance_id,
@@ -302,14 +351,17 @@ before "get Connect cert":
   Cache-worthy for re-attest cycles within token TTL.
 - **Payload sizes**: quote 5 KB hex, event_log ~3.4 KB JSON, total
   POST body ~17 KB, response 1.5 KB. All easy HTTP.
-- **`GetQuoteResponse` already carries `Quote`, `EventLog`,
-  `ReportData`, `VmConfig`** — every field `dstack-verifier`
-  wants. The sidecar passes the entire response through to the
-  broker, which forwards to dstack-verifier as-is.
+- **`AttestResponse` carries the versioned attestation bytes** and
+  `Info()` carries `VmConfig`. The sidecar binds `report_data` to the
+  admission statement, calls dstack `Attest`, and sends
+  `{attestation, vm_config}` to the broker. The broker forwards those
+  fields to `dstack-verifier` and avoids parsing raw quote/event-log
+  internals itself.
 
 The verifier integration shrinks to HTTP-pass-through. The policy
-predicate remains open: app-id allowlisting is easy to implement but
-has the deployment circularity described above.
+predicate is identity plus allowed `compose_hash`: app-id
+allowlisting remains easy to implement, but it is not the Phase 1
+root because it introduces deployment circularity.
 
 ## Implementation phases
 
@@ -325,29 +377,25 @@ Findings above. The remaining Phase 0 tasks are operational:
   process in `entrypoint.sh`) or sibling docker-compose service.
   Lean toward sibling — it has its own image and lifecycle.
 
-### Phase 1 — settle policy predicate, then broker enforces
+### Phase 1 — generate static revision policy, then broker enforces
 
-Do not start with implementation. First answer which predicate the
-broker should enforce without forcing a slow staged Terraform flow:
+The Phase 1 predicate is settled enough to implement:
 
-- Can `compose_hash` or `mrtd` be computed before deployment from
-  the compose/image inputs?
-- Does the Phala/dstack KMS expose a certificate or identity claim
-  that is more appropriate than raw app-id?
-- If app-id remains the best identifier, is runtime policy rendering
-  acceptable for this example, and what is the exact Terraform
-  sequence?
-
-Only after that:
-
-- Broker implements full quote verification + RTMR3 app_id
-  extraction / verifier-field extraction + policy check.
+- Terraform/provider preflight computes the expected `compose_hash`
+  from the same app definition used to deploy the CVM.
+- Terraform emits an admission policy manifest keyed by workload
+  identity, with `allowed_compose_hashes` as revision evidence.
+- Broker implements full quote verification + verifier-field
+  extraction + identity / compose_hash policy check.
 - Sidecar startup flow inserts the challenge → attest → token →
   register sequence.
-- Consul ACL `default_policy = "deny"`; tokens carry per-service
-  policies.
+- Consul ACL `default_policy = "deny"`; tokens carry service
+  identities plus explicit structured permissions for workloads that
+  also use Consul as DCS.
 - The Connect CA stays stock; cert issuance just becomes
   ACL-gated.
+- Upgradeability beyond static allowlists is left for the future
+  policy server described above.
 
 ### Phase 2 — broker writes & rotates non-NAT cluster secrets (~half week)
 
@@ -374,35 +422,42 @@ Only after that:
 
 Phase 0 resolved verifier path + cost. Current state:
 
-1. **Policy predicate unresolved.** Baked app-id policy is rejected:
-   app-id is only known after deployment. Explore runtime app-id
-   policy, preallocation, compose_hash / MRTD, KMS cert identity, or
-   Terraform-issued node enrollment tokens.
+1. **Phase 1 policy predicate settled.** Use Terraform-defined
+   workload identity plus allowed `compose_hash` revisions. Baked
+   app-id policy is rejected for Phase 1; app-id remains optional
+   evidence.
 
-2. **Token lifetime settled for now.** Default broker-issued Consul
+2. **Upgrade governance deferred.** Static allowlists are enough for
+   initial enforcement. Dynamic upgrade admission should be handled
+   by a future policy server that exposes policy epochs / roots and
+   allowed revision windows.
+
+3. **Token lifetime settled for now.** Default broker-issued Consul
    ACL token TTL: 1 h.
 
-3. **CAS narrowed.** CAS is not needed for the NAT PSK. It only
+4. **CAS narrowed.** CAS is not needed for the NAT PSK. It only
    applies if a later phase moves gossip key / Patroni passwords to
    broker-generated Consul KV secrets.
 
-4. **Broker HA accepted.** One broker per coordinator. If a worker
+5. **Broker HA accepted.** One broker per coordinator. If a worker
    cannot reach any broker, new attestations fail; existing tokens
    keep working until expiry. This is acceptable for the current
    coordinator failure model.
 
-5. **Signaling auth deferred.** For "NAT traversal as VPC", a PSK is
+6. **Signaling auth deferred.** For "NAT traversal as VPC", a PSK is
    good enough. Signed signaling is not part of the current design.
 
-6. **Verifier pinning settled.** Pin
-   `dstacktee/dstack-verifier@sha256:3f36162ca8dd2d4207601a6302881de6b497e610eb44050bb0874776fc8ded07`.
-   Upstream image provenance / signature verification remains a
-   later supply-chain hardening item.
+7. **Verifier image selection settled.** `cluster.tf` exposes
+   `dstack_verifier_image`; use the latest-source verifier for
+   validation, and pin the exact digest in production. Upstream image
+   provenance / signature verification remains a later supply-chain
+   hardening item.
 
 ## Success criteria
 
-- [ ] The policy predicate is chosen and documented without an
-      unresolved Terraform/app-id circular dependency.
+- [ ] Terraform generates a broker-readable admission policy whose
+      rows are keyed by workload identity and whose allowed revisions
+      are preflight-derived `compose_hash` values.
 - [ ] Every workload's Consul Connect leaf cert chains back, via
       a Consul ACL token, to a TDX quote from a CVM satisfying that
       predicate.
@@ -423,13 +478,14 @@ Phase 0 resolved verifier path + cost. Current state:
 
 | Risk | Mitigation |
 |---|---|
-| App-id policy creates a circular deployment dependency | Do not bake app-ids into the broker image. Prefer a pre-deployable measurement predicate if `compose_hash` / `mrtd` can be computed locally; otherwise explicitly model runtime policy rendering in Terraform. |
+| App-id policy creates a circular deployment dependency | Do not use app-id as the Phase 1 identity root. Key policy by Terraform-defined workload identity and verify attested `compose_hash` revisions instead. |
+| Silent vulnerable or backdoored upgrade | Phase 1 requires explicit allowed hashes in the generated manifest. Future work adds a policy server with signed policy roots, epochs, rollout windows, and audit history. |
 | `dcap-qvl` Go binding doesn't exist / is unstable | Resolved: use a `dstack-verifier` sidecar over HTTP. The broker speaks JSON to it; isolation makes future swaps trivial. |
 | Quote verification cost dominates startup latency | Cache verified attestations in-broker (per-quote-hash) so a sidecar that restarts within the token TTL doesn't re-verify the full chain. |
 | Sidecar can't reach any broker on startup | Broker runs on all coordinators; clients try each. Worker failure mode is "Envoy never starts," which is a hard fail at sidecar startup — operator notices immediately. |
 | Replay attack across nonces | Nonces are single-use; broker tracks consumed-nonces in memory with 60 s TTL. Cross-broker replay needs a shared nonce store (TBD — Phase 1 may accept the per-broker isolation as good enough). |
 | Genesis race produces split non-NAT secrets | Separate Phase 2 only: Consul KV CAS on `initialized`. Losers re-read. Verify the read sees the winner's writes (Consul reads are linearizable on the leader). |
-| Policy source out of sync with deployed app-ids | Avoid app-id policy if a pre-deployable measurement predicate works. If app-id policy remains, render policy from Terraform state / outputs and make the staged sequence explicit. |
+| Policy source out of sync with deployed workload | Generate policy from the same Terraform graph and Phala preflight response used for deployment. The broker rejects quotes whose measured `compose_hash` is absent from that manifest. |
 
 ## Hand-off
 
@@ -442,10 +498,9 @@ Implementing agent should:
 3. Read `bootstrap-secrets/main.go` for the existing
    secret-fetching pattern; Phase 2 replaces TF env reads with
    Consul KV reads.
-4. Start with policy investigation, not broker implementation:
-   determine whether `compose_hash` / `mrtd` can be computed before
-   deployment, inspect KMS certificate semantics, and only then pick
-   app-id policy if the runtime-rendering cost is acceptable.
+4. Start with Terraform-generated static policy: use provider
+   preflight output for `compose_hash`, key rows by workload
+   identity, and treat app-id/KMS/TCB fields as additional evidence.
 5. Phase 1: enforce, end-to-end. Live-verify with the existing
    FAILOVER.md recipes — the whole point of this work is that
    nothing observable changes for normal cluster operation; only

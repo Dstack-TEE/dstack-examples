@@ -13,11 +13,14 @@
 #   4. consul agent      — server (coordinators) or client (workers).
 #                          bind=127.0.0.1, advertise=127.50.0.<self-vip>;
 #                          retry-joins to coords' VIPs on serf port
-#   5. envoy × N         — workers only. One Envoy per producer-side
+#   5. admission-broker  — coordinators only when attestation admission
+#                          is enabled. Verifies quotes and mints
+#                          service-identity ACL tokens.
+#   6. envoy × N         — workers only. One Envoy per producer-side
 #                          sidecar (one per unique canonical port in
 #                          SERVICES_JSON). Each Envoy gets a distinct
 #                          --base-id and admin-port.
-#   6. config entries    — coordinator-0 only, after quorum: writes
+#   7. config entries    — coordinator-0 only, after quorum: writes
 #                          proxy-defaults, per-parent subset resolvers,
 #                          per-subset redirect resolvers, and per-parent
 #                          default-allow intentions — all generated from
@@ -112,7 +115,7 @@ MESH_CONN_ALLOWLIST=$(
   jq -c '
     ( [ .[] | .sidecar_port ] | unique | map({port: ., udp: false}) )
     +
-    [ {port: 8300, udp: false}, {port: 8301, udp: true} ]
+    [ {port: 8300, udp: false}, {port: 8301, udp: true}, {port: 8787, udp: false} ]
   ' <<<"$SERVICES_JSON"
 )
 export MESH_CONN_ALLOWLIST
@@ -166,6 +169,18 @@ CONSUL_ARGS=(
   -encrypt="${GOSSIP_KEY:?GOSSIP_KEY required}"
   -log-level=INFO
 )
+if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
+  : "${CONSUL_MANAGEMENT_TOKEN:?CONSUL_MANAGEMENT_TOKEN required when admission is enabled}"
+  if [ "$ROLE" = "coordinator" ]; then
+    CONSUL_ARGS+=(
+      -hcl="acl { enabled = true default_policy = \"deny\" enable_token_persistence = true tokens { initial_management = \"${CONSUL_MANAGEMENT_TOKEN}\" agent = \"${CONSUL_MANAGEMENT_TOKEN}\" } }"
+    )
+  else
+    CONSUL_ARGS+=(
+      -hcl="acl { enabled = true default_policy = \"deny\" enable_token_persistence = true tokens { agent = \"${CONSUL_MANAGEMENT_TOKEN}\" } }"
+    )
+  fi
+fi
 if [ "$ROLE" = "coordinator" ]; then
   CONSUL_ARGS+=(
     -server
@@ -181,11 +196,19 @@ CONSUL=$!
 CONSUL_HTTP="127.0.0.1:8500"
 export CONSUL_HTTP_ADDR="$CONSUL_HTTP"
 
+# ---- 5. coordinators: optional admission broker ----
+ADMISSION_BROKER_PID=""
+if [ "$ROLE" = "coordinator" ] && [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
+  log "starting admission-broker"
+  /usr/local/bin/admission-broker -listen "127.50.0.${SELF_VIP}:8787" 2>&1 | prefix admission-broker &
+  ADMISSION_BROKER_PID=$!
+fi
+
 # Wait for the local agent to accept HTTP requests; everything below
 # (sidecar registration, leaf cert, envoy bootstrap) goes through it.
 wait_consul_ready() {
   local n=0
-  until consul members >/dev/null 2>&1; do
+  until CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul members >/dev/null 2>&1; do
     n=$((n+1))
     if [ $n -gt 60 ]; then
       log "consul agent not reachable after 60s"
@@ -195,7 +218,7 @@ wait_consul_ready() {
   done
 }
 
-# ---- 5. workers: register one Consul service+sidecar per backend, launch Envoys ----
+# ---- 6. workers: register one Consul service+sidecar per backend, launch Envoys ----
 ENVOYS=()
 if [ "$ROLE" = "worker" ]; then
   log "waiting for local consul agent..."
@@ -228,7 +251,8 @@ if [ "$ROLE" = "worker" ]; then
         DestinationName:  .name,
         LocalBindAddress: ("127.10.0." + (.vip|tostring)),
         LocalBindPort:    .port
-      }]
+      }],
+      admission_identity: .[0].admission_identity
     })
   ' <<<"$SERVICES_JSON")
 
@@ -241,11 +265,27 @@ if [ "$ROLE" = "worker" ]; then
     LOCAL_PORT=$(jq -r '.port' <<<"$BACKEND")
     REGISTERS_PARENT=$(jq -r '.registers_parent' <<<"$BACKEND")
     UPSTREAMS=$(jq -c '.upstreams' <<<"$BACKEND")
+    ADMISSION_IDENTITY=$(jq -r '.admission_identity // empty' <<<"$BACKEND")
     BASE_ID=$((BACKEND_IDX + 1))
     ADMIN_PORT=$((19000 + BACKEND_IDX))
     SIDECAR_ID="${PARENT}-sidecar-${PEER_ID}"
     SPEC_FILE="/tmp/sidecar-${PARENT}.json"
     ENVOY_BOOT="/tmp/envoy-${PARENT}.json"
+    TOKEN_FILE="/run/instance/consul-token-${PARENT}"
+    BACKEND_CONSUL_TOKEN=""
+
+    if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
+      [ -n "$ADMISSION_IDENTITY" ] || { log "backend ${PARENT} missing admission_identity"; exit 1; }
+      BROKER_URLS=$(echo "$COORDINATOR_VIPS" | tr ',' '\n' | awk 'NF { printf "%shttp://127.50.0.%s:8787", sep, $1; sep="," }')
+      log "requesting admission token for ${PARENT} (${ADMISSION_IDENTITY})"
+      PEER_ID="$PEER_ID" /usr/local/bin/admission-client \
+        -identity "$ADMISSION_IDENTITY" \
+        -broker-urls "$BROKER_URLS" \
+        -token-file "$TOKEN_FILE" \
+        -cluster "$CLUSTER_NAME" \
+        -peer-id "$PEER_ID" 2>&1 | prefix "admission-client-${PARENT}"
+      BACKEND_CONSUL_TOKEN=$(cat "$TOKEN_FILE")
+    fi
 
     # Both patterns use a single registration with inline SidecarService:
     # that's the shape Consul recognises as a Connect-aware service +
@@ -326,7 +366,9 @@ if [ "$ROLE" = "worker" ]; then
 
     # Re-register on every boot via the agent HTTP API (PUT-idempotent).
     log "registering ${PARENT} (id=${PARENT_ID}) + sidecar (port=${SIDECAR_PORT}, base-id=${BASE_ID})"
-    until curl -fsS -X PUT --data-binary @"$SPEC_FILE" \
+    CURL_TOKEN_ARGS=()
+    [ -n "$BACKEND_CONSUL_TOKEN" ] && CURL_TOKEN_ARGS=(-H "X-Consul-Token: ${BACKEND_CONSUL_TOKEN}")
+    until curl -fsS "${CURL_TOKEN_ARGS[@]}" -X PUT --data-binary @"$SPEC_FILE" \
              http://127.0.0.1:8500/v1/agent/service/register; do
       log "${PARENT} register failed; retrying"
       sleep 2
@@ -336,7 +378,7 @@ if [ "$ROLE" = "worker" ]; then
     # per backend, but the operation is idempotent so the extra polls
     # on subsequent backends are cheap.
     log "waiting for connect CA to be ready (backend=${PARENT})..."
-    until curl -fsS "http://127.0.0.1:8500/v1/agent/connect/ca/leaf/${CLUSTER_NAME}" >/dev/null 2>&1; do
+    until curl -fsS "${CURL_TOKEN_ARGS[@]}" "http://127.0.0.1:8500/v1/agent/connect/ca/leaf/${PARENT}" >/dev/null 2>&1; do
       sleep 2
     done
 
@@ -355,7 +397,7 @@ if [ "$ROLE" = "worker" ]; then
     (
       set +eo pipefail
       while true; do
-        if consul connect envoy \
+        if CONSUL_HTTP_TOKEN="${BACKEND_CONSUL_TOKEN:-}" consul connect envoy \
               "${ENVOY_ARGS[@]}" \
               -admin-bind="127.0.0.1:${ADMIN_PORT}" \
               -bootstrap \
@@ -373,7 +415,7 @@ if [ "$ROLE" = "worker" ]; then
   done < <(jq -c '.[]' <<<"$BACKENDS")
 fi
 
-# ---- 6. coordinator-0: write Connect config entries (idempotent) ----
+# ---- 7. coordinator-0: write Connect config entries (idempotent) ----
 # Done from coord-0 only because config entries are cluster-wide; any
 # coord agent could do it. consul config write is idempotent (PUT-style).
 if [ "$ROLE" = "coordinator" ] && [ "$ORDINAL" = "0" ]; then
@@ -387,7 +429,7 @@ if [ "$ROLE" = "coordinator" ] && [ "$ORDINAL" = "0" ]; then
     done
     log "config-entry writer: quorum ready, writing entries"
 
-    consul config write - <<'HCL' || true
+    CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul config write - <<'HCL' || true
 Kind = "proxy-defaults"
 Name = "global"
 Config { protocol = "tcp" }
@@ -410,7 +452,7 @@ HCL
       [ -z "$row" ] && continue
       parent=$(jq -r '.parent' <<<"$row")
       subsets_hcl=$(jq -r '.subsets | map("  " + . + " = { Filter = \"Service.Tags contains \\\"" + . + "\\\"\" }") | join("\n")' <<<"$row")
-      consul config write - <<HCL || true
+      CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul config write - <<HCL || true
 Kind    = "service-resolver"
 Name    = "${parent}"
 Subsets = {
@@ -428,7 +470,7 @@ HCL
       name=$(jq -r '.name' <<<"$row")
       parent=$(jq -r '.parent' <<<"$row")
       subset=$(jq -r '.subset' <<<"$row")
-      consul config write - <<HCL || true
+      CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul config write - <<HCL || true
 Kind     = "service-resolver"
 Name     = "${name}"
 Redirect { Service = "${parent}", ServiceSubset = "${subset}" }
@@ -440,7 +482,7 @@ HCL
     # see design/attestation-admission.md for the longer-term shape.
     jq -r '[.[].parent] | unique | .[]' <<<"$SERVICES_JSON" | while IFS= read -r parent; do
       [ -z "$parent" ] && continue
-      consul config write - <<HCL || true
+      CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul config write - <<HCL || true
 Kind = "service-intentions"
 Name = "${parent}"
 Sources = [{ Name = "*", Action = "allow" }]
@@ -451,8 +493,9 @@ HCL
   ) 2>&1 | prefix consul-config &
 fi
 
-# ---- 7. signal handling + child supervision ----
+# ---- 8. signal handling + child supervision ----
 CHILDREN=("$MESH" "$CONSUL")
+[ -n "$ADMISSION_BROKER_PID" ] && CHILDREN+=("$ADMISSION_BROKER_PID")
 [ ${#ENVOYS[@]} -gt 0 ] && CHILDREN+=("${ENVOYS[@]}")
 
 shutdown() {

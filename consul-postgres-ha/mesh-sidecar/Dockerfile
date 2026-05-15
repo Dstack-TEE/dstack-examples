@@ -31,6 +31,19 @@ RUN go mod download
 COPY mesh-conn/*.go ./
 RUN CGO_ENABLED=0 go build -o /out/mesh-conn .
 
+FROM golang:1.24-alpine AS admission-build
+WORKDIR /src
+COPY admission-broker/go.mod ./
+COPY admission-broker/*.go ./
+RUN CGO_ENABLED=0 go build -o /out/admission-broker .
+
+FROM golang:1.24-alpine AS admission-client-build
+WORKDIR /src
+COPY admission-client/go.mod admission-client/go.sum ./
+RUN go mod download
+COPY admission-client/*.go ./
+RUN CGO_ENABLED=0 go build -o /out/admission-client .
+
 FROM hashicorp/consul:1.19 AS consul-bin
 
 FROM envoyproxy/envoy:contrib-v1.30-latest
@@ -43,6 +56,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=bootstrap-build /out/bootstrap-secrets /usr/local/bin/bootstrap-secrets
 COPY --from=mesh-build      /out/mesh-conn         /usr/local/bin/mesh-conn
+COPY --from=admission-build /out/admission-broker  /usr/local/bin/admission-broker
+COPY --from=admission-client-build /out/admission-client /usr/local/bin/admission-client
 COPY --from=consul-bin      /bin/consul            /usr/local/bin/consul
 COPY mesh-sidecar/entrypoint.sh                    /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

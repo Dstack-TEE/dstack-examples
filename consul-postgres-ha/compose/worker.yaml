@@ -50,6 +50,8 @@ services:
       # WORKAROUND: gossip key generated in Terraform and broadcast
       # identically to every CVM. See cluster.tf.
       - GOSSIP_KEY=${GOSSIP_KEY}
+      - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
+      - CONSUL_MANAGEMENT_TOKEN=${CONSUL_MANAGEMENT_TOKEN:-}
       # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay
       # candidates, routing all peer traffic through the coturn server.
       # Default off because direct candidates work; flip on if a
@@ -89,6 +91,7 @@ services:
       - CLUSTER_NAME=${CLUSTER_NAME}
       - PATRONI_SUPERUSER_PW=${PATRONI_SUPERUSER_PW}
       - PATRONI_REPLICATION_PW=${PATRONI_REPLICATION_PW}
+      - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
       # SERVICES_JSON: service VIPs for /etc/hosts (patroni needs to
       # resolve postgres-master to its local Envoy upstream so
       # primary_conninfo routes through the mesh).

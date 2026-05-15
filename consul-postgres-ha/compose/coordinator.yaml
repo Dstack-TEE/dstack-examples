@@ -1,7 +1,8 @@
 # Coordinator compose template — peer-VIP / service-VIP layout.
 #
 # A coordinator CVM runs exactly one container: the consolidated
-# `sidecar` image with ROLE=coordinator. Inside it:
+# `sidecar` image with ROLE=coordinator, plus an optional verifier
+# sidecar for attestation admission. Inside the consolidated sidecar:
 #
 #   bootstrap-secrets  one-shot init — derives per-CVM secrets from
 #                      the dstack KMS, writes /run/instance/info.json
@@ -71,6 +72,10 @@ services:
       # See worker.yaml for the rationale on MESH_CONN_RELAY_ONLY.
       - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
       - MESH_CONN_DEBUG_ICE=${MESH_CONN_DEBUG_ICE:-}
+      - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
+      - ADMISSION_POLICY_JSON=${ADMISSION_POLICY_JSON:-}
+      - CONSUL_MANAGEMENT_TOKEN=${CONSUL_MANAGEMENT_TOKEN:-}
+      - DSTACK_VERIFIER_URL=${DSTACK_VERIFIER_URL:-http://127.0.0.1:8080/verify}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
       - /tmp/dstack-runtime/secrets:/run/secrets
@@ -82,6 +87,11 @@ services:
       timeout: 1s
       retries: 60
       start_period: 5s
+
+  dstack-verifier:
+    image: ${DSTACK_VERIFIER_IMAGE}
+    network_mode: host
+    restart: on-failure
 
 volumes:
   consul-data:

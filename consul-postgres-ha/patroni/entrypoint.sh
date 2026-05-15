@@ -46,6 +46,18 @@ chmod 700 "$DATA_DIR"
 PG_PORT=5432
 REST_PORT=8008
 CONSUL_HTTP=127.0.0.1:8500
+CONSUL_TOKEN=""
+CONSUL_TOKEN_YAML=""
+if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
+  CONSUL_TOKEN_FILE="/run/instance/consul-token-${CLUSTER}"
+  echo "patroni: waiting for attestation-issued Consul token at ${CONSUL_TOKEN_FILE}"
+  until [ -s "$CONSUL_TOKEN_FILE" ]; do
+    sleep 1
+  done
+  CONSUL_TOKEN=$(tr -d '\r\n' < "$CONSUL_TOKEN_FILE")
+  [ -n "$CONSUL_TOKEN" ] || { echo "FATAL: empty Consul token in ${CONSUL_TOKEN_FILE}" >&2; exit 1; }
+  CONSUL_TOKEN_YAML="  token: ${CONSUL_TOKEN}"
+fi
 
 # postgresql.connect_address: what other Patroni instances see when
 # they query DCS for "where's the leader". They dial this; on the
@@ -65,6 +77,7 @@ restapi:
 
 consul:
   host: ${CONSUL_HTTP}
+${CONSUL_TOKEN_YAML}
   # Patroni's native register_service is set to false because the
   # platform sidecar owns the parent service registration (Address,
   # Port, check). The role-watcher loop below polls Patroni's REST API
@@ -211,8 +224,18 @@ else
             }
           }
         }')
-      if printf '%s' "$SPEC" | curl -fsS -X PUT --data-binary @- \
-                                "http://${CONSUL_HTTP}/v1/agent/service/register"; then
+      if [ -n "$CONSUL_TOKEN" ]; then
+        REGISTERED=$(
+          printf '%s' "$SPEC" | curl -fsS -H "X-Consul-Token: ${CONSUL_TOKEN}" -X PUT --data-binary @- \
+            "http://${CONSUL_HTTP}/v1/agent/service/register" >/dev/null && echo yes || echo no
+        )
+      else
+        REGISTERED=$(
+          printf '%s' "$SPEC" | curl -fsS -X PUT --data-binary @- \
+            "http://${CONSUL_HTTP}/v1/agent/service/register" >/dev/null && echo yes || echo no
+        )
+      fi
+      if [ "$REGISTERED" = yes ]; then
         echo "[role-watcher] ${CLUSTER}-${PEER_ID} tag: ${PREV:-<none>} -> $TAG (patroni role=$PATRONI_ROLE)"
         PREV="$TAG"
       fi

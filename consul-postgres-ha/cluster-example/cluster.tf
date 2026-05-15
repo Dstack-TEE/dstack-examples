@@ -90,6 +90,11 @@ variable "gateway_domain" {
 variable "mesh_sidecar_image" { type = string }
 variable "webdemo_image" { type = string }
 variable "patroni_image" { type = string }
+variable "dstack_verifier_image" {
+  type        = string
+  default     = "dstacktee/dstack-verifier:latest"
+  description = "dstack-verifier image used by coordinators for attestation admission. Pin by digest in production."
+}
 
 # External coordinator (Vultr coturn + signaling box). Used until
 # Phala admin enables UDP ingress on dstack apps; once that lands we
@@ -117,6 +122,19 @@ variable "mesh_conn_relay_only" {
 variable "mesh_conn_debug_ice" {
   type    = string
   default = ""
+}
+
+variable "enable_attestation_admission" {
+  type        = bool
+  default     = false
+  description = "Start the coordinator admission broker and pass it the generated static workload policy."
+}
+
+variable "consul_management_token" {
+  type        = string
+  default     = ""
+  sensitive   = true
+  description = "Consul management ACL token used by admission-broker to mint service-identity tokens when attestation admission is enabled."
 }
 
 # ---------- Cluster topology + VIP allocation ----------
@@ -250,20 +268,165 @@ locals {
       sidecar_port     = local.port_sidecar[tostring(s.port)]
       parent           = local.port_parent[tostring(s.port)]
       registers_parent = local.port_registers_parent[tostring(s.port)]
+      admission_identity = s.port == 5432 ? (
+        "spiffe://${var.cluster_name}/postgres"
+      ) : "spiffe://${var.cluster_name}/${s.name}"
     }
   ]
 
   services_json = jsonencode(local.services)
+
+  coordinator_ordinals = {
+    for i in range(var.coordinator_replicas) : tostring(i) => i
+  }
+
+  worker_ordinals = {
+    for i in range(var.worker_replicas) : tostring(i + 1) => i + var.coordinator_replicas
+  }
+
+  # Phase-1 attestation admission policy is keyed by Terraform-defined
+  # workload identity. The compose hash is revision evidence, not the
+  # workload row key: the same worker compose hosts both example
+  # services, so both identities intentionally share the worker hash.
+  admission_service_identities = [
+    {
+      name           = "webdemo"
+      identity       = "spiffe://${var.cluster_name}/webdemo"
+      consul_service = "webdemo"
+      consul_permissions = {
+        key_prefixes  = []
+        session_write = false
+      }
+    },
+    {
+      name           = "postgres"
+      identity       = "spiffe://${var.cluster_name}/postgres"
+      consul_service = var.cluster_name
+      consul_permissions = {
+        key_prefixes  = ["service/${var.cluster_name}"]
+        session_write = true
+      }
+    },
+  ]
+
+  worker_preflight_env = {
+    for k, ordinal in local.worker_ordinals : k => {
+      CLUSTER_NAME            = var.cluster_name
+      PEERS_JSON              = local.peers_json
+      SERVICES_JSON           = local.services_json
+      WORKER_ORDINAL          = tostring(ordinal)
+      EXPECTED_REPLICAS       = var.worker_replicas + var.coordinator_replicas
+      COORDINATOR_VIPS        = local.coordinator_vips
+      SIGNALING_URL           = var.external_signaling_url
+      TURN_HOST               = var.external_coordinator_host
+      TURN_SHARED_SECRET      = var.external_turn_secret
+      MESH_SIDECAR_IMAGE      = var.mesh_sidecar_image
+      WEBDEMO_IMAGE           = var.webdemo_image
+      PATRONI_IMAGE           = var.patroni_image
+      GOSSIP_KEY              = random_bytes.gossip_key.base64
+      PATRONI_SUPERUSER_PW    = random_bytes.patroni_superuser_pw.hex
+      PATRONI_REPLICATION_PW  = random_bytes.patroni_replication_pw.hex
+      MESH_CONN_RELAY_ONLY    = var.mesh_conn_relay_only
+      MESH_CONN_DEBUG_ICE     = var.mesh_conn_debug_ice
+      ADMISSION_BROKER_ENABLE = var.enable_attestation_admission ? "1" : ""
+      CONSUL_MANAGEMENT_TOKEN = var.consul_management_token
+    }
+  }
+
+  coordinator_preflight_env = {
+    for k, ordinal in local.coordinator_ordinals : k => {
+      CLUSTER_NAME            = var.cluster_name
+      PEERS_JSON              = local.peers_json
+      SERVICES_JSON           = local.services_json
+      COORDINATOR_ORDINAL     = tostring(ordinal)
+      BOOTSTRAP_EXPECT        = tostring(var.coordinator_replicas)
+      COORDINATOR_VIPS        = local.coordinator_vips
+      SIGNALING_URL           = var.external_signaling_url
+      TURN_HOST               = var.external_coordinator_host
+      TURN_SHARED_SECRET      = var.external_turn_secret
+      MESH_SIDECAR_IMAGE      = var.mesh_sidecar_image
+      DSTACK_VERIFIER_IMAGE   = var.dstack_verifier_image
+      GOSSIP_KEY              = random_bytes.gossip_key.base64
+      MESH_CONN_RELAY_ONLY    = var.mesh_conn_relay_only
+      MESH_CONN_DEBUG_ICE     = var.mesh_conn_debug_ice
+      ADMISSION_BROKER_ENABLE = var.enable_attestation_admission ? "1" : ""
+      # The env key is part of the compose allowlist, but the policy
+      # value is not measured. Keep preflight acyclic by hashing with
+      # the same key present and an empty value; the deployed resource
+      # receives the generated policy JSON below.
+      ADMISSION_POLICY_JSON   = ""
+      CONSUL_MANAGEMENT_TOKEN = ""
+    }
+  }
+
+  admission_workloads = flatten([
+    for k, ordinal in local.worker_ordinals : [
+      for svc in local.admission_service_identities : {
+        workload_id            = "${var.cluster_name}/worker/${ordinal}/${svc.name}"
+        identity               = svc.identity
+        consul_service         = svc.consul_service
+        consul_permissions     = svc.consul_permissions
+        allowed_compose_hashes = [data.phala_app_preflight.worker[k].compose_hash]
+      }
+    ]
+  ])
+
+  admission_policy_json = jsonencode({
+    cluster      = var.cluster_name
+    policy_epoch = 1
+    workloads    = local.admission_workloads
+  })
+
+  coordinator_env = {
+    for k, env in local.coordinator_preflight_env : k => merge(env, {
+      ADMISSION_POLICY_JSON   = local.admission_policy_json
+      CONSUL_MANAGEMENT_TOKEN = var.consul_management_token
+    })
+  }
+
+  worker_env = local.worker_preflight_env
 }
 
 # ---------- Coordinator ----------
+
+data "phala_app_preflight" "coordinator" {
+  for_each = local.coordinator_ordinals
+
+  name           = "${var.cluster_name}-coordinator-${each.key}"
+  size           = "tdx.small"
+  region         = "US-WEST-1"
+  disk_size      = 20
+  storage_fs     = "zfs"
+  docker_compose = file("${path.module}/../compose/coordinator.yaml")
+  env_keys       = sort(keys(local.coordinator_preflight_env[each.key]))
+
+  listed         = false
+  public_logs    = true
+  public_sysinfo = false
+}
+
+data "phala_app_preflight" "worker" {
+  for_each = local.worker_ordinals
+
+  name           = "${var.cluster_name}-worker-${each.key}"
+  size           = "tdx.small"
+  region         = "US-WEST-1"
+  disk_size      = 20
+  storage_fs     = "zfs"
+  docker_compose = file("${path.module}/../compose/worker.yaml")
+  env_keys       = sort(keys(local.worker_preflight_env[each.key]))
+
+  listed         = false
+  public_logs    = true
+  public_sysinfo = false
+}
 
 resource "phala_app" "coordinator" {
   # One phala_app per coordinator (with replicas:1) — same per-resource
   # ordinal pattern as workers, same chicken-and-egg sidestep
   # (bootstrap-secrets needs to know its own ordinal before Consul is
   # reachable, since Consul is on the coordinators themselves).
-  for_each = { for i in range(var.coordinator_replicas) : tostring(i) => i }
+  for_each = local.coordinator_ordinals
 
   name           = "${var.cluster_name}-coordinator-${each.key}"
   size           = "tdx.small"
@@ -273,24 +436,7 @@ resource "phala_app" "coordinator" {
   storage_fs     = "zfs" # MUST pin (terraform-provider-phala#5)
   docker_compose = file("${path.module}/../compose/coordinator.yaml")
 
-  env = {
-    CLUSTER_NAME = var.cluster_name
-    PEERS_JSON   = local.peers_json
-    # Coord-0's config-entry writer needs SERVICES_JSON to emit the
-    # per-service service-resolver + intentions entries on bringup.
-    SERVICES_JSON       = local.services_json
-    COORDINATOR_ORDINAL = tostring(each.value)
-    BOOTSTRAP_EXPECT    = tostring(var.coordinator_replicas)
-    COORDINATOR_VIPS    = local.coordinator_vips
-    SIGNALING_URL       = var.external_signaling_url
-    TURN_HOST           = var.external_coordinator_host
-    TURN_SHARED_SECRET  = var.external_turn_secret
-    MESH_SIDECAR_IMAGE  = var.mesh_sidecar_image
-    # WORKAROUND — see `random_bytes` block at top of file.
-    GOSSIP_KEY           = random_bytes.gossip_key.base64
-    MESH_CONN_RELAY_ONLY = var.mesh_conn_relay_only
-    MESH_CONN_DEBUG_ICE  = var.mesh_conn_debug_ice
-  }
+  env = local.coordinator_env[each.key]
 
   listed         = false
   public_logs    = true
@@ -298,6 +444,13 @@ resource "phala_app" "coordinator" {
 
   wait_for_ready       = true
   wait_timeout_seconds = 600
+
+  lifecycle {
+    precondition {
+      condition     = !var.enable_attestation_admission || var.consul_management_token != ""
+      error_message = "consul_management_token must be set when enable_attestation_admission is true."
+    }
+  }
 }
 
 # ---------- Workers ----------
@@ -307,7 +460,7 @@ resource "phala_app" "worker" {
   # app with replicas:N. Reason: each worker needs its OWN ordinal
   # passed in via env so bootstrap-secrets can write the correct
   # /run/instance/info.json without a Consul KV CAS round-trip.
-  for_each = { for i in range(var.worker_replicas) : tostring(i + 1) => i + var.coordinator_replicas }
+  for_each = local.worker_ordinals
 
   name           = "${var.cluster_name}-worker-${each.key}"
   size           = "tdx.small"
@@ -317,26 +470,7 @@ resource "phala_app" "worker" {
   storage_fs     = "zfs"
   docker_compose = file("${path.module}/../compose/worker.yaml")
 
-  env = {
-    CLUSTER_NAME       = var.cluster_name
-    PEERS_JSON         = local.peers_json
-    SERVICES_JSON      = local.services_json
-    WORKER_ORDINAL     = tostring(each.value)
-    EXPECTED_REPLICAS  = var.worker_replicas + var.coordinator_replicas
-    COORDINATOR_VIPS   = local.coordinator_vips
-    SIGNALING_URL      = var.external_signaling_url
-    TURN_HOST          = var.external_coordinator_host
-    TURN_SHARED_SECRET = var.external_turn_secret
-    MESH_SIDECAR_IMAGE = var.mesh_sidecar_image
-    WEBDEMO_IMAGE      = var.webdemo_image
-    PATRONI_IMAGE      = var.patroni_image
-    # WORKAROUND — see `random_bytes` block at top of file.
-    GOSSIP_KEY             = random_bytes.gossip_key.base64
-    PATRONI_SUPERUSER_PW   = random_bytes.patroni_superuser_pw.hex
-    PATRONI_REPLICATION_PW = random_bytes.patroni_replication_pw.hex
-    MESH_CONN_RELAY_ONLY   = var.mesh_conn_relay_only
-    MESH_CONN_DEBUG_ICE    = var.mesh_conn_debug_ice
-  }
+  env = local.worker_env[each.key]
 
   listed         = false
   public_logs    = true
@@ -364,6 +498,13 @@ resource "phala_app" "worker" {
 
 output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k => c.app_id } }
 output "worker_app_ids" { value = { for k, w in phala_app.worker : k => w.app_id } }
+output "admission_policy_json" { value = local.admission_policy_json }
+output "coordinator_preflight_compose_hashes" {
+  value = { for k, c in data.phala_app_preflight.coordinator : k => c.compose_hash }
+}
+output "worker_preflight_compose_hashes" {
+  value = { for k, w in data.phala_app_preflight.worker : k => w.compose_hash }
+}
 output "consul_ui" {
   # Coordinator-0's Consul HTTP API on the canonical 8500. Plain HTTP
   # backend → use the no-`s` gateway form (gateway terminates TLS).
