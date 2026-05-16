@@ -97,8 +97,9 @@ wait_for_quorum_healthy() {
 snapshot_consul() {
   local label="$1"
   local snap_dir="snapshots"
+  local f
   mkdir -p "$snap_dir"
-  local f="$snap_dir/${label}-$(date +%Y%m%d-%H%M%S).snap"
+  f="$snap_dir/${label}-$(date +%Y%m%d-%H%M%S).snap"
   if curl -sf -X PUT "${CONSUL_BASE}/v1/snapshot" -o "$f"; then
     echo "snapshot saved: $f"
   else

@@ -84,7 +84,7 @@ ${CONSUL_TOKEN_YAML}
   # and re-PUTs the parent registration with tags ["master"] or
   # ["replica"] so service-resolver subset filters match. We do this
   # because Patroni deregisters the service every loop iteration while
-  # `role=uninitialized` (the entire pre-bootstrap window on a
+  # role=uninitialized (the entire pre-bootstrap window on a
   # replica), which wipes the registration our connect-proxy depends
   # on for proxycfg state. With register_service:false Patroni stays
   # out of the agent's service catalog and just uses Consul as DCS.

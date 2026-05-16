@@ -289,7 +289,6 @@ if [ "$ROLE" = "worker" ]; then
     ADMISSION_IDENTITY=$(jq -r '.admission_identity // empty' <<<"$BACKEND")
     BASE_ID=$((BACKEND_IDX + 1))
     ADMIN_PORT=$((19000 + BACKEND_IDX))
-    SIDECAR_ID="${PARENT}-sidecar-${PEER_ID}"
     SPEC_FILE="/tmp/sidecar-${PARENT}.json"
     ENVOY_BOOT="/tmp/envoy-${PARENT}.json"
     TOKEN_FILE="/run/instance/consul-token-${PARENT}"
@@ -299,7 +298,7 @@ if [ "$ROLE" = "worker" ]; then
       [ -n "$ADMISSION_IDENTITY" ] || { log "backend ${PARENT} missing admission_identity"; exit 1; }
       BROKER_URLS=$(echo "$COORDINATOR_VIPS" | tr ',' '\n' | awk 'NF { printf "%shttp://127.50.0.%s:8787", sep, $1; sep="," }')
       log "requesting admission token for ${PARENT} (${ADMISSION_IDENTITY})"
-      PEER_ID="$PEER_ID" /usr/local/bin/admission-client \
+      /usr/local/bin/admission-client \
         -identity "$ADMISSION_IDENTITY" \
         -broker-urls "$BROKER_URLS" \
         -token-file "$TOKEN_FILE" \
@@ -352,10 +351,9 @@ if [ "$ROLE" = "worker" ]; then
     # alongside the new inline SidecarService, `consul connect envoy
     # -sidecar-for` sees two matches and refuses to render. Deregister
     # known stale IDs idempotently before we PUT the new spec.
-    for stale_id in "${PARENT}-sidecar-${PEER_ID}"; do
-      curl -fsS "${CURL_TOKEN_ARGS[@]}" -X PUT "http://127.0.0.1:8500/v1/agent/service/deregister/${stale_id}" \
-        >/dev/null 2>&1 || true
-    done
+    STALE_SIDECAR_ID="${PARENT}-sidecar-${PEER_ID}"
+    curl -fsS "${CURL_TOKEN_ARGS[@]}" -X PUT "http://127.0.0.1:8500/v1/agent/service/deregister/${STALE_SIDECAR_ID}" \
+      >/dev/null 2>&1 || true
     jq -n \
       --arg name "$PARENT" \
       --arg id "$PARENT_ID" \
@@ -521,6 +519,7 @@ CHILDREN=("$MESH" "$CONSUL")
 [ -n "$ADMISSION_BROKER_PID" ] && CHILDREN+=("$ADMISSION_BROKER_PID")
 [ ${#ENVOYS[@]} -gt 0 ] && CHILDREN+=("${ENVOYS[@]}")
 
+# shellcheck disable=SC2317 # Invoked indirectly by the TERM/INT trap.
 shutdown() {
   log "received signal, terminating children"
   for c in "${CHILDREN[@]}"; do
