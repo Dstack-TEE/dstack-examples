@@ -196,13 +196,13 @@ func readSelfID() string {
 
 // readTurnSecret resolves the TURN shared secret in priority order:
 //
-//   1. TURN_SHARED_SECRET env (set when using an external coturn whose
-//      static-auth-secret was configured out-of-band — e.g. the Vultr
-//      coordinator path). When this is present it MUST win, because
-//      the local TEE-derived value won't match what coturn is checking
-//      against.
-//   2. /run/secrets/turn (TEE-derived path; matches the embedded
-//      coordinator's coturn which reads the same file).
+//  1. TURN_SHARED_SECRET env (set when using an external coturn whose
+//     static-auth-secret was configured out-of-band — e.g. the Vultr
+//     coordinator path). When this is present it MUST win, because
+//     the local TEE-derived value won't match what coturn is checking
+//     against.
+//  2. /run/secrets/turn (TEE-derived path; matches the embedded
+//     coordinator's coturn which reads the same file).
 //
 // Order matters: env beats file so that "use external coturn" can be
 // configured purely at the cluster.tf layer.
@@ -515,10 +515,11 @@ func sleepCtx(ctx context.Context, d time.Duration) bool {
 }
 
 // Stream header layout: 3 bytes per stream open.
-//   byte 0 = tag (streamUDP or streamTCP)
-//   bytes 1-2 = receiver-side port (big-endian uint16) — the port number
-//     the receiver itself binds locally; receiver looks it up in its own
-//     Ports list to find the index/protocol slot
+//
+//	byte 0 = tag (streamUDP or streamTCP)
+//	bytes 1-2 = receiver-side port (big-endian uint16) — the port number
+//	  the receiver itself binds locally; receiver looks it up in its own
+//	  Ports list to find the index/protocol slot
 const (
 	streamUDP byte = 0x55 // long-lived per-port UDP datagram pipe
 	streamTCP byte = 0x33 // per-conn TCP byte-stream forwarder
@@ -633,7 +634,7 @@ func (m *Mesh) dialAndPump(parentCtx context.Context, peer Peer, sess *peerSessi
 	//    mesh-sidecar/entrypoint.sh before mesh-conn starts; failing
 	//    here means the alias didn't get set up.
 	peerVip := peer.vipAddr()
-	udpSocks := map[int]*net.UDPConn{}     // port -> listener (only UDP-bearing ports)
+	udpSocks := map[int]*net.UDPConn{} // port -> listener (only UDP-bearing ports)
 	tcpListeners := make([]*net.TCPListener, 0, len(cfg.Allowlist))
 	for _, ip := range cfg.Allowlist {
 		tl, err := net.ListenTCP("tcp", &net.TCPAddr{IP: peerVip, Port: ip.Port})
@@ -1212,7 +1213,9 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 		if c == nil {
 			return
 		}
-		publish(cfg, remoteID, "candidate", c.Marshal())
+		if err := publish(cfg, remoteID, "candidate", c.Marshal()); err != nil {
+			log.Printf("[%s] publish candidate: %v", remoteID, err)
+		}
 	}); err != nil {
 		return nil, err
 	}
@@ -1233,7 +1236,9 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 	if err != nil {
 		return nil, err
 	}
-	publish(cfg, remoteID, "auth", localUfrag+":"+localPwd)
+	if err = publish(cfg, remoteID, "auth", localUfrag+":"+localPwd); err != nil {
+		return nil, fmt.Errorf("publish auth to %s: %w", remoteID, err)
+	}
 
 	if err = agent.GatherCandidates(); err != nil {
 		return nil, err
@@ -1255,18 +1260,25 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 
 	// Wait for remote auth. pollLoop drain-then-pushes the freshest
 	// peer auth into sess.authCh independent of state, so by the time
-	// we wake we always have the latest value. attemptCtx covers the
-	// case where pollLoop already aborted us mid-wait (peer rolled
-	// creds again between agent install and now).
+	// we wake we always have the latest value. Absence of remote auth
+	// means the peer has not started or has not reached signalling yet;
+	// there is no stale ICE attempt to tear down until both sides have
+	// exchanged credentials. attemptCtx still covers process shutdown
+	// and the rare case where pollLoop explicitly aborts this attempt.
 	var remote [2]string
-	select {
-	case remote = <-sess.authCh:
-	case <-time.After(60 * time.Second):
-		err = fmt.Errorf("timeout waiting for remote auth from %s", remoteID)
-		return nil, err
-	case <-attemptCtx.Done():
-		err = fmt.Errorf("attempt aborted before auth from %s", remoteID)
-		return nil, err
+	waitLog := time.NewTicker(60 * time.Second)
+	defer waitLog.Stop()
+waitRemoteAuth:
+	for {
+		select {
+		case remote = <-sess.authCh:
+			break waitRemoteAuth
+		case <-attemptCtx.Done():
+			err = fmt.Errorf("attempt aborted before auth from %s", remoteID)
+			return nil, err
+		case <-waitLog.C:
+			log.Printf("[%s] waiting for remote auth", remoteID)
+		}
 	}
 
 	// Record what we're about to dial against, so pollLoop can detect
@@ -1334,16 +1346,19 @@ type Message struct {
 	Data string `json:"data"`
 }
 
-func publish(cfg *Config, to, typ, data string) {
+func publish(cfg *Config, to, typ, data string) error {
 	body, _ := json.Marshal(Message{From: cfg.SelfID, Type: typ, Data: data})
 	resp, err := http.Post(cfg.SignalingURL+"/publish?to="+url.QueryEscape(to),
 		"application/json", strings.NewReader(string(body)))
 	if err != nil {
-		log.Printf("publish err: %v", err)
-		return
+		return err
 	}
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("%s: %s", resp.Status, strings.TrimSpace(string(respBody)))
+	}
+	return nil
 }
 
 func (m *Mesh) pollLoop(ctx context.Context) {

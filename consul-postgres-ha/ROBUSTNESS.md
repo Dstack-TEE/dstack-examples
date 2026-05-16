@@ -119,6 +119,16 @@ whose direct path goes down can't fail over to TURN until it's back".
   `:1006-1016`; the original bug described in earlier revisions of
   this doc is closed.
 
+- **Staggered peer startup is a liveness wait, not a failed ICE
+  attempt.** A real Phala deployment can start one CVM more than 60 s
+  before its peer. Before both sides have exchanged ICE auth, there is
+  no connectivity check in progress and retrying the local agent only
+  republishes equivalent local credentials. `dialICE` now requires the
+  local auth publish to succeed, then waits for the first remote auth
+  until the process context is cancelled, logging the wait every 60 s.
+  Once remote auth is available, the existing Dial/Accept failure path
+  and `FailedTimeout` still bound real ICE failures.
+
 - **ICE auth-race convergence.** When two peers handshake in near-
   simultaneous restart (the normal startup case on a fresh cluster
   or after a redeploy), the supersession check in `pollLoop` —
