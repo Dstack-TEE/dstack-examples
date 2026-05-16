@@ -294,8 +294,9 @@ locals {
       identity       = "spiffe://${var.cluster_name}/webdemo"
       consul_service = "webdemo"
       consul_permissions = {
-        key_prefixes  = []
-        session_write = false
+        key_prefixes    = []
+        session_write   = false
+        agent_read_self = true
       }
     },
     {
@@ -303,8 +304,9 @@ locals {
       identity       = "spiffe://${var.cluster_name}/postgres"
       consul_service = var.cluster_name
       consul_permissions = {
-        key_prefixes  = ["service/${var.cluster_name}"]
-        session_write = true
+        key_prefixes    = ["service/${var.cluster_name}"]
+        session_write   = true
+        agent_read_self = true
       }
     },
   ]

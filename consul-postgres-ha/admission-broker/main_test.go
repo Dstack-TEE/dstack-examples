@@ -133,7 +133,7 @@ func TestAttestFlow(t *testing.T) {
 	}
 	_ = challengeResp.Body.Close()
 
-	statement := `{"identity":"spiffe://demo/webdemo"}`
+	statement := `{"identity":"spiffe://demo/webdemo","peer_id":"worker-1"}`
 	expectedReportData, err = reportDataHex(hex.EncodeToString([]byte(statement)), challenge.Nonce)
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +166,9 @@ func TestAttestFlow(t *testing.T) {
 	if issuer.req.ConsulService != "webdemo" {
 		t.Fatalf("wrong consul service: %s", issuer.req.ConsulService)
 	}
+	if issuer.req.PeerID != "worker-1" {
+		t.Fatalf("wrong peer id: %s", issuer.req.PeerID)
+	}
 }
 
 func TestAttestCarriesConsulPermissionsFromPolicy(t *testing.T) {
@@ -189,7 +192,7 @@ func TestAttestCarriesConsulPermissionsFromPolicy(t *testing.T) {
 			"workload_id":"demo/worker/0/postgres",
 			"identity":"spiffe://demo/postgres",
 			"consul_service":"demo",
-			"consul_permissions":{"key_prefixes":["/service/demo/"],"session_write":true},
+			"consul_permissions":{"key_prefixes":["/service/demo/"],"session_write":true,"agent_read_self":true},
 			"allowed_compose_hashes":["`+testHash+`"]
 		}]}`),
 		nonces:      NewNonceStore(time.Minute),
@@ -214,7 +217,7 @@ func TestAttestCarriesConsulPermissionsFromPolicy(t *testing.T) {
 	}
 	_ = challengeResp.Body.Close()
 
-	statement := `{"identity":"spiffe://demo/postgres"}`
+	statement := `{"identity":"spiffe://demo/postgres","peer_id":"worker-1"}`
 	expectedReportData, err = reportDataHex(hex.EncodeToString([]byte(statement)), challenge.Nonce)
 	if err != nil {
 		t.Fatal(err)
@@ -242,25 +245,42 @@ func TestAttestCarriesConsulPermissionsFromPolicy(t *testing.T) {
 	if !issuer.req.ConsulPermissions.SessionWrite {
 		t.Fatal("session_write was not carried to issuer")
 	}
+	if !issuer.req.ConsulPermissions.AgentReadSelf {
+		t.Fatal("agent_read_self was not carried to issuer")
+	}
+	if issuer.req.PeerID != "worker-1" {
+		t.Fatalf("wrong peer id: %s", issuer.req.PeerID)
+	}
 }
 
 func TestConsulACLRules(t *testing.T) {
-	got := consulACLRules(ConsulPermissions{
-		KeyPrefixes:  []string{"service/demo"},
-		SessionWrite: true,
-	})
-	want := "key_prefix \"service/demo\" {\n  policy = \"write\"\n}\nsession_prefix \"\" {\n  policy = \"write\"\n}\n"
+	got := mustConsulACLRules(t, ConsulPermissions{
+		KeyPrefixes:   []string{"service/demo"},
+		SessionWrite:  true,
+		AgentReadSelf: true,
+	}, "worker-1")
+	want := "agent \"worker-1\" {\n  policy = \"read\"\n}\nkey_prefix \"service/demo\" {\n  policy = \"write\"\n}\nsession_prefix \"\" {\n  policy = \"write\"\n}\n"
 	if got != want {
 		t.Fatalf("rules mismatch\nwant:\n%s\ngot:\n%s", want, got)
+	}
+}
+
+func TestConsulACLRulesRequiresPeerIDForAgentReadSelf(t *testing.T) {
+	_, err := consulACLRules(ConsulPermissions{AgentReadSelf: true}, "")
+	if err == nil {
+		t.Fatal("expected peer_id requirement")
 	}
 }
 
 func TestConsulIssuerCreatesPolicyForCustomPermissions(t *testing.T) {
 	var sawPolicyCreate bool
 	var tokenPolicies []map[string]string
+	permissions := ConsulPermissions{KeyPrefixes: []string{"service/demo"}, SessionWrite: true, AgentReadSelf: true}
+	rules := mustConsulACLRules(t, permissions, "worker-1")
+	policyName := "attested-workload-" + shortSHA256(rules, 16)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/v1/acl/policy/name/attested-dcs-"+shortSHA256(consulACLRules(ConsulPermissions{KeyPrefixes: []string{"service/demo"}, SessionWrite: true}), 16):
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/acl/policy/name/"+policyName:
 			http.NotFound(w, r)
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/acl/policy":
 			var body struct {
@@ -272,6 +292,9 @@ func TestConsulIssuerCreatesPolicyForCustomPermissions(t *testing.T) {
 			}
 			if body.Name == "" || body.Rules == "" {
 				t.Fatalf("bad policy body: %+v", body)
+			}
+			if body.Name != policyName || body.Rules != rules {
+				t.Fatalf("wrong policy body: %+v", body)
 			}
 			sawPolicyCreate = true
 			writeJSON(w, http.StatusOK, map[string]any{"Name": body.Name, "Rules": body.Rules})
@@ -296,13 +319,11 @@ func TestConsulIssuerCreatesPolicyForCustomPermissions(t *testing.T) {
 
 	issuer := &ConsulIssuer{BaseURL: ts.URL, ManagementToken: "mgmt", HTTP: ts.Client()}
 	token, err := issuer.IssueToken(context.Background(), TokenRequest{
-		Description:   "test",
-		ConsulService: "demo",
-		ConsulPermissions: ConsulPermissions{
-			KeyPrefixes:  []string{"service/demo"},
-			SessionWrite: true,
-		},
-		TTL: time.Hour,
+		Description:       "test",
+		ConsulService:     "demo",
+		ConsulPermissions: permissions,
+		PeerID:            "worker-1",
+		TTL:               time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -381,4 +402,13 @@ func mustPolicy(t *testing.T, raw string) *Policy {
 		t.Fatal(err)
 	}
 	return p
+}
+
+func mustConsulACLRules(t *testing.T, permissions ConsulPermissions, peerID string) string {
+	t.Helper()
+	rules, err := consulACLRules(permissions, peerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rules
 }

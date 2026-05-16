@@ -211,7 +211,8 @@ A generated manifest can be small and explicit:
       "consul_service": "demo",
       "consul_permissions": {
         "key_prefixes": ["service/demo"],
-        "session_write": true
+        "session_write": true,
+        "agent_read_self": true
       },
       "allowed_compose_hashes": [
         "9157fe4a3b6da46de49f8e2ce0943dbd43cfb6001eefae6b1bcc2c9d0749c5a4"
@@ -220,6 +221,12 @@ A generated manifest can be small and explicit:
   ]
 }
 ```
+
+`agent_read_self` is intentionally not a broad Consul `agent_prefix`
+grant. The admission broker derives the Consul node name from the
+attested binding statement's `peer_id` and emits only `agent
+"<peer_id>" { policy = "read" }`, so Envoy bootstrap can read its
+local agent without gaining visibility into other agents.
 
 The manifest should be generated from the same Terraform graph that
 declares the CVMs. The Phala Terraform provider can call the same

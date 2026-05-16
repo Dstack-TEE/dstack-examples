@@ -95,8 +95,9 @@ type Workload struct {
 }
 
 type ConsulPermissions struct {
-	KeyPrefixes  []string `json:"key_prefixes,omitempty"`
-	SessionWrite bool     `json:"session_write,omitempty"`
+	KeyPrefixes   []string `json:"key_prefixes,omitempty"`
+	SessionWrite  bool     `json:"session_write,omitempty"`
+	AgentReadSelf bool     `json:"agent_read_self,omitempty"`
 }
 
 func ParsePolicy(b []byte) (*Policy, error) {
@@ -243,7 +244,8 @@ func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	binding := firstNonEmpty(req.Binding, req.CertPubKey)
-	if err := validateBinding(req.Identity, binding); err != nil {
+	bindingStatement, err := parseBindingStatement(req.Identity, binding)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
 		return
 	}
@@ -291,6 +293,7 @@ func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
 		Description:       fmt.Sprintf("attested %s %s", workload.WorkloadID, verified.ComposeHash),
 		ConsulService:     workload.ConsulService,
 		ConsulPermissions: workload.ConsulPermissions,
+		PeerID:            bindingStatement.PeerID,
 		TTL:               s.tokenTTL,
 	})
 	if err != nil {
@@ -339,24 +342,36 @@ func rawJSONAsString(raw json.RawMessage) string {
 	return string(raw)
 }
 
-func validateBinding(identity, bindingHex string) error {
+type BindingStatement struct {
+	Version     int    `json:"version"`
+	Identity    string `json:"identity"`
+	Cluster     string `json:"cluster,omitempty"`
+	PeerID      string `json:"peer_id,omitempty"`
+	AppID       string `json:"app_id,omitempty"`
+	InstanceID  string `json:"instance_id,omitempty"`
+	ComposeHash string `json:"compose_hash,omitempty"`
+	IssuedAt    string `json:"issued_at,omitempty"`
+}
+
+func parseBindingStatement(identity, bindingHex string) (*BindingStatement, error) {
 	if bindingHex == "" {
-		return errors.New("binding is required")
+		return nil, errors.New("binding is required")
 	}
 	binding, err := hex.DecodeString(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(bindingHex)), "0x"))
 	if err != nil {
-		return fmt.Errorf("binding must be hex: %w", err)
+		return nil, fmt.Errorf("binding must be hex: %w", err)
 	}
-	var statement struct {
-		Identity string `json:"identity"`
+	if len(binding) == 0 {
+		return nil, errors.New("binding must not be empty")
 	}
+	var statement BindingStatement
 	if err := json.Unmarshal(binding, &statement); err != nil {
-		return fmt.Errorf("binding must be canonical JSON statement bytes encoded as hex: %w", err)
+		return nil, fmt.Errorf("binding must be canonical JSON statement bytes encoded as hex: %w", err)
 	}
 	if statement.Identity != identity {
-		return fmt.Errorf("binding identity %q does not match request identity %q", statement.Identity, identity)
+		return nil, fmt.Errorf("binding identity %q does not match request identity %q", statement.Identity, identity)
 	}
-	return nil
+	return &statement, nil
 }
 
 type NonceStore struct {
@@ -503,6 +518,7 @@ type TokenRequest struct {
 	Description       string
 	ConsulService     string
 	ConsulPermissions ConsulPermissions
+	PeerID            string
 	TTL               time.Duration
 }
 
@@ -527,8 +543,12 @@ func (i *ConsulIssuer) IssueToken(ctx context.Context, req TokenRequest) (string
 			{"ServiceName": req.ConsulService},
 		},
 	}
-	if rules := consulACLRules(req.ConsulPermissions); rules != "" {
-		policyName, err := i.EnsurePolicy(ctx, "attested-dcs-"+shortSHA256(rules, 16), "DCS permissions for attested workloads", rules)
+	rules, err := consulACLRules(req.ConsulPermissions, req.PeerID)
+	if err != nil {
+		return "", err
+	}
+	if rules != "" {
+		policyName, err := i.EnsurePolicy(ctx, "attested-workload-"+shortSHA256(rules, 16), "Additional permissions for attested workloads", rules)
 		if err != nil {
 			return "", err
 		}
@@ -663,8 +683,15 @@ func (e *consulHTTPError) Error() string {
 	return fmt.Sprintf("consul returned HTTP %d: %s", e.StatusCode, e.Body)
 }
 
-func consulACLRules(p ConsulPermissions) string {
+func consulACLRules(p ConsulPermissions, peerID string) (string, error) {
 	var b strings.Builder
+	if p.AgentReadSelf {
+		peerID = strings.TrimSpace(peerID)
+		if err := validateConsulAgentName(peerID); err != nil {
+			return "", fmt.Errorf("agent_read_self requires attested peer_id: %w", err)
+		}
+		fmt.Fprintf(&b, "agent %q {\n  policy = \"read\"\n}\n", peerID)
+	}
 	for _, prefix := range p.KeyPrefixes {
 		prefix = strings.Trim(prefix, "/")
 		if prefix == "" {
@@ -675,7 +702,20 @@ func consulACLRules(p ConsulPermissions) string {
 	if p.SessionWrite {
 		b.WriteString("session_prefix \"\" {\n  policy = \"write\"\n}\n")
 	}
-	return b.String()
+	return b.String(), nil
+}
+
+func validateConsulAgentName(name string) error {
+	if name == "" {
+		return errors.New("peer_id is empty")
+	}
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_' || r == '.' {
+			continue
+		}
+		return fmt.Errorf("peer_id %q contains unsupported character %q", name, r)
+	}
+	return nil
 }
 
 func shortSHA256(s string, hexChars int) string {
