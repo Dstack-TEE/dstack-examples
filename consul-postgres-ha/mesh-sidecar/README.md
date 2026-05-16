@@ -30,8 +30,9 @@ just an Envoy sidecar.
 2. Starts `mesh-conn` in the background.
 3. Starts `consul agent` in the background, with `-server` +
    `-bootstrap-expect=N` if `ROLE=coordinator`.
-4. (Workers only) Polls `consul connect envoy -bootstrap` until the
-   local consul agent answers, then exec's envoy.
+4. (Workers only) Waits until the local Consul client sees an alive
+   server, requests admission tokens, registers each service, then
+   polls `consul connect envoy -bootstrap` until it can exec envoy.
 5. `wait -n`s on all background processes — if any one exits, the
    container exits with that code, and compose's
    `restart: on-failure` brings it back.

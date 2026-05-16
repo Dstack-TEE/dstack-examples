@@ -220,11 +220,30 @@ wait_consul_ready() {
   done
 }
 
+wait_consul_server_ready() {
+  local n=0
+  until [ "$(CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul members 2>/dev/null | awk 'NR>1 && $4=="server" && $3=="alive"' | wc -l)" -gt 0 ]; do
+    n=$((n+1))
+    if [ $n -gt 300 ]; then
+      log "consul server not reachable after 10m"
+      return 1
+    fi
+    if [ $((n % 15)) -eq 0 ]; then
+      log "waiting for consul server..."
+    fi
+    sleep 2
+  done
+}
+
 # ---- 6. workers: register one Consul service+sidecar per backend, launch Envoys ----
 ENVOYS=()
 if [ "$ROLE" = "worker" ]; then
   log "waiting for local consul agent..."
   wait_consul_ready
+  if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
+    log "waiting for consul server..."
+    wait_consul_server_ready
+  fi
 
   # Iterate unique backends — one per distinct sidecar_port. For each
   # backend we render one Consul registration JSON and one Envoy
@@ -322,6 +341,9 @@ if [ "$ROLE" = "worker" ]; then
       TAGS_JSON='[]'
     fi
 
+    CURL_TOKEN_ARGS=()
+    [ -n "$BACKEND_CONSUL_TOKEN" ] && CURL_TOKEN_ARGS=(-H "X-Consul-Token: ${BACKEND_CONSUL_TOKEN}")
+
     # Defensive cleanup: a prior boot may have used different IDs for
     # the same logical proxy (e.g. an earlier release of this image
     # registered Pattern B as `Kind: connect-proxy` with ID
@@ -331,7 +353,7 @@ if [ "$ROLE" = "worker" ]; then
     # -sidecar-for` sees two matches and refuses to render. Deregister
     # known stale IDs idempotently before we PUT the new spec.
     for stale_id in "${PARENT}-sidecar-${PEER_ID}"; do
-      curl -fsS -X PUT "http://127.0.0.1:8500/v1/agent/service/deregister/${stale_id}" \
+      curl -fsS "${CURL_TOKEN_ARGS[@]}" -X PUT "http://127.0.0.1:8500/v1/agent/service/deregister/${stale_id}" \
         >/dev/null 2>&1 || true
     done
     jq -n \
@@ -369,8 +391,6 @@ if [ "$ROLE" = "worker" ]; then
 
     # Re-register on every boot via the agent HTTP API (PUT-idempotent).
     log "registering ${PARENT} (id=${PARENT_ID}) + sidecar (port=${SIDECAR_PORT}, base-id=${BASE_ID})"
-    CURL_TOKEN_ARGS=()
-    [ -n "$BACKEND_CONSUL_TOKEN" ] && CURL_TOKEN_ARGS=(-H "X-Consul-Token: ${BACKEND_CONSUL_TOKEN}")
     until curl -fsS "${CURL_TOKEN_ARGS[@]}" -X PUT --data-binary @"$SPEC_FILE" \
              http://127.0.0.1:8500/v1/agent/service/register; do
       log "${PARENT} register failed; retrying"
