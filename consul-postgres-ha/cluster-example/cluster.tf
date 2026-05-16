@@ -368,7 +368,7 @@ locals {
         identity               = svc.identity
         consul_service         = svc.consul_service
         consul_permissions     = svc.consul_permissions
-        allowed_compose_hashes = [data.phala_app_preflight.worker[k].compose_hash]
+        allowed_compose_hashes = [phala_app_preflight.worker[k].compose_hash]
       }
     ]
   ])
@@ -391,7 +391,7 @@ locals {
 
 # ---------- Coordinator ----------
 
-data "phala_app_preflight" "coordinator" {
+resource "phala_app_preflight" "coordinator" {
   for_each = local.coordinator_ordinals
 
   name           = "${var.cluster_name}-coordinator-${each.key}"
@@ -407,7 +407,7 @@ data "phala_app_preflight" "coordinator" {
   public_sysinfo = false
 }
 
-data "phala_app_preflight" "worker" {
+resource "phala_app_preflight" "worker" {
   for_each = local.worker_ordinals
 
   name           = "${var.cluster_name}-worker-${each.key}"
@@ -502,10 +502,10 @@ output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k =
 output "worker_app_ids" { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "admission_policy_json" { value = local.admission_policy_json }
 output "coordinator_preflight_compose_hashes" {
-  value = { for k, c in data.phala_app_preflight.coordinator : k => c.compose_hash }
+  value = { for k, c in phala_app_preflight.coordinator : k => c.compose_hash }
 }
 output "worker_preflight_compose_hashes" {
-  value = { for k, w in data.phala_app_preflight.worker : k => w.compose_hash }
+  value = { for k, w in phala_app_preflight.worker : k => w.compose_hash }
 }
 output "consul_ui" {
   # Coordinator-0's Consul HTTP API on the canonical 8500. Plain HTTP
