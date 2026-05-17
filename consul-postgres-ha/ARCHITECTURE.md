@@ -307,8 +307,10 @@ recovery, congestion control, and an idle-timeout-driven liveness
 check. Crucially, it does not assume a reliable underlay — *unlike*
 yamux, which we tried first and gave up on. The earlier yamux build
 sustained ~3 KB on the dstack hairpin path before its keepalive /
-recv-window invariants tripped on dropped packets. QUIC sustains
-~25 MB/s on the same path.
+recv-window invariants tripped on dropped packets. QUIC gives us the
+loss recovery and congestion control needed for this underlay; see the
+real-env service mesh benchmark below for the current measured data
+point.
 
 ### Client / server roles
 
@@ -371,6 +373,46 @@ The whole thing is **one ICE conn per peer-pair, one QUIC connection
 per ICE conn**, plus a 3-byte header per stream and a 2-byte length
 prefix per UDP datagram. That is the entirety of mesh-conn's wire
 format.
+
+### Real-env service mesh bandwidth
+
+On 2026-05-17 we measured a direct worker-to-worker service-mesh path
+on Phala Cloud `US-WEST-1` with:
+
+- 1 coordinator CVM + 2 worker CVMs, all `tdx.small`.
+- Default ICE candidate gathering, so direct candidates were available.
+- Worker-1 client -> local service VIP `127.10.0.13:5201` -> local
+  Envoy -> worker-2 peer VIP `127.50.0.3:21002` -> worker-2 Envoy ->
+  nginx bound on `127.0.0.1:5201`.
+- A Consul service-resolver pinned the benchmark service to
+  `peer=worker-2`, so the measured route did not use a local backend.
+
+The selected worker-to-worker ICE pair was direct UDP, not TURN relay:
+
+```text
+worker-1: host 10.0.2.10:55650 <-> srflx 66.220.6.105:50015 (proto=udp)
+worker-2: srflx 66.220.6.105:50015 <-> prflx 66.220.6.105:48294 (proto=udp)
+```
+
+Five 512 MiB HTTP downloads through the full Consul Connect path:
+
+| run | seconds | MiB/s | Mbps |
+| --- | ---: | ---: | ---: |
+| 1 | 8.499705 | 60.24 | 505.31 |
+| 2 | 7.780371 | 65.81 | 552.03 |
+| 3 | 7.347274 | 69.69 | 584.57 |
+| 4 | 7.439566 | 68.82 | 577.31 |
+| 5 | 8.585113 | 59.64 | 500.28 |
+
+Average: **64.84 MiB/s / 543.90 Mbps**. Median:
+**65.81 MiB/s / 552.03 Mbps**.
+
+The first benchmark attempt used `iperf3`, but Consul's generic TCP
+health check opens a plain TCP connection to the service port. That is
+valid for most TCP services, but `iperf3` treats the probe as a broken
+control session. For arbitrary TCP services whose accept path has
+protocol side effects, use a TTL check or a separate health endpoint
+instead of a generic TCP connect check.
 
 ## Trust boundaries
 

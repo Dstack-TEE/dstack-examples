@@ -293,7 +293,7 @@ the platform plumbing untouched.
 | In-place env updates | Yes — change image tags or env values, `terraform apply`, CVMs update without losing pgdata. Requires provider `phala-network/phala 0.2.0-beta.3+`. |
 | Failover RTO | ~24s soft-kill, ~33s hard-kill (default Patroni `ttl=30`). See [`FAILOVER.md`](FAILOVER.md). |
 | Cheap rejoin | Yes — a recovered ex-leader replays local WAL and rejoins as a streaming replica without pg_basebackup. |
-| Disk-loss rejoin | Yes — Patroni detects empty pgdata, runs full pg_basebackup over the QUIC overlay (~25 MB/s sustained between dstack workers). |
+| Disk-loss rejoin | Yes — Patroni detects empty pgdata and runs full pg_basebackup over the QUIC overlay. |
 | Build provenance | Sigstore-attested via GitHub Build Provenance on every published image. Verify with `gh attestation verify oci://... --repo Dstack-TEE/dstack-examples`. |
 
 ## Known limitations

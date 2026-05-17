@@ -58,13 +58,12 @@ func main() {
 	turnHost := flag.String("turn-host", "", "TURN host (e.g. 155.138.146.255)")
 	turnSecret := flag.String("turn-secret", "", "TURN HMAC shared secret")
 	mb := flag.Int("mb", 10, "MB to transfer")
-	relayOnly := flag.Bool("relay-only", false, "force ICE relay-only candidates")
 	flag.Parse()
 	if *role == "" || *peerID == "" || *signal == "" {
 		log.Fatalf("need -role, -peer, -signal")
 	}
 
-	conn, err := dialICE(*role, *peerID, *signal, *turnHost, *turnSecret, *relayOnly)
+	conn, err := dialICE(*role, *peerID, *signal, *turnHost, *turnSecret)
 	if err != nil {
 		log.Fatalf("ice dial: %v", err)
 	}
@@ -125,8 +124,8 @@ func runQUICClient(pkt net.PacketConn, peerID string, mb int) {
 	// of "where to send" matches what the PacketConn does anyway.
 	remote := pkt.LocalAddr() // any addr — pkt.WriteTo ignores it
 	conn, err := quic.Dial(ctx, pkt, remote, tlsConf, &quic.Config{
-		KeepAlivePeriod:        5 * time.Second,
-		MaxIdleTimeout:         60 * time.Second,
+		KeepAlivePeriod:                5 * time.Second,
+		MaxIdleTimeout:                 60 * time.Second,
 		InitialStreamReceiveWindow:     4 << 20,
 		MaxStreamReceiveWindow:         16 << 20,
 		InitialConnectionReceiveWindow: 8 << 20,
@@ -264,7 +263,7 @@ var (
 	sessions   = map[string]*peerSession{}
 )
 
-func dialICE(self, remote, signalURL, turnHost, turnSecret string, relayOnly bool) (*ice.Conn, error) {
+func dialICE(self, remote, signalURL, turnHost, turnSecret string) (*ice.Conn, error) {
 	var urls []*stun.URI
 	if turnHost != "" {
 		user, pass := turnCreds(turnSecret, time.Hour)
@@ -279,9 +278,6 @@ func dialICE(self, remote, signalURL, turnHost, turnSecret string, relayOnly boo
 		ice.CandidateTypeServerReflexive,
 		ice.CandidateTypePeerReflexive,
 		ice.CandidateTypeRelay,
-	}
-	if relayOnly {
-		candTypes = []ice.CandidateType{ice.CandidateTypeRelay}
 	}
 	agent, err := ice.NewAgent(&ice.AgentConfig{
 		Urls:           urls,

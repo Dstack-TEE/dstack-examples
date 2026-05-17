@@ -52,11 +52,6 @@ services:
       - GOSSIP_KEY=${GOSSIP_KEY}
       - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
       - CONSUL_MANAGEMENT_TOKEN=${CONSUL_MANAGEMENT_TOKEN:-}
-      # MESH_CONN_RELAY_ONLY=1 forces ICE to gather only Relay
-      # candidates, routing all peer traffic through the coturn server.
-      # Default off because direct candidates work; flip on if a
-      # deployment hits worker↔worker direct-pair instability.
-      - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
       - MESH_CONN_DEBUG_ICE=${MESH_CONN_DEBUG_ICE:-}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro

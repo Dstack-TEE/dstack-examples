@@ -69,8 +69,6 @@ services:
       # WORKAROUND: gossip key generated in Terraform and broadcast
       # identically to every CVM. See cluster.tf.
       - GOSSIP_KEY=${GOSSIP_KEY}
-      # See worker.yaml for the rationale on MESH_CONN_RELAY_ONLY.
-      - MESH_CONN_RELAY_ONLY=${MESH_CONN_RELAY_ONLY:-}
       - MESH_CONN_DEBUG_ICE=${MESH_CONN_DEBUG_ICE:-}
       - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
       - ADMISSION_POLICY_JSON=${ADMISSION_POLICY_JSON:-}

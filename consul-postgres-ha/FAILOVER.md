@@ -166,11 +166,9 @@ detection (which sees worker-4's whole agent disappear, not just the
 Patroni lock) lines up with the Patroni leader-key TTL on this run,
 so neither signal extends the RTO.
 
-The post-restart rejoin path on dstack-worker pairs is occasionally
-flaky (the documented `MESH_CONN_RELAY_ONLY=1` escape hatch in
-`compose/worker.yaml` is exactly this case — flip it on if your
-deployment hits a wedged ICE re-handshake). The mesh-conn binary
-behavior is unchanged by the single-sidecar consolidation.
+The post-restart rejoin path on dstack-worker pairs used to be
+occasionally flaky when direct ICE re-handshake wedged. The mesh-conn
+binary behavior is unchanged by the single-sidecar consolidation.
 
 ### Things confirmed by the hard-kill that the soft-kill didn't exercise
 
@@ -213,9 +211,10 @@ T_streaming    17:35:43   streaming WAL on timeline 4, lag=0            +82s tot
 ```
 
 A few-MB pgdata transferred in ~18 seconds end-to-end. The dataset
-is small enough that handshake/startup overhead dominates — for a
-realistic throughput number, see the soft-kill section's pg_basebackup
-trace at ~25 MB/s sustained on the QUIC path.
+is small enough that handshake/startup overhead dominates, so this
+trace should be read as a recovery-path check rather than a bandwidth
+benchmark. For a current full service-mesh datapoint, see
+`ARCHITECTURE.md`.
 
 The path itself is the proof point: Patroni correctly detects empty
 pgdata, picks `bootstrap from leader` (not WAL replay), pulls the full

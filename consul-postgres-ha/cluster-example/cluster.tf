@@ -107,15 +107,6 @@ variable "external_turn_secret" {
   sensitive = true
 }
 
-# Force ICE to gather Relay candidates only — routes all peer traffic
-# through coturn instead of attempting NAT-hairpin direct paths. Set
-# this when worker↔worker direct-pair ICE handshakes are unstable
-# (the dstack provider NAT path is known-flaky for these pairs).
-variable "mesh_conn_relay_only" {
-  type    = string
-  default = ""
-}
-
 # Set to "1" to enable pion's verbose ICE debug logs (connectivity
 # checks, STUN attribute parsing). Useful when debugging hot-patch
 # / re-handshake flakiness; off by default because it's very chatty.
@@ -328,7 +319,6 @@ locals {
       GOSSIP_KEY              = random_bytes.gossip_key.base64
       PATRONI_SUPERUSER_PW    = random_bytes.patroni_superuser_pw.hex
       PATRONI_REPLICATION_PW  = random_bytes.patroni_replication_pw.hex
-      MESH_CONN_RELAY_ONLY    = var.mesh_conn_relay_only
       MESH_CONN_DEBUG_ICE     = var.mesh_conn_debug_ice
       ADMISSION_BROKER_ENABLE = var.enable_attestation_admission ? "1" : ""
       CONSUL_MANAGEMENT_TOKEN = var.consul_management_token
@@ -349,7 +339,6 @@ locals {
       MESH_SIDECAR_IMAGE      = var.mesh_sidecar_image
       DSTACK_VERIFIER_IMAGE   = var.dstack_verifier_image
       GOSSIP_KEY              = random_bytes.gossip_key.base64
-      MESH_CONN_RELAY_ONLY    = var.mesh_conn_relay_only
       MESH_CONN_DEBUG_ICE     = var.mesh_conn_debug_ice
       ADMISSION_BROKER_ENABLE = var.enable_attestation_admission ? "1" : ""
       # The env key is part of the compose allowlist, but the policy

@@ -55,8 +55,8 @@
 // the root cause is dropped packets. QUIC has built-in loss recovery,
 // congestion control, and stream-multiplexing — it's exactly what a
 // lossy UDP underlay needs. The previous yamux build died at 3KB-260KB
-// depending on path; the QUIC build sustains 25-28 MB/s on the same
-// hairpin.
+// depending on path; current service-mesh bandwidth is documented in
+// ARCHITECTURE.md from real-env benchmarks.
 
 package main
 
@@ -1115,19 +1115,11 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 		}
 	}
 
-	// MESH_CONN_RELAY_ONLY=1 restricts candidate gathering to Relay only.
-	// Use when direct (host/srflx/prflx) connectivity is unreliable — e.g.
-	// dstack worker-to-worker pairs where pion's connectivity check fails
-	// for every direct pair and the agent never gets to relay before
-	// timing out. Trades latency for guaranteed reachability via coturn.
 	candidateTypes := []ice.CandidateType{
 		ice.CandidateTypeHost,
 		ice.CandidateTypeServerReflexive,
 		ice.CandidateTypePeerReflexive,
 		ice.CandidateTypeRelay,
-	}
-	if os.Getenv("MESH_CONN_RELAY_ONLY") == "1" {
-		candidateTypes = []ice.CandidateType{ice.CandidateTypeRelay}
 	}
 	// MESH_CONN_DEBUG_ICE=1 turns on pion's verbose ICE-level logging
 	// (connectivity-check requests/responses, STUN attribute parsing,
@@ -1136,16 +1128,13 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 	// Disconnected/Failed timeouts: pion defaults to 5 s + 25 s (= 30 s
 	// of no inbound from the selected pair before the state callback
 	// fires Failed and our outer code aborts the attempt). That is too
-	// tight for the TURN-relay path. The relay leg adds ~150 ms RTT,
-	// the periodic permission/allocation refreshes can briefly
+	// tight for high-jitter selected pairs. TURN relay candidates add
+	// RTT, the periodic permission/allocation refreshes can briefly
 	// reorder packet flow at coturn, and pion's own 2 s consent
-	// freshness has no retry budget — a sub-second jitter window
-	// where 1 STUN binding gets lost and another arrives late is
-	// enough to start the disconnected clock, and consecutive jitter
-	// events accumulate against the 30 s budget. We've observed the
-	// resulting "Connected → Disconnected → Failed → Checking →
-	// Connected" cycle every couple of minutes on freshly-deployed
-	// relay-only clusters, with no actual peer death behind it.
+	// freshness has no retry budget — a sub-second jitter window where
+	// 1 STUN binding gets lost and another arrives late is enough to
+	// start the disconnected clock, and consecutive jitter events
+	// accumulate against the 30 s budget.
 	//
 	// The fix is to give pion enough headroom that only a genuine
 	// relay-path outage (rather than refresh / jitter noise) trips

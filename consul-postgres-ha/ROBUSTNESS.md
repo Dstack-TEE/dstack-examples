@@ -162,13 +162,11 @@ whose direct path goes down can't fail over to TURN until it's back".
   sustained-forge variant gated on the `onAttemptStarted` hook,
   which guarantees the forge lands inside the in-flight window.
 
-- **pion DisconnectedTimeout / FailedTimeout headroom for the
-  TURN-relay path.** With pion's defaults (5 s + 25 s = 30 s of no
-  inbound from the selected pair before the state callback fires
-  Failed), the relay-only path on `MESH_CONN_RELAY_ONLY=1` clusters
-  flapped on its own roughly every couple of minutes: brief
-  jitter / refresh-window noise at coturn was enough to accumulate
-  a 30 s consent-freshness gap, pion declared Failed,
+- **pion DisconnectedTimeout / FailedTimeout headroom.** With pion's
+  defaults (5 s + 25 s = 30 s of no inbound from the selected pair
+  before the state callback fires Failed), lossy or high-jitter selected
+  pairs can flap on their own: brief jitter / refresh-window noise is
+  enough to accumulate a 30 s consent-freshness gap, pion declares Failed,
   `OnConnectionStateChange` fired `abortAttempt`, QUIC's
   `accept`/pumps came back with `context canceled`, and `runPeerLink`
   re-established the link 2–5 s later. The link-pair recovered every
@@ -194,9 +192,9 @@ whose direct path goes down can't fail over to TURN until it's back".
   Regression net: `mesh-conn/main_test.go::TestSteadyStateNoFlap` —
   loopback two-peer steady-state observation. Default window 5 min;
   `STEADY_STATE_OBSERVE_SECONDS=N` overrides for the CI 50-trial
-  sweep at 30 s each (passes 50/50). Live verification: 6-CVM
-  relay-only cluster observed for 15+ min post-rollout with zero
-  `ice state: Failed` events on any peer's sidecar log.
+  sweep at 30 s each (passes 50/50). Live verification: a 6-CVM
+  cluster was observed for 15+ min post-rollout with zero `ice state:
+  Failed` events on any peer's sidecar log.
 
 ## Layer 2 — mesh-conn forwarder
 
