@@ -344,7 +344,10 @@ func reportDataHex(bindingHex, nonceHex string) (string, error) {
 	h := sha256.New()
 	h.Write(binding)
 	h.Write(nonce)
-	return hex.EncodeToString(h.Sum(nil)), nil
+	digest := h.Sum(nil)
+	reportData := make([]byte, 64)
+	copy(reportData, digest)
+	return hex.EncodeToString(reportData), nil
 }
 
 func rawJSONAsString(raw json.RawMessage) string {

@@ -60,7 +60,8 @@ deployment model, trust model, or operational status.
 
 - Workload identity is the Terraform-declared identity; compose hash
   is revision evidence, not the workload key.
-- `report_data` is `SHA-256(binding_statement_json || nonce)`.
+- `report_data` is the 64-byte TDX REPORTDATA field:
+  `SHA-256(binding_statement_json || nonce) || 32 zero bytes`.
 - The broker relies on `dstack-verifier` for quote and event-log
   semantics. It does not parse raw RTMR event-log internals itself.
 - `peer_id` is the logical mesh/Consul node label, for example

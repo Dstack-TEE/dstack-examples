@@ -40,11 +40,13 @@ current dstack guest agents: `quote`, `event_log`, and `vm_config`.
 
 ## Report Data
 
-`report_data` is an unstructured SHA-256 digest. The structured
-admission data stays outside the quote in the binding statement:
+`report_data` is the 64-byte TDX REPORTDATA field. The structured
+admission data stays outside the quote in the binding statement.
+The first 32 bytes are a SHA-256 digest; the remaining 32 bytes are
+zero padding:
 
 ```text
-report_data = SHA-256(binding_statement_json || broker_nonce)
+report_data = SHA-256(binding_statement_json || broker_nonce) || 32 zero bytes
 ```
 
 The broker nonce is 32 random bytes encoded as hex. The binding

@@ -123,7 +123,9 @@ func TestReportDataHexBindsStatementAndNonce(t *testing.T) {
 	h := sha256.New()
 	h.Write(bindingBytes)
 	h.Write(nonceBytes)
-	want := hex.EncodeToString(h.Sum(nil))
+	wantBytes := make([]byte, 64)
+	copy(wantBytes, h.Sum(nil))
+	want := hex.EncodeToString(wantBytes)
 	if got != want {
 		t.Fatalf("report_data mismatch\nwant %s\n got %s", want, got)
 	}

@@ -26,7 +26,9 @@ func TestReportDataBindsStatementAndNonce(t *testing.T) {
 	h := sha256.New()
 	h.Write(statement)
 	h.Write(nonceBytes)
-	if !bytes.Equal(got, h.Sum(nil)) {
+	want := make([]byte, 64)
+	copy(want, h.Sum(nil))
+	if !bytes.Equal(got, want) {
 		t.Fatalf("report data mismatch")
 	}
 }

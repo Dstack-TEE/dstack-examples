@@ -141,10 +141,11 @@ The broker validates:
 1. **Quote chain**: TDX → Intel PCS root, via a sibling
    `dstack-verifier` HTTP service.
 2. **`report_data` binding**: must equal
-   `SHA-256(binding_statement || nonce)`. Anything else means the
-   quote was generated for a different handshake; reject. The broker
-   also verifies that the statement identity equals the claimed
-   identity.
+   `SHA-256(binding_statement || nonce)` placed in the first 32 bytes
+   of the 64-byte TDX REPORTDATA field, with the remaining 32 bytes
+   zero padded. Anything else means the quote was generated for a
+   different handshake; reject. The broker also verifies that the
+   statement identity equals the claimed identity.
 3. **Nonce freshness**: must be a nonce the broker issued
    recently and hasn't been consumed.
 4. **Verifier event-log result**: require `event_log_verified` from
@@ -328,7 +329,7 @@ client agent itself, then for each declared service identity.
 
 3. POST /v1/admission/challenge to broker. Receive nonce.
 
-4. report_data = SHA-256(binding_statement || nonce)
+4. report_data = SHA-256(binding_statement || nonce) || 32 zero bytes
    Call dstack GetQuote(report_data). Receive quote, event_log,
    vm_config, and report_data.
 

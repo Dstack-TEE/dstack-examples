@@ -240,7 +240,10 @@ func reportData(statementBytes []byte, nonceHex string) ([]byte, error) {
 	h := sha256.New()
 	h.Write(statementBytes)
 	h.Write(nonce)
-	return h.Sum(nil), nil
+	digest := h.Sum(nil)
+	reportData := make([]byte, 64)
+	copy(reportData, digest)
+	return reportData, nil
 }
 
 func writeToken(path, token string) error {
