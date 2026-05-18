@@ -34,6 +34,10 @@ external derivation needed.
 For the full topology and layering walkthrough, see
 [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+For current project status and remaining work across Terraform,
+mesh transport, Consul, Patroni, and attestation, see
+[`PROGRESS.md`](PROGRESS.md).
+
 ### The three address spaces (you'll see these everywhere)
 
 Apps and operators run into three loopback ranges in this example. Knowing
@@ -110,6 +114,7 @@ consul-postgres-ha/
 ├── README.md             you are here
 ├── ARCHITECTURE.md       the three-layer stack, peer topology, port plan
 ├── FAILOVER.md           soft-kill / hard-kill / disk-loss recipes + measured RTO
+├── PROGRESS.md           project status, recently validated flows, open work
 ├── PUBLISHING.md         CI publish flow, manual ttl.sh shortcuts, hot-patch
 ├── ROBUSTNESS.md         where each layer breaks + mitigations
 │

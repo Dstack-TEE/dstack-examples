@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha512"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -237,7 +237,7 @@ func reportData(statementBytes []byte, nonceHex string) ([]byte, error) {
 	if len(nonce) != 32 {
 		return nil, fmt.Errorf("nonce must be 32 bytes, got %d", len(nonce))
 	}
-	h := sha512.New()
+	h := sha256.New()
 	h.Write(statementBytes)
 	h.Write(nonce)
 	return h.Sum(nil), nil

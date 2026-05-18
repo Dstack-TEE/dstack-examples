@@ -141,15 +141,15 @@ The broker validates:
 1. **Quote chain**: TDX → Intel PCS root, via a sibling
    `dstack-verifier` HTTP service.
 2. **`report_data` binding**: must equal
-   `SHA-512(binding_statement || nonce)`. Anything else means the
+   `SHA-256(binding_statement || nonce)`. Anything else means the
    quote was generated for a different handshake; reject. The broker
    also verifies that the statement identity equals the claimed
    identity.
 3. **Nonce freshness**: must be a nonce the broker issued
    recently and hasn't been consumed.
-4. **RTMR replay**: use the Go SDK's `ReplayRTMRs()` helper to
-   confirm the event log matches the quote's RTMRs. Otherwise the
-   event log could be forged.
+4. **Verifier event-log result**: require `event_log_verified` from
+   `dstack-verifier`. The broker forwards the event log to the
+   verifier but does not reimplement RTMR replay semantics itself.
 5. **Policy check**: evaluate the claimed `identity` against the
    generated admission policy. Phase 1 accepts a quote when the
    identity names a known Terraform workload and the quote's
@@ -258,11 +258,24 @@ single ordinary apply: Terraform already knows the workload
 definition, preflight yields the measured revision hash, and the
 broker receives a policy document derived from those same inputs.
 
-`app_id`, KMS details, TCB fields, and `app-compose.json` remain
-valuable evidence and audit material, but they are not the primary
-policy key in Phase 1. In particular, `app-compose.json` is useful
-for human review and transparency logs because it is the exact byte
-payload dstack measures and it embeds the Docker Compose string.
+`app_id`, instance id, KMS details, OS image hash, TCB fields, and
+`app-compose.json` remain valuable evidence and audit material, but
+they are not the primary policy key in Phase 1. In particular,
+`app-compose.json` is useful for human review and transparency logs
+because it is the exact byte payload dstack measures and it embeds
+the Docker Compose string.
+
+KMS identity should be promoted into the admission predicate. KMS
+public keys are long-term, so Terraform can carry a well-known KMS
+public key or equivalent KMS identity and the broker can compare it
+with verified dstack evidence. This ties service-mesh admission to
+the key lifecycle domain that protects workload secrets.
+
+OS image identity should be enforced when the Terraform deployment
+uses a production profile. The expected OS image hash should appear
+both in the real Phala CVM launch config and in the admission policy,
+so a valid compose hash cannot be admitted on an unexpected base
+image.
 
 ## Upgradeability policy server
 
@@ -315,7 +328,7 @@ client agent itself, then for each declared service identity.
 
 3. POST /v1/admission/challenge to broker. Receive nonce.
 
-4. report_data = SHA-512(binding_statement || nonce)
+4. report_data = SHA-256(binding_statement || nonce)
    Call dstack GetQuote(report_data). Receive quote, event_log,
    vm_config, and report_data.
 

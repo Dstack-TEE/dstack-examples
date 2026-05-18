@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/sha512"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -342,7 +341,7 @@ func reportDataHex(bindingHex, nonceHex string) (string, error) {
 	if len(nonce) != 32 {
 		return "", fmt.Errorf("nonce must be 32 bytes, got %d", len(nonce))
 	}
-	h := sha512.New()
+	h := sha256.New()
 	h.Write(binding)
 	h.Write(nonce)
 	return hex.EncodeToString(h.Sum(nil)), nil

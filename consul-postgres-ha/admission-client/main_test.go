@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha512"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -23,7 +23,7 @@ func TestReportDataBindsStatementAndNonce(t *testing.T) {
 		t.Fatal(err)
 	}
 	nonceBytes, _ := hex.DecodeString(nonce)
-	h := sha512.New()
+	h := sha256.New()
 	h.Write(statement)
 	h.Write(nonceBytes)
 	if !bytes.Equal(got, h.Sum(nil)) {
