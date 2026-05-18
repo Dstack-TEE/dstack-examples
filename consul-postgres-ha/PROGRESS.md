@@ -33,16 +33,20 @@ deployment model, trust model, or operational status.
 
 ## Open Work
 
+- Terraform slot API: integrate the newly implemented Phala Cloud
+  slot API into the Terraform deployment flow. Tracking note:
+  `design/terraform-slot-api.md`.
 - KMS policy: pin the long-term KMS public key or equivalent KMS
   identity in Terraform and require the verifier-proven KMS evidence
   to match it.
 - Production OS policy: when a production profile is enabled, include
   the expected OS image hash in both Phala launch config and admission
   policy.
-- Peer identity hardening: keep `peer_id` as the Terraform-declared
-  Consul node namespace, but bind it to a platform-stable instance
-  identifier when Phala exposes one without creating a deployment
-  cycle.
+- Secret lifecycle: move remaining cluster-wide-identical secrets
+  out of Terraform env into TEE-rooted generation/distribution.
+- Long soak: run the real cluster for at least one hour with zero ACL
+  authorization failures, zero attestation rejections, and stable
+  Patroni leader/replica health.
 - Token lifecycle: keep non-expiring tokens for the first integrated
   version; next step is one active token per attested workload
   instance, then bounded TTL plus renewal once Consul, Envoy, and
@@ -50,11 +54,10 @@ deployment model, trust model, or operational status.
 - Upgrade policy: replace static compose-hash allowlists with a
   policy server or on-chain bridge that admits new revisions under
   signed policy epochs.
-- Secret lifecycle: move remaining cluster-wide-identical secrets
-  out of Terraform env into TEE-rooted generation/distribution.
-- Long soak: run the real cluster for at least one hour with zero ACL
-  authorization failures, zero attestation rejections, and stable
-  Patroni leader/replica health.
+- Peer identity hardening: keep `peer_id` as the Terraform-declared
+  Consul node namespace, but bind it to a platform-stable instance
+  identifier when Phala exposes one without creating a deployment
+  cycle.
 
 ## Decisions
 

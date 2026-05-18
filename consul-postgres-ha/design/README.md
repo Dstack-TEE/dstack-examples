@@ -13,6 +13,7 @@ in their face.
 | Doc | What |
 |---|---|
 | [`attestation-admission.md`](attestation-admission.md) | Use dstack TEE attestation as the mesh-conn admission credential, replacing/augmenting the shared TURN HMAC. Phased plan: per-app-id first, Consul-KV-rooted policy later. |
+| [`terraform-slot-api.md`](terraform-slot-api.md) | Integrate the Phala Cloud slot API into Terraform so mesh members have stable logical identities across CVM replacement and future attestation policy binding. |
 
 Each doc includes:
 
