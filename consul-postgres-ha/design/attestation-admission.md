@@ -128,9 +128,10 @@ Body: {
   "binding":     "<canonical statement bytes, hex>",
   "nonce":       "<echoed from challenge>", # for replay protection
   "quote":       "<TDX quote, hex>",         # from dstack GetQuote()
-  "event_log":   "<RTMR event log, JSON>"   # from dstack GetQuote()
+  "event_log":   "<RTMR event log, JSON>",  # from dstack GetQuote()
+  "vm_config":   "<dstack VM config JSON>"  # from dstack GetQuote()
 }
-  → 200 { "consul_acl_token": "<UUID>", "expires_at": "<RFC3339>" }
+  → 200 { "consul_acl_token": "<UUID>", "workload_id": "...", "compose_hash": "..." }
   | 403 { "code": "ADMISSION_REJECTED", "reason": "<policy failure>" }
   | 400 { "code": "QUOTE_INVALID",     "reason": "<verifier error string>" }
 ```
@@ -185,7 +186,9 @@ The policy subject is the workload we define in Terraform, not the
 `compose_hash` itself. Multiple workloads may share the same measured
 compose content while differing in non-measured deployment arguments,
 so `compose_hash` is evidence for an approved revision, not the row
-key.
+key. Rows may also carry the Terraform-declared `peer_id`; when
+present, the broker requires the attested binding statement to name
+that same peer before issuing node or service tokens.
 
 A generated manifest can be small and explicit:
 
@@ -206,8 +209,20 @@ A generated manifest can be small and explicit:
       }
     },
     {
+      "workload_id": "demo/worker/0/node",
+      "identity": "spiffe://demo/node",
+      "peer_id": "worker-0",
+      "consul_permissions": {
+        "node_identity_self": true
+      },
+      "allowed_compose_hashes": [
+        "9157fe4a3b6da46de49f8e2ce0943dbd43cfb6001eefae6b1bcc2c9d0749c5a4"
+      ]
+    },
+    {
       "workload_id": "demo/worker/0/postgres",
       "identity": "spiffe://demo/postgres",
+      "peer_id": "worker-0",
       "consul_service": "demo",
       "consul_permissions": {
         "key_prefixes": ["service/demo"],
@@ -222,9 +237,16 @@ A generated manifest can be small and explicit:
 }
 ```
 
+`node_identity_self` is the pre-Consul-admission grant. The worker
+sidecar attests as `spiffe://<cluster>/node` before starting its
+Consul client agent; the broker uses the attested binding
+statement's `peer_id` as the Consul `NodeName` in a Consul
+`NodeIdentities` token. That matches Consul's recommended agent-token
+shape: node write plus service read for that node.
+
 `agent_read_self` is intentionally not a broad Consul `agent_prefix`
-grant. The admission broker derives the Consul node name from the
-attested binding statement's `peer_id` and emits only `agent
+grant. For service tokens, the admission broker derives the Consul
+node name from the same attested `peer_id` and emits only `agent
 "<peer_id>" { policy = "read" }`, so Envoy bootstrap can read its
 local agent without gaining visibility into other agents.
 
@@ -280,38 +302,53 @@ future extension.
 
 ## Sidecar flow at startup (worker case)
 
-The sidecar entrypoint already does roughly: register service →
-get Connect cert → start Envoy. The new flow inserts attestation
-before "get Connect cert":
+The worker sidecar has two admission points: first for the Consul
+client agent itself, then for each declared service identity.
 
 ```
-1. Render a canonical admission statement with claimed identity,
+1. Start mesh-conn so the worker can reach coordinator brokers at
+   127.50.0.<coordinator>:8787.
+
+2. Render a canonical admission statement for
+   spiffe://<cluster>/node with local peer identity, dstack app_id,
+   instance_id, and compose_hash.
+
+3. POST /v1/admission/challenge to broker. Receive nonce.
+
+4. report_data = SHA-512(binding_statement || nonce)
+   Call dstack GetQuote(report_data). Receive quote, event_log,
+   vm_config, and report_data.
+
+5. POST /v1/admission/attest to broker with
+   { identity, binding_statement, nonce, quote, event_log,
+   vm_config }.
+
+6. On 200: receive a Consul ACL token carrying a Consul node identity
+   for the attested peer_id. Start the local Consul client agent with
+   that token as acl.tokens.agent.
+
+7. For each service backend, render a canonical admission statement
+   with claimed service identity,
    local peer identity, dstack app_id, instance_id, and compose_hash.
 
-2. POST /v1/admission/challenge to broker. Receive nonce.
+8. Repeat the challenge/attest exchange for that service identity.
 
-3. report_data = SHA-512(binding_statement || nonce)
-   Call dstack GetQuote(report_data). Receive quote + event_log.
-
-4. POST /v1/admission/attest to broker with
-   { identity, binding_statement, nonce, quote, event_log }.
-
-5. On 200: receive Consul ACL token. Use it via
+9. On 200: receive Consul ACL token. Use it via
    CONSUL_HTTP_TOKEN for all subsequent Consul API calls.
 
-6. Register the service (existing flow). Now Consul will mint a
+10. Register the service. Now Consul will mint a
    Connect leaf cert with the configured ACL token's identity
    binding — happens automatically inside `consul connect envoy
    -sidecar-for=<service>`.
 
-7. Start Envoy with the bootstrap config + the ACL token. Envoy
+11. Start Envoy with the bootstrap config + the ACL token. Envoy
    refreshes its leaf via xDS using the same token.
-
-8. Before token expiry (broker default: 1 h, leaf cert TTL 72 h),
-   the sidecar restarts the entire flow from step 2. This is the
-   re-attestation path — Phase 1 supports it implicitly because
-   the broker reissues tokens against fresh quotes.
 ```
+
+Broker-issued Consul tokens do not expire by default in Phase 1.
+`ADMISSION_TOKEN_TTL` can still be set for experiments, but enabling
+a TTL in production requires a real renewal path for the Consul
+agent token, Patroni's DCS token, and Envoy bootstrap/xDS token.
 
 ## How this closes ROBUSTNESS gaps
 
@@ -336,15 +373,15 @@ before "get Connect cert":
 - Periodic re-attestation independent of token TTL.
 - Cross-cluster federation. Single dstack cluster only.
 
-## Phase 0 findings (verified 2026-05-14, updated 2026-05-15)
+## Phase 0 findings (verified 2026-05-14, updated 2026-05-18)
 
 - **Verification path: `dstack-verifier` HTTP sidecar.** Terraform
   passes the coordinator verifier image as `dstack_verifier_image`;
-  production should pin this by digest. The live validation uses a
-  verifier image built from upstream dstack commit
-  `df0b302bd6e3dafc54ecf800b3ebc857533fcc6e`, because the published
-  Docker Hub `latest` digest observed on 2026-05-15 lagged the
-  verifier source needed for versioned attestations.
+  production should pin this by digest. Live validation should use a
+  versioned image tag such as `dstacktee/dstack-verifier:0.5.9`.
+  The Docker Hub `latest` tag observed on 2026-05-18 was stale and
+  rejected the current guest-agent event-log schema; the release
+  workflow publishes version tags and does not move `latest`.
   Single `POST /verify` returns structured `is_valid`,
   `quote_verified`, `event_log_verified`, `os_image_hash_verified`,
   `tcb_status`, and `app_info.{app_id, compose_hash, instance_id,
@@ -358,12 +395,17 @@ before "get Connect cert":
   Cache-worthy for re-attest cycles within token TTL.
 - **Payload sizes**: quote 5 KB hex, event_log ~3.4 KB JSON, total
   POST body ~17 KB, response 1.5 KB. All easy HTTP.
-- **`AttestResponse` carries the versioned attestation bytes** and
-  `Info()` carries `VmConfig`. The sidecar binds `report_data` to the
-  admission statement, calls dstack `Attest`, and sends
-  `{attestation, vm_config}` to the broker. The broker forwards those
-  fields to `dstack-verifier` and avoids parsing raw quote/event-log
-  internals itself.
+- **`GetQuote` is the live evidence source.** The sidecar binds
+  `report_data` to the admission statement, calls dstack
+  `GetQuote(report_data)`, verifies the returned `report_data`
+  locally, and sends `{quote, event_log, vm_config}` to the broker.
+  The broker forwards those fields to `dstack-verifier` and avoids
+  parsing raw quote/event-log internals itself.
+- **Image binding depends on the composed source of truth.** The
+  measured `compose_hash` is derived from `app-compose.json`, which
+  embeds the Docker Compose string. Environment variable values are
+  not a reliable image-binding mechanism for this policy; serious
+  attestation should hard-code image digests in the Compose source.
 
 The verifier integration shrinks to HTTP-pass-through. The policy
 predicate is identity plus allowed `compose_hash`: app-id
@@ -399,6 +441,9 @@ The Phase 1 predicate is settled enough to implement:
 - Consul ACL `default_policy = "deny"`; tokens carry service
   identities plus explicit structured permissions for workloads that
   also use Consul as DCS.
+- Worker Consul client agents no longer receive the Consul management
+  token. They attest first and receive a Consul node-identity token
+  scoped to their attested peer_id.
 - The Connect CA stays stock; cert issuance just becomes
   ACL-gated.
 - Upgradeability beyond static allowlists is left for the future
@@ -439,8 +484,11 @@ Phase 0 resolved verifier path + cost. Current state:
    by a future policy server that exposes policy epochs / roots and
    allowed revision windows.
 
-3. **Token lifetime settled for now.** Default broker-issued Consul
-   ACL token TTL: 1 h.
+3. **Token lifetime settled for now.** Broker-issued Consul ACL
+   tokens do not expire by default because Phase 1 has no safe reload
+   path for Patroni or Envoy tokens. `ADMISSION_TOKEN_TTL` remains
+   available for experiments and should only be used with a renewal
+   implementation.
 
 4. **CAS narrowed.** CAS is not needed for the NAT PSK. It only
    applies if a later phase moves gossip key / Patroni passwords to
@@ -455,17 +503,16 @@ Phase 0 resolved verifier path + cost. Current state:
    good enough. Signed signaling is not part of the current design.
 
 7. **Verifier image selection settled.** `cluster.tf` exposes
-   `dstack_verifier_image`; use the latest-source verifier for
-   validation, and pin the exact digest in production. Upstream image
-   provenance / signature verification remains a later supply-chain
-   hardening item.
+   `dstack_verifier_image`; use a versioned verifier tag, and pin the
+   exact digest in production. Upstream image provenance / signature
+   verification remains a later supply-chain hardening item.
 
 ## Success criteria
 
-- [ ] Terraform generates a broker-readable admission policy whose
+- [x] Terraform generates a broker-readable admission policy whose
       rows are keyed by workload identity and whose allowed revisions
       are preflight-derived `compose_hash` values.
-- [ ] Every workload's Consul Connect leaf cert chains back, via
+- [x] Every workload's Consul Connect leaf cert chains back, via
       a Consul ACL token, to a TDX quote from a CVM satisfying that
       predicate.
 - [ ] `cluster.tf` no longer declares `random_bytes` for gossip
@@ -475,7 +522,7 @@ Phase 0 resolved verifier path + cost. Current state:
       binding) is rejected with a structured log line and a
       documented HTTP error code.
 - [ ] Failover demo (`FAILOVER.md`) RTO unchanged within noise.
-- [ ] A live cluster running for ≥ 1 hour shows zero ACL
+- [ ] A live cluster running for >= 1 hour shows zero ACL
       authorization failures and zero attestation rejections.
 - [ ] `consul-postgres-ha/ATTESTATION.md` exists and walks through
       the threat model + how to inspect a running cluster's

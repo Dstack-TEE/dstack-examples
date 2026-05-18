@@ -51,12 +51,12 @@ services:
       # identically to every CVM. See cluster.tf.
       - GOSSIP_KEY=${GOSSIP_KEY}
       - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
-      - CONSUL_MANAGEMENT_TOKEN=${CONSUL_MANAGEMENT_TOKEN:-}
       - MESH_CONN_DEBUG_ICE=${MESH_CONN_DEBUG_ICE:-}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock:ro
       - /tmp/dstack-runtime/secrets:/run/secrets
       - /tmp/dstack-runtime/instance:/run/instance
+      - /tmp/dstack-runtime/consul-tokens:/run/consul-tokens
       - consul-data:/consul/data
     # Healthy = bootstrap-secrets has finished and info.json is in
     # place. patroni/webdemo gate on this so they don't FATAL-restart
@@ -96,6 +96,7 @@ services:
       - PEERS_JSON=${PEERS_JSON}
     volumes:
       - /tmp/dstack-runtime/instance:/run/instance:ro
+      - /tmp/dstack-runtime/consul-tokens:/run/consul-tokens:ro
       - /tmp/dstack-runtime/secrets:/run/secrets:ro
       - patroni-pgdata:/var/lib/patroni
     depends_on:

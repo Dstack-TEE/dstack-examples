@@ -34,7 +34,7 @@ func TestPolicyMatchAllowsSharedComposeHashPerIdentity(t *testing.T) {
 	  ]
 	}`)
 
-	web, err := policy.Match("spiffe://demo/webdemo", testHash)
+	web, err := policy.Match("spiffe://demo/webdemo", testHash, "worker-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +42,7 @@ func TestPolicyMatchAllowsSharedComposeHashPerIdentity(t *testing.T) {
 		t.Fatalf("wrong web workload: %s", web.WorkloadID)
 	}
 
-	pg, err := policy.Match("spiffe://demo/postgres", testHash)
+	pg, err := policy.Match("spiffe://demo/postgres", testHash, "worker-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +63,51 @@ func TestPolicyRejectsUnknownComposeHash(t *testing.T) {
 	  }]
 	}`)
 
-	_, err := policy.Match("spiffe://demo/webdemo", "2434154969cb663afc5a73393b84cc31a1319ab6c65c9766fadd0c86bb59ef37")
+	_, err := policy.Match("spiffe://demo/webdemo", "2434154969cb663afc5a73393b84cc31a1319ab6c65c9766fadd0c86bb59ef37", "worker-1")
 	if err == nil {
 		t.Fatal("expected reject")
+	}
+}
+
+func TestPolicyAllowsNodeIdentityWithoutConsulService(t *testing.T) {
+	policy := mustPolicy(t, `{
+	  "cluster": "demo",
+	  "policy_epoch": 1,
+	  "workloads": [{
+	    "workload_id": "demo/worker/0/node",
+	    "identity": "spiffe://demo/node",
+	    "consul_permissions": {"node_identity_self": true},
+	    "allowed_compose_hashes": ["`+testHash+`"]
+	  }]
+	}`)
+
+	node, err := policy.Match("spiffe://demo/node", testHash, "worker-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.WorkloadID != "demo/worker/0/node" || !node.ConsulPermissions.NodeIdentitySelf {
+		t.Fatalf("wrong node workload: %+v", node)
+	}
+}
+
+func TestPolicyMatchesDeclaredPeerID(t *testing.T) {
+	policy := mustPolicy(t, `{
+	  "cluster": "demo",
+	  "policy_epoch": 1,
+	  "workloads": [{
+	    "workload_id": "demo/worker/0/webdemo",
+	    "identity": "spiffe://demo/webdemo",
+	    "peer_id": "worker-0",
+	    "consul_service": "webdemo",
+	    "allowed_compose_hashes": ["`+testHash+`"]
+	  }]
+	}`)
+
+	if _, err := policy.Match("spiffe://demo/webdemo", testHash, "worker-0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := policy.Match("spiffe://demo/webdemo", testHash, "worker-1"); err == nil {
+		t.Fatal("expected peer_id mismatch to reject")
 	}
 }
 
@@ -160,8 +202,8 @@ func TestAttestFlow(t *testing.T) {
 	if attest.ConsulACLToken != "secret-token" || attest.WorkloadID != "demo/worker/0/webdemo" || attest.PolicyEpoch != 7 {
 		t.Fatalf("bad response: %+v", attest)
 	}
-	if verifierSaw.Attestation != "aabbcc" {
-		t.Fatalf("verifier did not receive attestation: %+v", verifierSaw)
+	if verifierSaw.Quote != "aabbcc" {
+		t.Fatalf("verifier did not receive quote: %+v", verifierSaw)
 	}
 	if issuer.req.ConsulService != "webdemo" {
 		t.Fatalf("wrong consul service: %s", issuer.req.ConsulService)
@@ -253,6 +295,84 @@ func TestAttestCarriesConsulPermissionsFromPolicy(t *testing.T) {
 	}
 }
 
+func TestAttestCarriesNodeIdentityFromPolicy(t *testing.T) {
+	var expectedReportData string
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"is_valid": true,
+			"details": map[string]any{
+				"quote_verified":     true,
+				"event_log_verified": true,
+				"report_data":        expectedReportData,
+				"app_info":           map[string]string{"compose_hash": testHash},
+			},
+		})
+	}))
+	defer verifier.Close()
+
+	issuer := &recordingIssuer{token: "secret-token"}
+	s := &Server{
+		policy: mustPolicy(t, `{"cluster":"demo","policy_epoch":1,"workloads":[{
+			"workload_id":"demo/worker/0/node",
+			"identity":"spiffe://demo/node",
+			"consul_permissions":{"node_identity_self":true},
+			"allowed_compose_hashes":["`+testHash+`"]
+		}]}`),
+		nonces:      NewNonceStore(time.Minute),
+		verifier:    &VerifierClient{URL: verifier.URL, HTTP: verifier.Client()},
+		issuer:      issuer,
+		tokenTTL:    time.Hour,
+		now:         func() time.Time { return time.Unix(100, 0).UTC() },
+		nonceRandom: bytes.NewReader(bytes.Repeat([]byte{0x44}, 32)),
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	challengeResp, err := http.Post(ts.URL+"/v1/admission/challenge", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var challenge struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.NewDecoder(challengeResp.Body).Decode(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	_ = challengeResp.Body.Close()
+
+	statement := `{"identity":"spiffe://demo/node","peer_id":"worker-1"}`
+	expectedReportData, err = reportDataHex(hex.EncodeToString([]byte(statement)), challenge.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, _ := json.Marshal(map[string]any{
+		"identity":    "spiffe://demo/node",
+		"binding":     hex.EncodeToString([]byte(statement)),
+		"nonce":       challenge.Nonce,
+		"attestation": "aabbcc",
+	})
+	resp, err := http.Post(ts.URL+"/v1/admission/attest", "application/json", bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if issuer.req.ConsulService != "" {
+		t.Fatalf("node token must not carry service identity: %s", issuer.req.ConsulService)
+	}
+	if !issuer.req.ConsulPermissions.NodeIdentitySelf {
+		t.Fatal("node_identity_self was not carried to issuer")
+	}
+	if issuer.req.Datacenter != "demo" {
+		t.Fatalf("wrong datacenter: %s", issuer.req.Datacenter)
+	}
+	if issuer.req.PeerID != "worker-1" {
+		t.Fatalf("wrong peer id: %s", issuer.req.PeerID)
+	}
+}
+
 func TestConsulACLRules(t *testing.T) {
 	got := mustConsulACLRules(t, ConsulPermissions{
 		KeyPrefixes:   []string{"service/demo"},
@@ -269,6 +389,59 @@ func TestConsulACLRulesRequiresPeerIDForAgentReadSelf(t *testing.T) {
 	_, err := consulACLRules(ConsulPermissions{AgentReadSelf: true}, "")
 	if err == nil {
 		t.Fatal("expected peer_id requirement")
+	}
+}
+
+func TestConsulIssuerCreatesNodeIdentityToken(t *testing.T) {
+	var sawNodeIdentities []map[string]string
+	var sawServiceIdentities []map[string]string
+	var sawPolicies []map[string]string
+	var sawExpirationTTL string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/v1/acl/token" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		var body struct {
+			NodeIdentities    []map[string]string `json:"NodeIdentities"`
+			ServiceIdentities []map[string]string `json:"ServiceIdentities"`
+			Policies          []map[string]string `json:"Policies"`
+			ExpirationTTL     string              `json:"ExpirationTTL"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		sawNodeIdentities = body.NodeIdentities
+		sawServiceIdentities = body.ServiceIdentities
+		sawPolicies = body.Policies
+		sawExpirationTTL = body.ExpirationTTL
+		writeJSON(w, http.StatusOK, map[string]string{"SecretID": "issued-token"})
+	}))
+	defer ts.Close()
+
+	issuer := &ConsulIssuer{BaseURL: ts.URL, ManagementToken: "mgmt", HTTP: ts.Client()}
+	token, err := issuer.IssueToken(context.Background(), TokenRequest{
+		Description:       "test",
+		ConsulPermissions: ConsulPermissions{NodeIdentitySelf: true},
+		Datacenter:        "demo",
+		PeerID:            "worker-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "issued-token" {
+		t.Fatalf("wrong token: %s", token)
+	}
+	if len(sawNodeIdentities) != 1 || sawNodeIdentities[0]["NodeName"] != "worker-1" || sawNodeIdentities[0]["Datacenter"] != "demo" {
+		t.Fatalf("wrong node identities: %+v", sawNodeIdentities)
+	}
+	if len(sawServiceIdentities) != 0 {
+		t.Fatalf("node token must not attach service identities: %+v", sawServiceIdentities)
+	}
+	if len(sawPolicies) != 0 {
+		t.Fatalf("node token must not attach policies: %+v", sawPolicies)
+	}
+	if sawExpirationTTL != "" {
+		t.Fatalf("default node token must not expire: %s", sawExpirationTTL)
 	}
 }
 

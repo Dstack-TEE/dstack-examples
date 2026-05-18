@@ -25,7 +25,7 @@ const (
 	defaultListenAddr  = "127.0.0.1:8787"
 	defaultVerifierURL = "http://127.0.0.1:8080/verify"
 	defaultConsulURL   = "http://127.0.0.1:8500"
-	defaultTokenTTL    = time.Hour
+	defaultTokenTTL    = 0
 )
 
 func main() {
@@ -34,7 +34,7 @@ func main() {
 		verifierURL = flag.String("verifier-url", envOr("DSTACK_VERIFIER_URL", defaultVerifierURL), "dstack-verifier /verify URL")
 		consulURL   = flag.String("consul-url", envOr("CONSUL_HTTP_ADDR", defaultConsulURL), "Consul HTTP API URL")
 		policyPath  = flag.String("policy", os.Getenv("ADMISSION_POLICY_FILE"), "path to admission policy JSON")
-		tokenTTL    = flag.Duration("token-ttl", durationEnvOr("ADMISSION_TOKEN_TTL", defaultTokenTTL), "issued Consul ACL token TTL")
+		tokenTTL    = flag.Duration("token-ttl", durationEnvOr("ADMISSION_TOKEN_TTL", defaultTokenTTL), "issued Consul ACL token TTL; 0 disables expiration")
 	)
 	flag.Parse()
 
@@ -87,6 +87,7 @@ type Policy struct {
 type Workload struct {
 	WorkloadID            string            `json:"workload_id"`
 	Identity              string            `json:"identity"`
+	PeerID                string            `json:"peer_id,omitempty"`
 	ConsulService         string            `json:"consul_service"`
 	ConsulPermissions     ConsulPermissions `json:"consul_permissions,omitempty"`
 	AllowedComposeHashes  []string          `json:"allowed_compose_hashes"`
@@ -95,9 +96,10 @@ type Workload struct {
 }
 
 type ConsulPermissions struct {
-	KeyPrefixes   []string `json:"key_prefixes,omitempty"`
-	SessionWrite  bool     `json:"session_write,omitempty"`
-	AgentReadSelf bool     `json:"agent_read_self,omitempty"`
+	KeyPrefixes      []string `json:"key_prefixes,omitempty"`
+	SessionWrite     bool     `json:"session_write,omitempty"`
+	AgentReadSelf    bool     `json:"agent_read_self,omitempty"`
+	NodeIdentitySelf bool     `json:"node_identity_self,omitempty"`
 }
 
 func ParsePolicy(b []byte) (*Policy, error) {
@@ -133,8 +135,15 @@ func ParsePolicy(b []byte) (*Policy, error) {
 		if strings.TrimSpace(w.Identity) == "" {
 			return nil, fmt.Errorf("workloads[%d].identity is required", i)
 		}
-		if strings.TrimSpace(w.ConsulService) == "" {
-			return nil, fmt.Errorf("workloads[%d].consul_service is required", i)
+		w.PeerID = strings.TrimSpace(w.PeerID)
+		if w.PeerID != "" {
+			if err := validateConsulAgentName(w.PeerID); err != nil {
+				return nil, fmt.Errorf("workloads[%d].peer_id: %w", i, err)
+			}
+		}
+		w.ConsulService = strings.TrimSpace(w.ConsulService)
+		if w.ConsulService == "" && !w.ConsulPermissions.hasGrant() {
+			return nil, fmt.Errorf("workloads[%d] must define consul_service or consul_permissions", i)
 		}
 		for j, prefix := range w.ConsulPermissions.KeyPrefixes {
 			prefix = strings.Trim(prefix, "/")
@@ -160,15 +169,19 @@ func ParsePolicy(b []byte) (*Policy, error) {
 	return &p, nil
 }
 
-func (p *Policy) Match(identity, composeHash string) (*Workload, error) {
+func (p *Policy) Match(identity, composeHash, peerID string) (*Workload, error) {
 	normalized, err := normalizeComposeHash(composeHash)
 	if err != nil {
 		return nil, fmt.Errorf("invalid compose_hash from quote: %w", err)
 	}
+	peerID = strings.TrimSpace(peerID)
 	for _, w := range p.byIdentity[identity] {
-		if _, ok := w.allowedComposeHashSet[normalized]; ok {
+		if _, ok := w.allowedComposeHashSet[normalized]; ok && (w.PeerID == "" || w.PeerID == peerID) {
 			return &w, nil
 		}
+	}
+	if peerID != "" {
+		return nil, fmt.Errorf("identity %q is not allowed for compose_hash %s and peer_id %q", identity, normalized, peerID)
 	}
 	return nil, fmt.Errorf("identity %q is not allowed for compose_hash %s", identity, normalized)
 }
@@ -227,11 +240,11 @@ type AttestRequest struct {
 }
 
 type AttestResponse struct {
-	ConsulACLToken string    `json:"consul_acl_token"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	WorkloadID     string    `json:"workload_id"`
-	ComposeHash    string    `json:"compose_hash"`
-	PolicyEpoch    int       `json:"policy_epoch"`
+	ConsulACLToken string     `json:"consul_acl_token"`
+	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
+	WorkloadID     string     `json:"workload_id"`
+	ComposeHash    string     `json:"compose_hash"`
+	PolicyEpoch    int        `json:"policy_epoch"`
 }
 
 func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
@@ -264,10 +277,9 @@ func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	verified, err := s.verifier.Verify(ctx, VerifyRequest{
-		Attestation: req.Attestation,
-		Quote:       req.Quote,
-		EventLog:    rawJSONAsString(req.EventLog),
-		VMConfig:    req.VMConfig,
+		Quote:    firstNonEmpty(req.Quote, req.Attestation),
+		EventLog: rawJSONAsString(req.EventLog),
+		VMConfig: req.VMConfig,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, "VERIFIER_FAILED", err.Error())
@@ -282,17 +294,22 @@ func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workload, err := s.policy.Match(req.Identity, verified.ComposeHash)
+	workload, err := s.policy.Match(req.Identity, verified.ComposeHash, bindingStatement.PeerID)
 	if err != nil {
 		writeError(w, http.StatusForbidden, "ADMISSION_REJECTED", err.Error())
 		return
 	}
 
-	expiresAt := s.now().Add(s.tokenTTL)
+	var expiresAt *time.Time
+	if s.tokenTTL > 0 {
+		t := s.now().Add(s.tokenTTL)
+		expiresAt = &t
+	}
 	token, err := s.issuer.IssueToken(ctx, TokenRequest{
 		Description:       fmt.Sprintf("attested %s %s", workload.WorkloadID, verified.ComposeHash),
 		ConsulService:     workload.ConsulService,
 		ConsulPermissions: workload.ConsulPermissions,
+		Datacenter:        s.policy.Cluster,
 		PeerID:            bindingStatement.PeerID,
 		TTL:               s.tokenTTL,
 	})
@@ -413,10 +430,10 @@ func (s *NonceStore) gc(now time.Time) {
 }
 
 type VerifyRequest struct {
-	Attestation string `json:"attestation,omitempty"`
-	Quote       string `json:"quote"`
-	EventLog    string `json:"event_log"`
-	VMConfig    string `json:"vm_config"`
+	Attestation *string `json:"attestation"`
+	Quote       string  `json:"quote"`
+	EventLog    string  `json:"event_log"`
+	VMConfig    string  `json:"vm_config"`
 }
 
 type VerifiedQuote struct {
@@ -518,6 +535,7 @@ type TokenRequest struct {
 	Description       string
 	ConsulService     string
 	ConsulPermissions ConsulPermissions
+	Datacenter        string
 	PeerID            string
 	TTL               time.Duration
 }
@@ -533,19 +551,39 @@ type ConsulIssuer struct {
 }
 
 func (i *ConsulIssuer) IssueToken(ctx context.Context, req TokenRequest) (string, error) {
-	if req.ConsulService == "" {
-		return "", errors.New("consul service is required")
+	if req.TTL < 0 {
+		return "", errors.New("token TTL must not be negative")
 	}
 	payload := map[string]any{
-		"Description":   req.Description,
-		"ExpirationTTL": fmt.Sprintf("%ds", int(req.TTL.Seconds())),
-		"ServiceIdentities": []map[string]string{
+		"Description": req.Description,
+	}
+	if req.TTL > 0 {
+		payload["ExpirationTTL"] = fmt.Sprintf("%ds", int(req.TTL.Seconds()))
+	}
+	if req.ConsulService != "" {
+		payload["ServiceIdentities"] = []map[string]string{
 			{"ServiceName": req.ConsulService},
-		},
+		}
+	}
+	if req.ConsulPermissions.NodeIdentitySelf {
+		peerID := strings.TrimSpace(req.PeerID)
+		if err := validateConsulAgentName(peerID); err != nil {
+			return "", fmt.Errorf("node_identity_self requires attested peer_id: %w", err)
+		}
+		datacenter := strings.TrimSpace(req.Datacenter)
+		if err := validateConsulAgentName(datacenter); err != nil {
+			return "", fmt.Errorf("node_identity_self requires datacenter: %w", err)
+		}
+		payload["NodeIdentities"] = []map[string]string{
+			{"NodeName": peerID, "Datacenter": datacenter},
+		}
 	}
 	rules, err := consulACLRules(req.ConsulPermissions, req.PeerID)
 	if err != nil {
 		return "", err
+	}
+	if req.ConsulService == "" && !req.ConsulPermissions.NodeIdentitySelf && rules == "" {
+		return "", errors.New("token request must define consul service identity, node identity, or ACL rules")
 	}
 	if rules != "" {
 		policyName, err := i.EnsurePolicy(ctx, "attested-workload-"+shortSHA256(rules, 16), "Additional permissions for attested workloads", rules)
@@ -703,6 +741,10 @@ func consulACLRules(p ConsulPermissions, peerID string) (string, error) {
 		b.WriteString("session_prefix \"\" {\n  policy = \"write\"\n}\n")
 	}
 	return b.String(), nil
+}
+
+func (p ConsulPermissions) hasGrant() bool {
+	return len(p.KeyPrefixes) > 0 || p.SessionWrite || p.AgentReadSelf || p.NodeIdentitySelf
 }
 
 func validateConsulAgentName(name string) error {

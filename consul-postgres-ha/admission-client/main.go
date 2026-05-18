@@ -51,9 +51,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("dstack Info: %v", err)
 	}
-	if info.VmConfig == "" {
-		log.Fatal("dstack Info did not return vm_config; cannot verify OS image binding")
-	}
 
 	statement := BindingStatement{
 		Version:     1,
@@ -70,7 +67,7 @@ func main() {
 		log.Fatalf("marshal binding statement: %v", err)
 	}
 
-	token, err := admit(ctx, http.DefaultClient, client, splitCSV(*brokerURLs), *identity, statementBytes, info.VmConfig)
+	token, err := admit(ctx, http.DefaultClient, client, splitCSV(*brokerURLs), *identity, statementBytes)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -92,10 +89,10 @@ type BindingStatement struct {
 }
 
 type quoteClient interface {
-	Attest(context.Context, []byte) (*dstack.AttestResponse, error)
+	GetQuote(context.Context, []byte) (*dstack.GetQuoteResponse, error)
 }
 
-func admit(ctx context.Context, httpClient *http.Client, dstackClient quoteClient, brokerURLs []string, identity string, statementBytes []byte, vmConfig string) (string, error) {
+func admit(ctx context.Context, httpClient *http.Client, dstackClient quoteClient, brokerURLs []string, identity string, statementBytes []byte) (string, error) {
 	if len(brokerURLs) == 0 {
 		return "", fmt.Errorf("no broker URLs configured")
 	}
@@ -110,7 +107,7 @@ func admit(ctx context.Context, httpClient *http.Client, dstackClient quoteClien
 		lastErrs = lastErrs[:0]
 		for _, brokerURL := range brokerURLs {
 			brokerURL = strings.TrimRight(brokerURL, "/")
-			token, err := admitOne(ctx, httpClient, dstackClient, brokerURL, identity, statementBytes, vmConfig)
+			token, err := admitOne(ctx, httpClient, dstackClient, brokerURL, identity, statementBytes)
 			if err == nil {
 				return token, nil
 			}
@@ -125,7 +122,7 @@ func admit(ctx context.Context, httpClient *http.Client, dstackClient quoteClien
 	}
 }
 
-func admitOne(ctx context.Context, httpClient *http.Client, dstackClient quoteClient, brokerURL, identity string, statementBytes []byte, vmConfig string) (string, error) {
+func admitOne(ctx context.Context, httpClient *http.Client, dstackClient quoteClient, brokerURL, identity string, statementBytes []byte) (string, error) {
 	nonce, err := challenge(ctx, httpClient, brokerURL)
 	if err != nil {
 		return "", err
@@ -134,16 +131,35 @@ func admitOne(ctx context.Context, httpClient *http.Client, dstackClient quoteCl
 	if err != nil {
 		return "", err
 	}
-	attestation, err := dstackClient.Attest(ctx, reportData)
+	quote, err := dstackClient.GetQuote(ctx, reportData)
 	if err != nil {
-		return "", fmt.Errorf("Attest: %w", err)
+		return "", fmt.Errorf("GetQuote: %w", err)
+	}
+	if quote == nil {
+		return "", errors.New("GetQuote returned nil response")
+	}
+	if quote.Quote == "" {
+		return "", errors.New("GetQuote returned empty quote")
+	}
+	if quote.EventLog == "" {
+		return "", errors.New("GetQuote returned empty event_log")
+	}
+	if !json.Valid([]byte(quote.EventLog)) {
+		return "", errors.New("GetQuote returned event_log that is not JSON")
+	}
+	if quote.VmConfig == "" {
+		return "", errors.New("GetQuote returned empty vm_config")
+	}
+	if got, want := normalizeHex(quote.ReportData), hex.EncodeToString(reportData); got != want {
+		return "", fmt.Errorf("GetQuote report_data mismatch: got %s want %s", got, want)
 	}
 	return attest(ctx, httpClient, brokerURL, attestRequest{
-		Identity:    identity,
-		Binding:     hex.EncodeToString(statementBytes),
-		Nonce:       nonce,
-		Attestation: hex.EncodeToString(attestation.Attestation),
-		VMConfig:    vmConfig,
+		Identity: identity,
+		Binding:  hex.EncodeToString(statementBytes),
+		Nonce:    nonce,
+		Quote:    quote.Quote,
+		EventLog: json.RawMessage(quote.EventLog),
+		VMConfig: quote.VmConfig,
 	})
 }
 
@@ -174,11 +190,12 @@ func challenge(ctx context.Context, httpClient *http.Client, brokerURL string) (
 }
 
 type attestRequest struct {
-	Identity    string `json:"identity"`
-	Binding     string `json:"binding"`
-	Nonce       string `json:"nonce"`
-	Attestation string `json:"attestation"`
-	VMConfig    string `json:"vm_config"`
+	Identity string          `json:"identity"`
+	Binding  string          `json:"binding"`
+	Nonce    string          `json:"nonce"`
+	Quote    string          `json:"quote"`
+	EventLog json.RawMessage `json:"event_log"`
+	VMConfig string          `json:"vm_config"`
 }
 
 func attest(ctx context.Context, httpClient *http.Client, brokerURL string, payload attestRequest) (string, error) {
@@ -249,6 +266,10 @@ func shortHash(h string) string {
 		return h
 	}
 	return h[:12]
+}
+
+func normalizeHex(s string) string {
+	return strings.TrimPrefix(strings.ToLower(strings.TrimSpace(s)), "0x")
 }
 
 type httpStatusError struct {

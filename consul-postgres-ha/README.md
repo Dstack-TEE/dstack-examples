@@ -27,7 +27,7 @@ peers' ICE candidates; no data ever passes through it once peers
 connect. Per-CVM and per-cluster secrets are split: the TURN HMAC is
 derived per-CVM from dstack KMS, while cluster-wide-identical
 material (gossip key, Patroni passwords) is generated in Terraform
-and broadcast via env until attestation-rooted admission lands.
+and broadcast via env until the later TEE-derived secret phase lands.
 Connect CA uses Consul's built-in CA provider — root in Raft, no
 external derivation needed.
 
@@ -290,11 +290,12 @@ the platform plumbing untouched.
 
 | | |
 |---|---|
-| In-place env updates | Yes — change image tags or env values, `terraform apply`, CVMs update without losing pgdata. Requires provider `phala-network/phala 0.2.0-beta.3+`. |
+| In-place env updates | Yes — change image tags or env values, `terraform apply`, CVMs update without losing pgdata. Requires provider `phala-network/phala 0.2.0-beta.4+`. |
 | Failover RTO | ~24s soft-kill, ~33s hard-kill (default Patroni `ttl=30`). See [`FAILOVER.md`](FAILOVER.md). |
 | Cheap rejoin | Yes — a recovered ex-leader replays local WAL and rejoins as a streaming replica without pg_basebackup. |
 | Disk-loss rejoin | Yes — Patroni detects empty pgdata and runs full pg_basebackup over the QUIC overlay. |
 | Build provenance | Sigstore-attested via GitHub Build Provenance on every published image. Verify with `gh attestation verify oci://... --repo Dstack-TEE/dstack-examples`. |
+| Attested Consul admission | Optional with `enable_attestation_admission = true`. See [`ATTESTATION.md`](ATTESTATION.md). |
 
 ## Known limitations
 
@@ -302,14 +303,16 @@ the platform plumbing untouched.
   in parallel hits
   [`phala-cloud#247`](https://github.com/Phala-Network/phala-cloud/issues/247)
   — use `-parallelism=1` for now (~5 min × N to bring-up).
-* The mesh-conn admission story is **shared-secret based today**
-  (TURN HMAC), not attestation-based. Adding TEE attestation as the
-  admission credential is the next architectural step.
+* The low-level mesh-conn rendezvous story is **shared-secret based
+  today** (TURN HMAC), not attestation-based. Consul/Connect
+  admission can be gated by TEE attestation with
+  `enable_attestation_admission = true`; replacing rendezvous auth is
+  separate work.
 * The cluster's gossip key, Patroni superuser password, and
   replication password are **generated in Terraform and broadcast
   via env to every CVM** — a workaround, because those bytes live
   in `terraform.tfstate` and pass through whoever runs `apply`. The
-  attestation-rooted admission design
+  attestation-rooted secret design
   ([`design/attestation-admission.md`](design/attestation-admission.md))
   replaces this with TEE-derived material that no human ever sees.
 

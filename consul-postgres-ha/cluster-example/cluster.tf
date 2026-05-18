@@ -14,13 +14,11 @@ terraform {
   required_providers {
     phala = {
       source = "phala-network/phala"
-      # 0.2.0-beta.3 is the first version where in-place env-block
-      # updates actually take effect — earlier betas silently no-op'd
-      # them (Phala-Network/phala-cloud#246, fixed in
-      # Phala-Network/terraform-provider-phala#8). Pin exactly because
+      # 0.2.0-beta.4 adds phala_app_preflight and per-instance app
+      # state, both used by this example. Pin exactly because
       # Terraform's `>=` operator doesn't include later prerelease
       # versions; bump this line by hand when a newer beta ships.
-      version = "0.2.0-beta.3"
+      version = "0.2.0-beta.4"
     }
     random = {
       source  = "hashicorp/random"
@@ -92,8 +90,8 @@ variable "webdemo_image" { type = string }
 variable "patroni_image" { type = string }
 variable "dstack_verifier_image" {
   type        = string
-  default     = "dstacktee/dstack-verifier:latest"
-  description = "dstack-verifier image used by coordinators for attestation admission. Pin by digest in production."
+  default     = "dstacktee/dstack-verifier:0.5.9"
+  description = "dstack-verifier image used by coordinators for attestation admission. Use a versioned tag; pin by digest in production."
 }
 
 # External coordinator (Vultr coturn + signaling box). Used until
@@ -278,16 +276,21 @@ locals {
   # Phase-1 attestation admission policy is keyed by Terraform-defined
   # workload identity. The compose hash is revision evidence, not the
   # workload row key: the same worker compose hosts both example
-  # services, so both identities intentionally share the worker hash.
+  # services, so multiple identities intentionally share the worker
+  # hash. Each worker also has a node identity used before Consul
+  # starts, so the client agent itself joins only after attestation.
+  admission_node_identity = "spiffe://${var.cluster_name}/node"
+
   admission_service_identities = [
     {
       name           = "webdemo"
       identity       = "spiffe://${var.cluster_name}/webdemo"
       consul_service = "webdemo"
       consul_permissions = {
-        key_prefixes    = []
-        session_write   = false
-        agent_read_self = true
+        key_prefixes       = []
+        session_write      = false
+        agent_read_self    = true
+        node_identity_self = false
       }
     },
     {
@@ -295,9 +298,10 @@ locals {
       identity       = "spiffe://${var.cluster_name}/postgres"
       consul_service = var.cluster_name
       consul_permissions = {
-        key_prefixes    = ["service/${var.cluster_name}"]
-        session_write   = true
-        agent_read_self = true
+        key_prefixes       = ["service/${var.cluster_name}"]
+        session_write      = true
+        agent_read_self    = true
+        node_identity_self = false
       }
     },
   ]
@@ -321,7 +325,6 @@ locals {
       PATRONI_REPLICATION_PW  = random_bytes.patroni_replication_pw.hex
       MESH_CONN_DEBUG_ICE     = var.mesh_conn_debug_ice
       ADMISSION_BROKER_ENABLE = var.enable_attestation_admission ? "1" : ""
-      CONSUL_MANAGEMENT_TOKEN = var.consul_management_token
     }
   }
 
@@ -350,17 +353,36 @@ locals {
     }
   }
 
-  admission_workloads = flatten([
+  admission_node_workloads = [
+    for k, ordinal in local.worker_ordinals : {
+      workload_id    = "${var.cluster_name}/worker/${ordinal}/node"
+      identity       = local.admission_node_identity
+      peer_id        = "worker-${ordinal}"
+      consul_service = ""
+      consul_permissions = {
+        key_prefixes       = []
+        session_write      = false
+        agent_read_self    = false
+        node_identity_self = true
+      }
+      allowed_compose_hashes = [phala_app_preflight.worker[k].compose_hash]
+    }
+  ]
+
+  admission_service_workloads = flatten([
     for k, ordinal in local.worker_ordinals : [
       for svc in local.admission_service_identities : {
         workload_id            = "${var.cluster_name}/worker/${ordinal}/${svc.name}"
         identity               = svc.identity
+        peer_id                = "worker-${ordinal}"
         consul_service         = svc.consul_service
         consul_permissions     = svc.consul_permissions
         allowed_compose_hashes = [phala_app_preflight.worker[k].compose_hash]
       }
     ]
   ])
+
+  admission_workloads = concat(local.admission_node_workloads, local.admission_service_workloads)
 
   admission_policy_json = jsonencode({
     cluster      = var.cluster_name
@@ -379,22 +401,6 @@ locals {
 }
 
 # ---------- Coordinator ----------
-
-resource "phala_app_preflight" "coordinator" {
-  for_each = local.coordinator_ordinals
-
-  name           = "${var.cluster_name}-coordinator-${each.key}"
-  size           = "tdx.small"
-  region         = "US-WEST-1"
-  disk_size      = 20
-  storage_fs     = "zfs"
-  docker_compose = file("${path.module}/../compose/coordinator.yaml")
-  env_keys       = sort(keys(local.coordinator_preflight_env[each.key]))
-
-  listed         = false
-  public_logs    = true
-  public_sysinfo = false
-}
 
 resource "phala_app_preflight" "worker" {
   for_each = local.worker_ordinals
@@ -490,9 +496,6 @@ resource "phala_app" "worker" {
 output "coordinator_app_ids" { value = { for k, c in phala_app.coordinator : k => c.app_id } }
 output "worker_app_ids" { value = { for k, w in phala_app.worker : k => w.app_id } }
 output "admission_policy_json" { value = local.admission_policy_json }
-output "coordinator_preflight_compose_hashes" {
-  value = { for k, c in phala_app_preflight.coordinator : k => c.compose_hash }
-}
 output "worker_preflight_compose_hashes" {
   value = { for k, w in phala_app_preflight.worker : k => w.compose_hash }
 }

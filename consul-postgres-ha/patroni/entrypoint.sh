@@ -49,7 +49,7 @@ CONSUL_HTTP=127.0.0.1:8500
 CONSUL_TOKEN=""
 CONSUL_TOKEN_YAML=""
 if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
-  CONSUL_TOKEN_FILE="/run/instance/consul-token-${CLUSTER}"
+  CONSUL_TOKEN_FILE="/run/consul-tokens/consul-token-${CLUSTER}"
   echo "patroni: waiting for attestation-issued Consul token at ${CONSUL_TOKEN_FILE}"
   until [ -s "$CONSUL_TOKEN_FILE" ]; do
     sleep 1

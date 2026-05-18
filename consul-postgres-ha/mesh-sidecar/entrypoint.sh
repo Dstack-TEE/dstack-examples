@@ -139,6 +139,27 @@ for cv in $(echo "$COORDINATOR_VIPS" | tr ',' ' '); do
   RETRYJOIN+=("-retry-join=127.50.0.${cv}:8301")
 done
 
+admission_broker_urls() {
+  echo "$COORDINATOR_VIPS" | tr ',' '\n' | awk 'NF { printf "%shttp://127.50.0.%s:8787", sep, $1; sep="," }'
+}
+
+CONSUL_AGENT_TOKEN=""
+ADMISSION_BROKER_URLS=""
+if [ "$ROLE" = "worker" ] && [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
+  ADMISSION_BROKER_URLS=$(admission_broker_urls)
+  NODE_TOKEN_FILE="/tmp/consul-agent-token"
+  log "requesting attested Consul agent token (${CLUSTER_NAME}/node)"
+  /usr/local/bin/admission-client \
+    -identity "spiffe://${CLUSTER_NAME}/node" \
+    -broker-urls "$ADMISSION_BROKER_URLS" \
+    -token-file "$NODE_TOKEN_FILE" \
+    -cluster "$CLUSTER_NAME" \
+    -peer-id "$PEER_ID" \
+    -timeout 15m 2>&1 | prefix admission-client-node
+  CONSUL_AGENT_TOKEN=$(tr -d '\r\n' < "$NODE_TOKEN_FILE")
+  [ -n "$CONSUL_AGENT_TOKEN" ] || { log "attested Consul agent token is empty"; exit 1; }
+fi
+
 CONSUL_ARGS=(
   agent
   -node="$PEER_ID"
@@ -170,14 +191,15 @@ CONSUL_ARGS=(
   -log-level=INFO
 )
 if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
-  : "${CONSUL_MANAGEMENT_TOKEN:?CONSUL_MANAGEMENT_TOKEN required when admission is enabled}"
   if [ "$ROLE" = "coordinator" ]; then
+    : "${CONSUL_MANAGEMENT_TOKEN:?CONSUL_MANAGEMENT_TOKEN required on coordinators when admission is enabled}"
     CONSUL_ARGS+=(
       -hcl="acl { enabled = true default_policy = \"deny\" enable_token_persistence = true tokens { initial_management = \"${CONSUL_MANAGEMENT_TOKEN}\" agent = \"${CONSUL_MANAGEMENT_TOKEN}\" } }"
     )
   else
+    : "${CONSUL_AGENT_TOKEN:?CONSUL_AGENT_TOKEN missing after attestation admission}"
     CONSUL_ARGS+=(
-      -hcl="acl { enabled = true default_policy = \"deny\" enable_token_persistence = true tokens { agent = \"${CONSUL_MANAGEMENT_TOKEN}\" } }"
+      -hcl="acl { enabled = true default_policy = \"deny\" enable_token_persistence = true tokens { agent = \"${CONSUL_AGENT_TOKEN}\" } }"
     )
   fi
 fi
@@ -220,30 +242,11 @@ wait_consul_ready() {
   done
 }
 
-wait_consul_server_ready() {
-  local n=0
-  until [ "$(CONSUL_HTTP_TOKEN="${CONSUL_MANAGEMENT_TOKEN:-}" consul members 2>/dev/null | awk 'NR>1 && $4=="server" && $3=="alive"' | wc -l)" -gt 0 ]; do
-    n=$((n+1))
-    if [ $n -gt 300 ]; then
-      log "consul server not reachable after 10m"
-      return 1
-    fi
-    if [ $((n % 15)) -eq 0 ]; then
-      log "waiting for consul server..."
-    fi
-    sleep 2
-  done
-}
-
 # ---- 6. workers: register one Consul service+sidecar per backend, launch Envoys ----
 ENVOYS=()
 if [ "$ROLE" = "worker" ]; then
   log "waiting for local consul agent..."
   wait_consul_ready
-  if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
-    log "waiting for consul server..."
-    wait_consul_server_ready
-  fi
 
   # Iterate unique backends — one per distinct sidecar_port. For each
   # backend we render one Consul registration JSON and one Envoy
@@ -291,21 +294,24 @@ if [ "$ROLE" = "worker" ]; then
     ADMIN_PORT=$((19000 + BACKEND_IDX))
     SPEC_FILE="/tmp/sidecar-${PARENT}.json"
     ENVOY_BOOT="/tmp/envoy-${PARENT}.json"
-    TOKEN_FILE="/run/instance/consul-token-${PARENT}"
+    TOKEN_FILE="/tmp/consul-token-${PARENT}"
     BACKEND_CONSUL_TOKEN=""
 
     if [ "${ADMISSION_BROKER_ENABLE:-}" = "1" ]; then
       [ -n "$ADMISSION_IDENTITY" ] || { log "backend ${PARENT} missing admission_identity"; exit 1; }
-      BROKER_URLS=$(echo "$COORDINATOR_VIPS" | tr ',' '\n' | awk 'NF { printf "%shttp://127.50.0.%s:8787", sep, $1; sep="," }')
+      if [ "$PARENT" = "$CLUSTER_NAME" ]; then
+        TOKEN_FILE="/run/consul-tokens/consul-token-${PARENT}"
+      fi
       log "requesting admission token for ${PARENT} (${ADMISSION_IDENTITY})"
       /usr/local/bin/admission-client \
         -identity "$ADMISSION_IDENTITY" \
-        -broker-urls "$BROKER_URLS" \
+        -broker-urls "$ADMISSION_BROKER_URLS" \
         -token-file "$TOKEN_FILE" \
         -cluster "$CLUSTER_NAME" \
         -peer-id "$PEER_ID" \
         -timeout 15m 2>&1 | prefix "admission-client-${PARENT}"
-      BACKEND_CONSUL_TOKEN=$(cat "$TOKEN_FILE")
+      BACKEND_CONSUL_TOKEN=$(tr -d '\r\n' < "$TOKEN_FILE")
+      [ -n "$BACKEND_CONSUL_TOKEN" ] || { log "admission token for ${PARENT} is empty"; exit 1; }
     fi
 
     # Both patterns use a single registration with inline SidecarService:

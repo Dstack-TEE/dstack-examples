@@ -90,6 +90,8 @@ services:
     image: ${DSTACK_VERIFIER_IMAGE}
     network_mode: host
     restart: on-failure
+    volumes:
+      - /tmp/dstack-runtime/verifier-cache:/tmp/dstack-verifier/cache
 
 volumes:
   consul-data:
