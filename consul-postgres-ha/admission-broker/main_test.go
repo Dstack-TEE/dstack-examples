@@ -13,6 +13,7 @@ import (
 )
 
 const testHash = "1434154969cb663afc5a73393b84cc31a1319ab6c65c9766fadd0c86bb59ef37"
+const testKMSKey = "aabbccddeeff00112233445566778899"
 
 func TestPolicyMatchAllowsSharedComposeHashPerIdentity(t *testing.T) {
 	policy := mustPolicy(t, `{
@@ -111,6 +112,41 @@ func TestPolicyMatchesDeclaredPeerID(t *testing.T) {
 	}
 }
 
+func TestPolicyNormalizesKMSKeyProvider(t *testing.T) {
+	policy := mustPolicy(t, `{
+	  "cluster": "demo",
+	  "policy_epoch": 1,
+	  "kms": {"name": "KMS", "id": "0x`+testKMSKey+`"},
+	  "workloads": [{
+	    "workload_id": "demo/worker/0/webdemo",
+	    "identity": "spiffe://demo/webdemo",
+	    "consul_service": "webdemo",
+	    "allowed_compose_hashes": ["`+testHash+`"]
+	  }]
+	}`)
+
+	if policy.KMS == nil {
+		t.Fatal("kms policy was not parsed")
+	}
+	if policy.KMS.Name != "kms" {
+		t.Fatalf("wrong kms name: %s", policy.KMS.Name)
+	}
+	if policy.KMS.ID != testKMSKey {
+		t.Fatalf("wrong kms id: %s", policy.KMS.ID)
+	}
+}
+
+func TestDecodeKeyProviderInfo(t *testing.T) {
+	raw := hex.EncodeToString([]byte(`{"name":"kms","id":"0x` + testKMSKey + `"}`))
+	got, err := decodeKeyProviderInfo(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "kms" || got.ID != testKMSKey {
+		t.Fatalf("wrong key provider: %+v", got)
+	}
+}
+
 func TestReportDataHexBindsStatementAndNonce(t *testing.T) {
 	binding := "abcd"
 	nonce := "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
@@ -144,7 +180,11 @@ func TestAttestFlow(t *testing.T) {
 				"quote_verified":     true,
 				"event_log_verified": true,
 				"report_data":        expectedReportData,
-				"app_info":           map[string]string{"compose_hash": testHash, "app_id": "app_abc"},
+				"app_info": map[string]string{
+					"compose_hash":      testHash,
+					"app_id":            "app_abc",
+					"key_provider_info": hex.EncodeToString([]byte(`{"name":"kms","id":"` + testKMSKey + `"}`)),
+				},
 			},
 		})
 	}))
@@ -153,7 +193,7 @@ func TestAttestFlow(t *testing.T) {
 	issuer := &recordingIssuer{token: "secret-token"}
 	now := time.Unix(100, 0).UTC()
 	s := &Server{
-		policy:      mustPolicy(t, `{"cluster":"demo","policy_epoch":7,"workloads":[{"workload_id":"demo/worker/0/webdemo","identity":"spiffe://demo/webdemo","consul_service":"webdemo","allowed_compose_hashes":["`+testHash+`"]}]}`),
+		policy:      mustPolicy(t, `{"cluster":"demo","policy_epoch":7,"kms":{"name":"kms","id":"`+testKMSKey+`"},"workloads":[{"workload_id":"demo/worker/0/webdemo","identity":"spiffe://demo/webdemo","consul_service":"webdemo","allowed_compose_hashes":["`+testHash+`"]}]}`),
 		nonces:      NewNonceStore(time.Minute),
 		verifier:    &VerifierClient{URL: verifier.URL, HTTP: verifier.Client()},
 		issuer:      issuer,
@@ -212,6 +252,76 @@ func TestAttestFlow(t *testing.T) {
 	}
 	if issuer.req.PeerID != "worker-1" {
 		t.Fatalf("wrong peer id: %s", issuer.req.PeerID)
+	}
+}
+
+func TestAttestRejectsKMSMismatch(t *testing.T) {
+	var expectedReportData string
+	verifier := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"is_valid": true,
+			"details": map[string]any{
+				"quote_verified":     true,
+				"event_log_verified": true,
+				"report_data":        expectedReportData,
+				"app_info": map[string]string{
+					"compose_hash":      testHash,
+					"key_provider_info": hex.EncodeToString([]byte(`{"name":"kms","id":"3059301306072a8648ce3d020106082a8648ce3d030107034200040000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"}`)),
+				},
+			},
+		})
+	}))
+	defer verifier.Close()
+
+	s := &Server{
+		policy:      mustPolicy(t, `{"cluster":"demo","policy_epoch":1,"kms":{"name":"kms","id":"`+testKMSKey+`"},"workloads":[{"workload_id":"demo/worker/0/webdemo","identity":"spiffe://demo/webdemo","consul_service":"webdemo","allowed_compose_hashes":["`+testHash+`"]}]}`),
+		nonces:      NewNonceStore(time.Minute),
+		verifier:    &VerifierClient{URL: verifier.URL, HTTP: verifier.Client()},
+		issuer:      &recordingIssuer{token: "secret-token"},
+		tokenTTL:    time.Hour,
+		now:         func() time.Time { return time.Unix(100, 0).UTC() },
+		nonceRandom: bytes.NewReader(bytes.Repeat([]byte{0x55}, 32)),
+	}
+	ts := httptest.NewServer(s.routes())
+	defer ts.Close()
+
+	challengeResp, err := http.Post(ts.URL+"/v1/admission/challenge", "application/json", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var challenge struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.NewDecoder(challengeResp.Body).Decode(&challenge); err != nil {
+		t.Fatal(err)
+	}
+	_ = challengeResp.Body.Close()
+
+	statement := `{"identity":"spiffe://demo/webdemo","peer_id":"worker-1"}`
+	expectedReportData, err = reportDataHex(hex.EncodeToString([]byte(statement)), challenge.Nonce)
+	if err != nil {
+		t.Fatal(err)
+	}
+	buf, _ := json.Marshal(map[string]any{
+		"identity":    "spiffe://demo/webdemo",
+		"binding":     hex.EncodeToString([]byte(statement)),
+		"nonce":       challenge.Nonce,
+		"attestation": "aabbcc",
+	})
+	resp, err := http.Post(ts.URL+"/v1/admission/attest", "application/json", bytes.NewReader(buf))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	var body map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatal(err)
+	}
+	if body["code"] != "KMS_POLICY_MISMATCH" {
+		t.Fatalf("wrong error body: %+v", body)
 	}
 }
 

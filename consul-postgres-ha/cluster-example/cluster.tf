@@ -94,6 +94,17 @@ variable "dstack_verifier_image" {
   description = "dstack-verifier image used by coordinators for attestation admission. Use a versioned tag; pin by digest in production."
 }
 
+variable "kms" {
+  type        = string
+  default     = "phala"
+  description = "Phala Cloud KMS backend used for CVM provisioning. Must match admission_expected_kms_public_key when attestation admission is enabled."
+
+  validation {
+    condition     = contains(["phala", "ethereum", "base"], var.kms)
+    error_message = "kms must be one of: phala, ethereum, base."
+  }
+}
+
 # External coordinator (Vultr coturn + signaling box). Used until
 # Phala admin enables UDP ingress on dstack apps; once that lands we
 # can host coturn + signaling inside the dstack mesh and drop these
@@ -124,6 +135,21 @@ variable "consul_management_token" {
   default     = ""
   sensitive   = true
   description = "Consul management ACL token used by admission-broker to mint service-identity tokens when attestation admission is enabled."
+}
+
+variable "admission_expected_kms_public_key" {
+  type        = string
+  default     = "3059301306072a8648ce3d020106082a8648ce3d030107034200048844eb42ccdf8c52fd4f174f362fcb9bbd19c45fd48f1edec2d8f1ca23536ec1a74021b4cee610c074f8294d431b2b7fee2c39e5333fdaf0a4522d43fb159d9f"
+  description = "Expected dstack key-provider public key hex from verifier app_info.key_provider_info.id. Defaults to the public key for the default phala KMS backend; override when kms is changed."
+
+  validation {
+    condition = (
+      var.admission_expected_kms_public_key == "" ||
+      can(regex("^(0x)?[0-9a-fA-F]+$", var.admission_expected_kms_public_key)) &&
+      length(trimprefix(lower(var.admission_expected_kms_public_key), "0x")) % 2 == 0
+    )
+    error_message = "admission_expected_kms_public_key must be empty or even-length hex, with optional 0x prefix."
+  }
 }
 
 # ---------- Cluster topology + VIP allocation ----------
@@ -387,7 +413,11 @@ locals {
   admission_policy_json = jsonencode({
     cluster      = var.cluster_name
     policy_epoch = 1
-    workloads    = local.admission_workloads
+    kms = var.admission_expected_kms_public_key == "" ? null : {
+      name = "kms"
+      id   = var.admission_expected_kms_public_key
+    }
+    workloads = local.admission_workloads
   })
 
   coordinator_env = {
@@ -408,6 +438,7 @@ resource "phala_app_preflight" "worker" {
   name           = "${var.cluster_name}-worker-${each.key}"
   size           = "tdx.small"
   region         = "US-WEST-1"
+  kms            = var.kms
   disk_size      = 20
   storage_fs     = "zfs"
   docker_compose = file("${path.module}/../compose/worker.yaml")
@@ -428,6 +459,7 @@ resource "phala_app" "coordinator" {
   name           = "${var.cluster_name}-coordinator-${each.key}"
   size           = "tdx.small"
   region         = "US-WEST-1"
+  kms            = var.kms
   disk_size      = 20
   replicas       = 1
   storage_fs     = "zfs" # MUST pin (terraform-provider-phala#5)
@@ -447,6 +479,10 @@ resource "phala_app" "coordinator" {
       condition     = !var.enable_attestation_admission || var.consul_management_token != ""
       error_message = "consul_management_token must be set when enable_attestation_admission is true."
     }
+    precondition {
+      condition     = !var.enable_attestation_admission || var.admission_expected_kms_public_key != ""
+      error_message = "admission_expected_kms_public_key must be set when enable_attestation_admission is true."
+    }
   }
 }
 
@@ -462,6 +498,7 @@ resource "phala_app" "worker" {
   name           = "${var.cluster_name}-worker-${each.key}"
   size           = "tdx.small"
   region         = "US-WEST-1"
+  kms            = var.kms
   disk_size      = 20
   replicas       = 1
   storage_fs     = "zfs"

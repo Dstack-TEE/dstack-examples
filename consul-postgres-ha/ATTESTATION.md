@@ -9,6 +9,9 @@ Enable it in `cluster-example/terraform.tfvars`:
 enable_attestation_admission = true
 consul_management_token      = "<consul-acl-management-token>"
 dstack_verifier_image        = "dstacktee/dstack-verifier:0.5.9"
+kms                          = "phala"
+# admission_expected_kms_public_key defaults to the public key for the
+# default phala KMS backend. Override it when changing kms.
 ```
 
 Use a versioned verifier tag and pin it by digest for production.
@@ -32,8 +35,9 @@ current dstack guest agents: `quote`, `event_log`, and `vm_config`.
    sends `{identity, binding, nonce, quote, event_log, vm_config}` to
    the broker.
 6. The broker verifies the quote through `dstack-verifier`, checks
-   report-data binding and nonce freshness, then matches identity,
-   peer id, and compose hash against the Terraform policy.
+   report-data binding, nonce freshness, and KMS key-provider
+   identity, then matches identity, peer id, and compose hash against
+   the Terraform policy.
 7. On success the broker mints a scoped Consul ACL token. Worker
    agents receive a node-identity token; service workloads receive
    service-identity tokens plus any declared Consul permissions.
@@ -103,11 +107,25 @@ as:
 - `event_log_verified == true`
 - `report_data` present and equal to the broker-computed digest
 - `app_info.compose_hash` present and policy-allowed
+- `app_info.key_provider_info` present and equal to the policy-pinned
+  KMS provider id
 
 KMS identity should be policy-controlled because it defines the key
-lifecycle. A production policy should pin the long-term KMS public
-key or an equivalent well-known KMS identity that is hard-coded in
-Terraform and checked against verified dstack evidence.
+lifecycle. This example pins the long-term KMS public key in
+Terraform as `admission_expected_kms_public_key` and checks it
+against the verifier-returned `app_info.key_provider_info`. The
+verifier field is a hex-encoded JSON payload:
+
+```json
+{
+  "name": "kms",
+  "id": "<public-key-hex>"
+}
+```
+
+The pinned key must match the `kms` backend used in the Phala launch
+configuration. The Terraform default matches the example's default
+`kms = "phala"` backend; override it when changing KMS backend.
 
 For production profiles, OS image identity should also be checked.
 The expected OS image hash should be both a Terraform launch setting

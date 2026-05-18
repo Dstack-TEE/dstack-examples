@@ -36,9 +36,9 @@ deployment model, trust model, or operational status.
 - Terraform slot API: integrate the newly implemented Phala Cloud
   slot API into the Terraform deployment flow. Tracking note:
   `design/terraform-slot-api.md`.
-- KMS policy: pin the long-term KMS public key or equivalent KMS
-  identity in Terraform and require the verifier-proven KMS evidence
-  to match it.
+- KMS policy: Terraform now carries the selected KMS backend and the
+  expected long-term KMS public key; admission requires the verifier
+  returned key-provider evidence to match it.
 - Production OS policy: when a production profile is enabled, include
   the expected OS image hash in both Phala launch config and admission
   policy.

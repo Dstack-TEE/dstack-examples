@@ -78,9 +78,15 @@ func main() {
 type Policy struct {
 	Cluster     string     `json:"cluster"`
 	PolicyEpoch int        `json:"policy_epoch"`
+	KMS         *KMSPolicy `json:"kms,omitempty"`
 	Workloads   []Workload `json:"workloads"`
 
 	byIdentity map[string][]Workload
+}
+
+type KMSPolicy struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
 }
 
 type Workload struct {
@@ -114,6 +120,11 @@ func ParsePolicy(b []byte) (*Policy, error) {
 	}
 	if p.PolicyEpoch <= 0 {
 		return nil, errors.New("policy_epoch must be positive")
+	}
+	if p.KMS != nil {
+		if err := normalizeKeyProviderInfo(p.KMS); err != nil {
+			return nil, fmt.Errorf("kms: %w", err)
+		}
 	}
 	if len(p.Workloads) == 0 {
 		return nil, errors.New("workloads must not be empty")
@@ -185,6 +196,21 @@ func (p *Policy) Match(identity, composeHash, peerID string) (*Workload, error) 
 	return nil, fmt.Errorf("identity %q is not allowed for compose_hash %s", identity, normalized)
 }
 
+func (p *Policy) CheckKMS(verified *VerifiedQuote) error {
+	if p.KMS == nil {
+		return nil
+	}
+	if verified.KeyProvider == nil {
+		return errors.New("verifier response missing app_info.key_provider_info")
+	}
+	if verified.KeyProvider.Name != p.KMS.Name || verified.KeyProvider.ID != p.KMS.ID {
+		return fmt.Errorf("kms key provider mismatch: got %s/%s want %s/%s",
+			verified.KeyProvider.Name, shortHex(verified.KeyProvider.ID),
+			p.KMS.Name, shortHex(p.KMS.ID))
+	}
+	return nil
+}
+
 func normalizeComposeHash(h string) (string, error) {
 	h = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(h), "0x"))
 	if len(h) != 64 {
@@ -194,6 +220,33 @@ func normalizeComposeHash(h string) (string, error) {
 		return "", err
 	}
 	return h, nil
+}
+
+func normalizeKeyProviderInfo(k *KMSPolicy) error {
+	k.Name = strings.ToLower(strings.TrimSpace(k.Name))
+	if k.Name == "" {
+		return errors.New("name is required")
+	}
+	id, err := normalizeHexBytes(k.ID)
+	if err != nil {
+		return fmt.Errorf("id: %w", err)
+	}
+	k.ID = id
+	return nil
+}
+
+func normalizeHexBytes(s string) (string, error) {
+	s = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(s), "0x"))
+	if s == "" {
+		return "", errors.New("must not be empty")
+	}
+	if len(s)%2 != 0 {
+		return "", fmt.Errorf("hex length must be even, got %d", len(s))
+	}
+	if _, err := hex.DecodeString(s); err != nil {
+		return "", fmt.Errorf("must be hex: %w", err)
+	}
+	return s, nil
 }
 
 type Server struct {
@@ -290,6 +343,10 @@ func (s *Server) handleAttest(w http.ResponseWriter, r *http.Request) {
 	}
 	if !strings.EqualFold(strings.TrimPrefix(verified.ReportData, "0x"), reportData) {
 		writeError(w, http.StatusForbidden, "REPORT_DATA_MISMATCH", "attestation report_data does not match binding statement and nonce")
+		return
+	}
+	if err := s.policy.CheckKMS(verified); err != nil {
+		writeError(w, http.StatusForbidden, "KMS_POLICY_MISMATCH", err.Error())
 		return
 	}
 
@@ -444,6 +501,7 @@ type VerifiedQuote struct {
 	ComposeHash string
 	AppID       string
 	ReportData  string
+	KeyProvider *KMSPolicy
 }
 
 type VerifierClient struct {
@@ -485,6 +543,7 @@ func (c *VerifierClient) Verify(ctx context.Context, req VerifyRequest) (*Verifi
 		AppInfo          struct {
 			AppID       string `json:"app_id"`
 			ComposeHash string `json:"compose_hash"`
+			KeyProvider string `json:"key_provider_info"`
 		} `json:"app_info"`
 		Details struct {
 			QuoteVerified    bool   `json:"quote_verified"`
@@ -493,6 +552,7 @@ func (c *VerifierClient) Verify(ctx context.Context, req VerifyRequest) (*Verifi
 			AppInfo          struct {
 				AppID       string `json:"app_id"`
 				ComposeHash string `json:"compose_hash"`
+				KeyProvider string `json:"key_provider_info"`
 			} `json:"app_info"`
 		} `json:"details"`
 	}
@@ -505,6 +565,7 @@ func (c *VerifierClient) Verify(ctx context.Context, req VerifyRequest) (*Verifi
 	reportData := firstNonEmpty(parsed.ReportData, parsed.Details.ReportData)
 	appID := firstNonEmpty(parsed.AppInfo.AppID, parsed.Details.AppInfo.AppID)
 	composeHashRaw := firstNonEmpty(parsed.AppInfo.ComposeHash, parsed.Details.AppInfo.ComposeHash)
+	keyProviderRaw := firstNonEmpty(parsed.AppInfo.KeyProvider, parsed.Details.AppInfo.KeyProvider)
 
 	valid := parsed.IsValid && quoteVerified && eventLogVerified
 	reason := firstNonEmpty(parsed.Reason, parsed.Error)
@@ -524,13 +585,40 @@ func (c *VerifierClient) Verify(ctx context.Context, req VerifyRequest) (*Verifi
 			return nil, fmt.Errorf("verifier app_info.compose_hash: %w", err)
 		}
 	}
+	var keyProvider *KMSPolicy
+	if keyProviderRaw != "" {
+		keyProvider, err = decodeKeyProviderInfo(keyProviderRaw)
+		if err != nil {
+			return nil, fmt.Errorf("verifier app_info.key_provider_info: %w", err)
+		}
+	}
 	return &VerifiedQuote{
 		Valid:       valid,
 		Reason:      reason,
 		ComposeHash: composeHash,
 		AppID:       appID,
 		ReportData:  strings.TrimPrefix(strings.ToLower(strings.TrimSpace(reportData)), "0x"),
+		KeyProvider: keyProvider,
 	}, nil
+}
+
+func decodeKeyProviderInfo(raw string) (*KMSPolicy, error) {
+	raw, err := normalizeHexBytes(raw)
+	if err != nil {
+		return nil, err
+	}
+	b, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, err
+	}
+	var k KMSPolicy
+	if err := json.Unmarshal(b, &k); err != nil {
+		return nil, fmt.Errorf("decoded payload is not key-provider JSON: %w", err)
+	}
+	if err := normalizeKeyProviderInfo(&k); err != nil {
+		return nil, err
+	}
+	return &k, nil
 }
 
 type TokenRequest struct {
@@ -769,6 +857,13 @@ func shortSHA256(s string, hexChars int) string {
 		return out
 	}
 	return out[:hexChars]
+}
+
+func shortHex(s string) string {
+	if len(s) <= 16 {
+		return s
+	}
+	return s[:16]
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
