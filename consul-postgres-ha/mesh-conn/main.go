@@ -555,6 +555,7 @@ func (m *Mesh) dialAndPump(parentCtx context.Context, peer Peer, sess *peerSessi
 	sess.mu.Lock()
 	sess.consumedAuth = [2]string{}
 	sess.consumedAt = time.Time{}
+	sess.linkUp = false
 	sess.abortAttempt = abort
 	sess.mu.Unlock()
 	defer func() {
@@ -565,6 +566,7 @@ func (m *Mesh) dialAndPump(parentCtx context.Context, peer Peer, sess *peerSessi
 		if sess.abortAttempt != nil {
 			sess.abortAttempt = nil
 		}
+		sess.linkUp = false
 		sess.mu.Unlock()
 	}()
 
@@ -694,6 +696,9 @@ func (m *Mesh) dialAndPump(parentCtx context.Context, peer Peer, sess *peerSessi
 
 	log.Printf("[%s] link up — peer vip=127.50.0.%d, allowlist=%v (udp=%d, tcp=%d)",
 		peer.ID, peer.Vip, allowlistPorts(cfg.Allowlist), udpPortCount, len(tcpListeners))
+	sess.mu.Lock()
+	sess.linkUp = true
+	sess.mu.Unlock()
 	if m.onLinkUp != nil {
 		m.onLinkUp(peer.ID)
 	}
@@ -1057,9 +1062,26 @@ type peerSession struct {
 	agent           *ice.Agent         // replaced on every dialICE attempt; guarded by mu
 	consumedAuth    [2]string          // ufrag,pwd dialICE pulled off authCh; zero before
 	consumedAt      time.Time          // when consumedAuth was last set; zero before
+	linkUp          bool               // true after QUIC + forwarders are established
 	abortAttempt    context.CancelFunc // non-nil for the duration of an attempt
 	candidateBuffer []ice.Candidate    // remote candidates seen since last peer-auth; replayed into each new agent
 }
+
+const (
+	// pion transitions Checking -> Disconnected after this period without
+	// a viable selected pair. Disconnected is log-only for mesh-conn.
+	iceDisconnectedTimeout = 30 * time.Second
+
+	// pion transitions Disconnected -> Failed after this additional
+	// period. The ICE state callback aborts the attempt on Failed.
+	iceFailedTimeout = 60 * time.Second
+
+	// dialAttemptTimeout is only a guardrail for a stuck pion call path:
+	// it must be longer than pion's own failure budget so mesh-conn does
+	// not cancel a legitimate slow ICE attempt before the ICE state
+	// machine reaches Failed.
+	dialAttemptTimeout = iceDisconnectedTimeout + iceFailedTimeout + 15*time.Second
+)
 
 // supersedeGrace is the minimum time an attempt must have been
 // running with consumedAuth set before pollLoop will supersede it on
@@ -1157,10 +1179,6 @@ func (m *Mesh) dialICE(remoteID string, sess *peerSession, attemptCtx context.Co
 	//    Disconnected stretch in the log timeline. We keep it at
 	//    30 s rather than 0 so the existing log signal is preserved
 	//    if pion ever does have a sustained outage but recovers.
-	const (
-		iceDisconnectedTimeout = 30 * time.Second
-		iceFailedTimeout       = 60 * time.Second
-	)
 	disconnectedTimeout := iceDisconnectedTimeout
 	failedTimeout := iceFailedTimeout
 	agentCfg := &ice.AgentConfig{
@@ -1282,10 +1300,10 @@ waitRemoteAuth:
 		m.onAttemptStarted(remoteID)
 	}
 
-	// 60s safety net; pion's default connectivity-check window is 30s
-	// so if Dial/Accept hasn't succeeded by then the state callback
-	// will have already fired abortAttempt.
-	dialTimer := time.AfterFunc(60*time.Second, func() {
+	// Safety net for a wedged Dial/Accept call path. This intentionally
+	// exceeds pion's Checking+Disconnected failure budget; ordinary
+	// failure is handled by the ICE Failed state callback above.
+	dialTimer := time.AfterFunc(dialAttemptTimeout, func() {
 		sess.mu.Lock()
 		if sess.abortAttempt != nil {
 			sess.abortAttempt()
@@ -1419,7 +1437,10 @@ func (m *Mesh) pollLoop(ctx context.Context) {
 				sess.mu.Lock()
 				sess.candidateBuffer = nil
 				zero := [2]string{}
-				if sess.abortAttempt != nil &&
+				if sess.linkUp {
+					log.Printf("[%s] fresh auth (ufrag=%s) queued for next attempt; current link is up",
+						msg.From, newAuth[0])
+				} else if sess.abortAttempt != nil &&
 					sess.consumedAuth != zero &&
 					sess.consumedAuth != newAuth {
 					elapsed := time.Since(sess.consumedAt)

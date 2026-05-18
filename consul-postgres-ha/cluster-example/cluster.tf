@@ -438,7 +438,6 @@ resource "phala_app_preflight" "worker" {
   name           = "${var.cluster_name}-worker-${each.key}"
   size           = "tdx.small"
   region         = "US-WEST-1"
-  kms            = var.kms
   disk_size      = 20
   storage_fs     = "zfs"
   docker_compose = file("${path.module}/../compose/worker.yaml")
