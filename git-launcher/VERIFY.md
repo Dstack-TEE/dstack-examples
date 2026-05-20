@@ -1,10 +1,33 @@
 # Verifying a git-launcher deployment
 
-How a relying party verifies that a dstack CVM is running
-`git-launcher` and that the workload commit executed inside the
-TEE is the one they audited.
+Use this guide when you need to verify that a dstack CVM is running
+`git-launcher` and that the workload commit executed inside the TEE is the
+one you audited.
 
-## Quick path (default mode, 4 steps)
+Successful verification proves a deployment-level identity:
+
+- the CVM attests to the expected dstack measurements and compose hash;
+- the attested compose selects the expected launcher image digest;
+- the launcher image digest has the expected Sigstore build provenance;
+- the attested launcher config selects the expected workload repo and commit;
+- the workload repo at that commit contains the code you reviewed.
+
+It does not prove that every response from the workload is signed by that
+commit. If you need per-response identity, implement signing inside the
+workload with a key released under the dstack KMS policy.
+
+Before you start, collect:
+
+- the CVM ID, app ID, instance ID, or name;
+- the expected launcher image digest;
+- the expected `REPO_URL` and full `COMMIT_SHA`;
+- any expected `REPO_SUBDIR`, `ENTRYPOINT_SCRIPT`, `RUN_CMD`, or
+  `INSTALL_CMD`;
+- the expected dstack OS reference values for `mrtd`, `rtmr0`, `rtmr1`, and
+  `rtmr2`;
+- the workload repo checkout you intend to audit.
+
+## Quick path (default mode, 3 checks)
 
 In default mode the workload repo provides its own `entrypoint.sh` at the
 pinned commit, so the trust-bearing config is `REPO_URL + COMMIT_SHA`
@@ -21,14 +44,13 @@ flowchart LR
     B --> D[upstream repo at COMMIT_SHA<br/>incl. the chosen entry script]
 ```
 
-1. **Verify the dstack attestation, and compare reference values.**
+1. **Compare the dstack attestation with your expected deployment.**
    `phala cvms attestation --cvm-id <id> --json` and feed the TDX quote
    into the dstack verifier (or trust the Phala Cloud verifier as a lite
-   path). Then compare the attestation's measurements against
-   pre-published reference values: `mrtd` and `rtmr0`–`rtmr2` against the
-   dstack OS image you expect, the `compose-hash` event against
-   `sha256(tcb_info.app_compose)`, the launcher image digest inside the
-   attested compose against your audited release digest, and the
+   path). Compare `mrtd` and `rtmr0`-`rtmr2` with the dstack OS image
+   reference values, the `compose-hash` event with
+   `sha256(tcb_info.app_compose)`, the launcher image digest in the
+   attested compose with your audited release digest, and the
    attested `REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` /
    `ENTRYPOINT_SCRIPT` if present) against the workload pin you intended
    to deploy. The deep-path checklist below has the exact extraction
@@ -41,13 +63,13 @@ flowchart LR
    `COMMIT_SHA` and review it. In default mode this single review covers
    the workload code *and* its entry point `entrypoint.sh`; no separate
    install/run command audit is needed.
-4. **Spot-check runtime logs.** `phala logs --cvm-id <id>` should show
-   `scrubbing checkout`, `HEAD verified: <COMMIT_SHA>`, and
-   `exec in <dir>: bash entrypoint.sh`. Logs are corroborating only; the
-   trust root is steps 1–3.
 
-If all four line up, the bytes executing in the TEE are exactly the
+If all three checks line up, the bytes executing in the TEE are exactly the
 upstream commit you audited, produced by an audited launcher.
+
+As a smoke check, `phala logs --cvm-id <id>` should show `scrubbing checkout`,
+`HEAD verified: <COMMIT_SHA>`, and `exec in <dir>: bash entrypoint.sh`. Logs
+are not signed evidence; the trust root is the three checks above.
 
 > **Advanced mode adds one step.** If the launcher config sets `RUN_CMD`
 > (and optionally `INSTALL_CMD`) instead of relying on `entrypoint.sh`,
@@ -268,7 +290,7 @@ during config summary, then the checkout/scrub/verify lines, then the `exec`
 line, so they appear in this order):
 
 ```
-[git-launcher] mode:     default (workload repo entrypoint.sh)
+[git-launcher] mode:     default (workload repo entry script)
 [git-launcher] checking out <COMMIT_SHA>
 [git-launcher] scrubbing checkout
 [git-launcher] HEAD verified: <COMMIT_SHA>

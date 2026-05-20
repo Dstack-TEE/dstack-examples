@@ -1,56 +1,88 @@
 # git-launcher
 
-A minimal, auditable Git launcher image for dstack. Given a config file that
-names an upstream Git repo and a full commit SHA, the launcher fetches that
-exact commit, verifies `HEAD` after checkout, and runs the workload's own
-entry point script — with no fallback to branches, tags, or short SHAs.
+`git-launcher` runs a workload from one exact Git commit inside a dstack
+container. You give it a Git repository URL, a full commit SHA, and a checkout
+directory. It fetches that commit, verifies that `HEAD` is exactly the commit
+you configured, and then hands control to the workload's entry script.
 
-The name is literal: this image launches arbitrary Git input, but only at an
-explicit commit selected by attested config. It does not make the workload
-trustworthy by itself. Its job is to make the identity of what runs in the TEE
-checkable by combining TEE attestation, an auditable launcher image digest, and
-an attested config that names the workload commit. Whether the workload at that
-commit is itself trustworthy is up to the auditor.
+Use it when you want a generic launcher image whose image digest is stable and
+auditable, while the workload identity comes from an attested config file.
+The launcher does not make arbitrary code trustworthy by itself. It makes the
+question "which bytes ran in the TEE?" answerable.
 
-By convention, **the workload repo provides its own bash entry point at
-`entrypoint.sh`** (default mode). This keeps install/build/run logic inside
-the workload repo, where it is covered by source provenance of the pinned
-`COMMIT_SHA` and is **not** a trust-bearing field in the launcher config.
-A verifier therefore audits two things: the launcher image's identity, and
-the `REPO_URL` + `COMMIT_SHA` pair (plus `REPO_SUBDIR` and
-`ENTRYPOINT_SCRIPT` when used, since each selects *which* script runs) in
-the attested config.
+## What it pins
 
-The launcher image is **generic**: its digest attests the launcher's
-implementation, not the workload. The workload identity comes from the
-config file, which must be attested separately (see [Trust model](#trust-model)).
+`git-launcher` has two trust inputs:
 
-This is a separate example from [`launcher/`](../launcher), which is a
-Docker Compose auto-update pattern. This launcher does the opposite — it
-*prevents* auto-update by pinning to one full commit SHA per deploy.
+| Input | What it identifies | How a verifier checks it |
+| --- | --- | --- |
+| Launcher image digest | The launcher implementation in this directory | Verify the published image digest and its Sigstore build-provenance attestation |
+| Launcher config | The workload repo, commit, and selected entry script | Verify the config through dstack `compose_hash` / `config_id`, or through a derived image digest |
 
-## Preparing a workload repo
+The launcher image is generic. The same image digest can run different
+workloads if the attested config changes. A production verifier must therefore
+check both the image digest and the config.
 
-For a repo you control, use default mode. Put a bash entry script in the repo
-and let the launcher do only the Git pinning:
+For the full verifier procedure, see [Verifying a git-launcher deployment](./VERIFY.md).
+
+## When to use it
+
+Use `git-launcher` when:
+
+- You need to deploy a workload from a specific Git commit, not a branch or tag.
+- You want the launcher image to stay small enough to audit directly.
+- You want workload install, build, and run logic to live in the workload repo.
+- You can attest the launcher config with dstack compose measurements or a
+  derived image digest.
+
+Do not use it when:
+
+- You want automatic updates from a branch or tag. Use [`launcher/`](../launcher)
+  for that pattern.
+- The workload cannot tolerate a clean checkout on every boot.
+- You need per-response cryptographic identity from the workload. The launcher
+  provides deployment-level identity only; the workload must sign its own
+  responses if that property is required.
+
+## How it works
+
+On startup, `git-launcher`:
+
+1. Parses a line-oriented config file. The config is parsed, not sourced.
+2. Rejects missing required keys, unknown keys, short SHAs, branches, and tags.
+3. Creates or reuses `WORK_DIR` if it is a Git checkout for the same `REPO_URL`.
+4. Runs `git fetch --tags --prune origin`.
+5. Checks out `COMMIT_SHA` in detached mode.
+6. Runs `git reset --hard COMMIT_SHA` and `git clean -ffdx`.
+7. Verifies `git rev-parse HEAD` equals `COMMIT_SHA`.
+8. Runs the workload entry script, or advanced `RUN_CMD` mode if configured.
+
+Missing commits are hard failures. There is no fallback to a branch, tag,
+latest commit, or previous checkout.
+
+## Prepare a workload repo
+
+For workloads you control, use default mode: put a Bash entry script in the
+workload repository and pin the commit that contains it.
 
 ```text
 example-workload/
   entrypoint.sh
-  ...
+  scripts/
+  src/
 ```
 
 `entrypoint.sh` is the workload boundary. It should:
 
-* Install or validate whatever runtime the workload needs.
-* Build or prepare the application from the pinned source tree.
-* Be idempotent across container restarts.
-* Fail closed when install, build, config validation, or startup fails.
-* `exec` the long-running workload process so it becomes PID 1.
-* Keep mutable state, databases, uploads, retained bodies, and build caches
-  outside `WORK_DIR`.
+- Install or validate the runtime dependencies the workload needs.
+- Build or prepare the application from the pinned source tree.
+- Be safe to run again after a container restart.
+- Exit non-zero when install, build, configuration, or startup fails.
+- `exec` the long-running workload process so it becomes PID 1.
+- Keep mutable state, databases, uploads, retained request bodies, and build
+  caches outside `WORK_DIR`.
 
-A minimal shape:
+A minimal entry script looks like this:
 
 ```bash
 #!/usr/bin/env bash
@@ -59,12 +91,73 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)
 cd "$SCRIPT_DIR"
 
-# Example only: replace with your workload's real install/build/run steps.
 ./scripts/build.sh
 exec ./bin/server
 ```
 
-Deployment config should keep the source checkout and workload state separate:
+The launcher runs the script with `bash entrypoint.sh`, so the file does not
+need the executable bit.
+
+## Write the launcher config
+
+Create an env-file style config:
+
+```conf
+REPO_URL=https://github.com/example-org/example-workload.git
+COMMIT_SHA=<full-40-or-64-hex-sha>
+WORK_DIR=/var/lib/git-launcher/example-workload
+```
+
+Rules:
+
+- `COMMIT_SHA` must be a full 40-hex SHA-1 or 64-hex SHA-256 commit hash.
+- `WORK_DIR` is a checkout cache, not application state.
+- Blank lines and lines starting with `#` are ignored.
+- Matching single or double quotes around a value are stripped once.
+- Unknown keys are rejected.
+- Values are not shell-expanded during parsing.
+
+## Run locally
+
+Local runs require `bash`, `git`, and standard coreutils. After writing a
+config file for a real workload commit, run the launcher script directly:
+
+```sh
+./bin/git-launcher ./config.conf
+```
+
+Expected startup logs include:
+
+```text
+[git-launcher] config:   ./config.conf
+[git-launcher] repo:     https://github.com/example-org/example-workload.git
+[git-launcher] commit:   <COMMIT_SHA>
+[git-launcher] mode:     default (workload repo entry script)
+[git-launcher] checking out <COMMIT_SHA>
+[git-launcher] scrubbing checkout
+[git-launcher] HEAD verified: <COMMIT_SHA>
+[git-launcher] exec in /var/lib/git-launcher/example-workload: bash entrypoint.sh
+```
+
+Logs are useful for development and smoke tests. They are not signed evidence;
+remote verification must use dstack attestation and the image provenance chain
+described in [VERIFY.md](./VERIFY.md).
+
+## Deploy with dstack
+
+Always pin the launcher image by OCI digest:
+
+```yaml
+image: docker.io/<org>/git-launcher@sha256:<launcher-digest>
+```
+
+Do not deploy by mutable tag in production.
+
+### Recommended: attest config through compose
+
+Put the launcher config in the compose file with `configs:`. dstack measures
+the compose into the attested app config, so changing either the image digest
+or the workload pin changes the attestation.
 
 ```yaml
 services:
@@ -80,6 +173,7 @@ services:
       - workload-checkout:/var/lib/git-launcher
       - workload-state:/var/lib/example-workload
       - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: unless-stopped
 
 configs:
   pin:
@@ -93,234 +187,32 @@ volumes:
   workload-state:
 ```
 
-Use Docker Compose `environment:` for non-secret runtime configuration that
-should be visible in the attested deployment. Use dstack encrypted secrets,
-dstack KMS, or mounted secret files for secrets. If the workload needs dstack
-KMS keys or quotes, mount `/var/run/dstack.sock` and let the workload use the
-dstack SDK.
+Use Docker Compose `environment:` for non-secret runtime settings that should
+be visible in the attested deployment. Use dstack encrypted secrets, dstack
+KMS, or mounted secret files for secrets.
 
-Before deploying, audit the workload commit, then put its full commit hash in
-`COMMIT_SHA`. Do not use a branch, tag, or short SHA; the launcher rejects
-them.
+Mount `/var/run/dstack.sock` when the workload uses the dstack SDK for KMS keys
+or TDX quotes. The launcher does not use the socket directly.
 
-## What this is — and what it is not
+### Alternative: bake config into a derived image
 
-The launcher is **not** the workload. It is intentionally tiny so the contents
-of this directory at a given commit can be read end-to-end before trusting it
-to bootstrap anything else.
+If you want one image digest to determine both the launcher and the workload
+pin, build a small downstream image:
 
-| Layer | Lives in | Job |
-| --- | --- | --- |
-| Launcher | this directory | Fetch and run *one* program from *one* pinned upstream commit. |
-| Workload | a separate upstream Git repo | The actual application — business logic, secrets handling, network surface. |
-
-The launcher's only job is to make sure that, given a config, the bytes that
-end up running inside the dstack VM are exactly the bytes at a specific commit
-in a specific upstream Git repo. Everything else lives in that upstream repo.
-
-## Trust model
-
-The launcher image and the config file are two separate trust inputs, and a
-verifier must attest both. The launcher image alone does **not** determine
-which workload commit runs.
-
-For a step-by-step verifier checklist that chains dstack attestation to the
-pinned workload commit, see [`VERIFY.md`](./VERIFY.md).
-
-```
-launcher image digest ──►  launcher implementation identity
-                           (this directory at commit L; the release
-                            workflow publishes a Sigstore build-provenance
-                            attestation that binds the image digest to a
-                            specific GitHub workflow run / repo / ref /
-                            SHA. This is a signed chain of custody, not a
-                            claim of bit-for-bit reproducibility.)
-
-launcher config file  ──►  workload pin
-                           (REPO_URL + full COMMIT_SHA U; selects which
-                            upstream commit gets fetched and run)
-
-                       ──►  workload running inside the TEE
-                           = workload repo at commit U,
-                             starting from its entrypoint.sh
+```dockerfile
+FROM docker.io/<org>/git-launcher@sha256:<launcher-digest>
+COPY web-app.conf /etc/git-launcher/config.conf
+CMD ["/etc/git-launcher/config.conf"]
 ```
 
-The published launcher image is a **generic** runner: the same image digest
-can drive any pinned workload, depending on which config it is started with.
-The config is therefore part of the deployment's trust surface and must be
-attested separately. dstack provides a few standard ways to do that — pick
-the one that matches how strictly you want to bind the workload pin to the
-attestation:
+Deploy the derived image by its own digest. The derived image digest now binds
+the launcher implementation and the config bytes. This is useful when downstream
+tooling cannot use compose `configs:`, but it means changing the workload pin
+requires rebuilding the derived image.
 
-| Binding | What attests the config | When to use |
-| --- | --- | --- |
-| **dstack app config / `compose_hash` / `config_id`** | dstack measures the compose file (and any files it references that participate in compose-hash) into the TEE's attested config; a verifier compares against an expected hash | Default for production. The config travels with the deployment and is covered by the existing dstack attestation chain. |
-| **Baked into a derived image** | Build a small downstream image `FROM <launcher>@sha256:…` that `COPY`s the config in; deploy that derived image. The derived image digest then implies both the launcher and the pin | When you want image-digest-only binding (one digest fully determines the workload). |
-| **Runtime bind-mount from the host** | Nothing — the host can swap the file | Local development only. Do not use for production trust. |
+### Development only: bind-mount config from the host
 
-Once the config is attested by one of the first two options, a relying party
-verifies in four steps:
-
-1. The launcher image digest in the dstack attestation matches the digest
-   published by the release workflow for this directory at commit `L`
-   (verified via the Sigstore build-provenance attestation, which binds
-   the digest to a specific GitHub Actions workflow run / repo / ref /
-   SHA — see [`VERIFY.md`](./VERIFY.md) for the exact check).
-2. The launcher script at commit `L` is the audited script — small, parses
-   (does not source) its config, refuses anything but a full commit SHA, and
-   verifies `HEAD` after checkout.
-3. The launcher config the runtime actually loaded is the attested config
-   (via `compose_hash` / `config_id`, or by deriving it from the derived
-   image's digest).
-4. The `COMMIT_SHA` in that config is the workload commit the relying party
-   expected.
-
-Because the launcher does no fallback — missing or invalid commit is a hard
-failure — there is exactly one workload commit that can ever boot from a
-given (launcher image digest, attested config) pair.
-
-## CLI
-
-```
-git-launcher <config-file>
-```
-
-The launcher is a single bash script (`bin/git-launcher`). It
-depends only on `bash`, `git`, and POSIX coreutils. It is **not** sourced
-and **does not source** the config. In default mode, the only bytes it
-executes are those of the workload repo's `entrypoint.sh` at the pinned
-`COMMIT_SHA`. In advanced mode (see below), it additionally executes the
-configured `INSTALL_CMD` / `RUN_CMD` via `bash -c`.
-
-## Config contract
-
-An env-file with `KEY=VALUE` lines. Comments start with `#`. Surrounding
-matching single or double quotes are stripped (one layer). Unknown keys are
-rejected. The config is parsed, not sourced — no command substitution and
-no shell expansion in the parse step.
-
-### Required
-
-| Key | Meaning |
-| --- | --- |
-| `REPO_URL` | Git URL of the upstream workload repo (`https://…` or `git@…`). |
-| `COMMIT_SHA` | **Full** 40-hex SHA-1 or 64-hex SHA-256. Branches, tags, and short SHAs are rejected. |
-| `WORK_DIR` | Local directory used as the checkout. Created if missing. Reused on subsequent runs as long as the existing clone's `origin` URL matches `REPO_URL`. Scrubbed before each launch; keep mutable app state outside this directory. |
-
-### Optional
-
-| Key | Meaning |
-| --- | --- |
-| `REPO_SUBDIR` | Relative directory inside the repo to `cd` into before running the entry point or `RUN_CMD`. Must not be absolute and must not contain `..`. |
-| `ENTRYPOINT_SCRIPT` | Relative path (inside `REPO_SUBDIR` or repo root) to the bash entry script for default mode. Defaults to `entrypoint.sh`. Must not be absolute and must not contain `..`. Trust-bearing in default mode — like `REPO_SUBDIR`, it selects which script runs. |
-| `RUN_CMD` | **Advanced.** Shell command to exec instead of the default `entrypoint.sh`. Use only when the workload repo cannot host its own entry script. |
-| `INSTALL_CMD` | **Advanced.** Shell command to run before `RUN_CMD`. Only valid alongside `RUN_CMD`. |
-
-### Default mode: `entrypoint.sh` in the workload repo
-
-Recommended for every workload you control. The workload repo provides a
-bash script at the fixed path `entrypoint.sh` (at the repo root, or at
-`REPO_SUBDIR/entrypoint.sh` if `REPO_SUBDIR` is set). The launcher runs it
-with `bash entrypoint.sh` after checkout — **no executable bit is
-required**. All install/build/run logic lives in that script.
-
-In this mode the trust-bearing config in the launcher's config file is
-`REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` if used, since it selects
-which `entrypoint.sh` runs). `WORK_DIR` is local plumbing — it names
-where on the in-TEE filesystem to keep the checkout — and is not
-trust-bearing. Normal process environment variables are inherited by the
-workload. Use Docker Compose `environment:` for non-secret runtime config that
-should be visible at launch, and use dstack encrypted secrets / KMS / mounted
-secret files for secrets.
-
-Because `entrypoint.sh`'s bytes are pinned by `COMMIT_SHA` and stored in
-the workload repo, they are covered by source provenance of the pinned
-commit. The verifier does not need to extract or audit any command string
-out of the launcher config.
-
-### Advanced mode: explicit `RUN_CMD` / `INSTALL_CMD`
-
-Use this when the workload repo cannot be modified to add a
-`entrypoint.sh` (e.g. you are pinning a third-party repo unchanged).
-Setting `RUN_CMD` switches the launcher into advanced mode; if you need
-more than one command, set `INSTALL_CMD` to run before `RUN_CMD`. Each is
-a single-line shell string and the launcher does not implement multi-line
-parsing. In this mode both values are trust-bearing config and must be
-audited alongside `COMMIT_SHA`.
-
-### What the launcher will and will not do
-
-* Will: clone fresh if `WORK_DIR` is empty; reuse the existing clone otherwise
-  (after asserting that its `origin` URL matches `REPO_URL`).
-* Will: `git fetch --tags --prune origin`, `git checkout --detach $SHA`,
-  `git reset --hard $SHA`, `git clean -ffdx`, then `git rev-parse HEAD` and
-  assert it equals `COMMIT_SHA`.
-* Will not: fall back to a branch, tag, or `HEAD` if the commit is missing.
-  A missing commit is a hard failure.
-* Will not: accept short SHAs. A truncated SHA could resolve ambiguously if
-  the upstream history changes.
-* Will not: source the config or `eval` config values. In default mode the
-  launcher executes `bash entrypoint.sh` from the pinned commit; in advanced
-  mode it executes `INSTALL_CMD` / `RUN_CMD` via `bash -c`. Nothing else
-  from the config reaches a shell.
-
-### Persistent volume and reboot behavior
-
-`WORK_DIR` should normally live on a persistent Docker volume, for example
-`/var/lib/git-launcher/<workload>`. On first boot, `git-launcher` creates the
-directory and clones `REPO_URL` there. On reboot or container restart, the same
-directory is reused only if it is already a git checkout whose `origin` exactly
-matches `REPO_URL`.
-
-Every boot still runs the same verification path: fetch from `origin`, detach
-checkout to `COMMIT_SHA`, reset tracked files, remove untracked files with
-`git clean -ffdx`, then assert `git rev-parse HEAD == COMMIT_SHA`. The checkout
-volume is therefore a source cache only. It must not hold application state,
-SQLite databases, uploaded files, or build artefacts that the workload expects
-to survive; put those in a separate workload-owned volume. If the volume is
-empty, the launcher reclones. If the volume is non-empty but not a git checkout,
-or if it points at a different origin, startup fails.
-
-## Example
-
-See [`examples/web-app.conf`](./examples/web-app.conf). Adapt `REPO_URL`,
-`COMMIT_SHA`, and (if you need it) `REPO_SUBDIR` for your workload, and
-make sure the workload repo has a `entrypoint.sh` at the pinned commit.
-
-```sh
-./bin/git-launcher ./examples/web-app.conf
-```
-
-The launcher logs the resolved repo, commit, workdir, and selected mode at
-startup, then logs the verified `HEAD` after checkout, before handing
-control to `entrypoint.sh` (or `INSTALL_CMD` / `RUN_CMD` in advanced mode).
-
-## Deploying with dstack
-
-Always pin the launcher image by its OCI digest (`@sha256:…`) — not by tag —
-so the dstack attestation binds to the exact launcher bytes you audited.
-How the config gets in front of the launcher depends on which binding from
-the trust model above you chose.
-
-### Mounting the dstack socket
-
-If the workload uses the dstack SDK (Rust, Python, etc.) to request KMS
-keys or TDX quotes — the recommended pattern for workloads that need
-in-TEE identity — the dstack agent's Unix socket must be visible inside
-the workload container. By default the SDK looks at `/var/run/dstack.sock`.
-Mount it in every compose snippet below; the snippets already include the
-mount.
-
-If your workload talks to a non-default dstack endpoint, set the endpoint
-variable your workload reads through Docker Compose `environment:` rather than
-baking it into the launcher config. It is runtime configuration, not part of
-the Git pin.
-
-### Local development (host bind-mount)
-
-Convenient for iterating on the config. **Not for production**: the host
-can swap the mounted file at any time and nothing about that swap is
-reflected in the dstack attestation.
+For local iteration, bind-mounting the config is convenient:
 
 ```yaml
 services:
@@ -337,119 +229,99 @@ volumes:
   workload-checkout:
 ```
 
-### Production option A (recommended): attest the config via dstack compose
+Do not use this binding as production evidence. The host can replace the file
+without changing the dstack attestation.
 
-Inline the config inside the compose file (or reference a sibling file
-that participates in the compose hash). dstack measures the compose into
-the attested app config, so a verifier can compare the deployed compose
-against the one they audited:
+## Config reference
 
-```yaml
-services:
-  workload:
-    image: docker.io/<org>/git-launcher@sha256:<launcher-digest>
-    command: ["/etc/git-launcher/config.conf"]
-    configs:
-      - source: pin
-        target: /etc/git-launcher/config.conf
-    volumes:
-      - workload-checkout:/var/lib/git-launcher
-      - /var/run/dstack.sock:/var/run/dstack.sock
-    restart: unless-stopped
+The launcher accepts these keys only.
 
-configs:
-  pin:
-    content: |
-      REPO_URL=https://github.com/example-org/example-web-app.git
-      COMMIT_SHA=<full-40-or-64-hex-sha>
-      WORK_DIR=/var/lib/git-launcher/example-web-app
+| Key | Required | Mode | Meaning |
+| --- | --- | --- | --- |
+| `REPO_URL` | Yes | All | Git URL of the workload repo. HTTPS and SSH-style Git URLs are accepted by `git clone`. |
+| `COMMIT_SHA` | Yes | All | Full 40-hex SHA-1 or 64-hex SHA-256 commit hash. Branches, tags, and short SHAs are rejected. |
+| `WORK_DIR` | Yes | All | Local checkout directory. Created if empty. Reused only when it is already a Git checkout whose `origin` exactly matches `REPO_URL`. |
+| `REPO_SUBDIR` | No | All | Relative subdirectory to enter before running the entry script or `RUN_CMD`. Must not be absolute or contain `..`. |
+| `ENTRYPOINT_SCRIPT` | No | Default | Relative path to the Bash entry script. Defaults to `entrypoint.sh`. Must not be absolute or contain `..`. |
+| `RUN_CMD` | No | Advanced | Shell command to exec with `bash -c` instead of the default entry script. Use only when the workload repo cannot contain an entry script. |
+| `INSTALL_CMD` | No | Advanced | Shell command to run before `RUN_CMD`. Only valid when `RUN_CMD` is set. |
 
-volumes:
-  workload-checkout:
-```
+Default mode is recommended. In default mode, the trust-bearing config is
+`REPO_URL`, `COMMIT_SHA`, and whichever of `REPO_SUBDIR` or
+`ENTRYPOINT_SCRIPT` you set, because those fields select the code that runs.
+`WORK_DIR` is local storage plumbing.
 
-A verifier compares the deployed `compose_hash` / `config_id` against the
-one they audited; that binds the launcher image **and** the pinned
-`COMMIT_SHA` to the attestation.
+Advanced mode is for third-party repos that you cannot modify. In advanced
+mode, `RUN_CMD` and `INSTALL_CMD` are also trust-bearing config because the
+launcher executes those strings with `bash -c`.
 
-### Production option B: bake the config into a derived image
+## Persistent volume behavior
 
-If you want a single digest to fully determine the workload, build a small
-downstream image that copies the config in:
+`WORK_DIR` should usually live on a persistent Docker volume, such as
+`/var/lib/git-launcher/<workload>`.
 
-```dockerfile
-FROM docker.io/<org>/git-launcher@sha256:<launcher-digest>
-COPY web-app.conf /etc/git-launcher/config.conf
-CMD ["/etc/git-launcher/config.conf"]
-```
+On first boot, the launcher clones `REPO_URL` into `WORK_DIR`. On later boots,
+it reuses the directory only if it is already a Git checkout whose `origin`
+matches `REPO_URL`. Every boot still fetches, checks out `COMMIT_SHA`, resets
+tracked files, removes untracked files, and verifies `HEAD`.
 
-Deploy that derived image (pinned by its own `@sha256:…`). The derived
-image digest now implies both the launcher and the workload pin. Still
-mount `/var/run/dstack.sock` from the host into the workload container in
-the deploying compose if the workload uses the dstack SDK.
+Treat `WORK_DIR` as a source cache. Do not store application state, SQLite
+databases, uploads, retained bodies, or build artifacts there if the workload
+expects them to survive a restart. Use a separate workload-owned volume.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `COMMIT_SHA must be a full... hash` | The config uses a branch, tag, short SHA, uppercase hex, or non-hex text | Use the full lowercase commit hash from the workload repo |
+| `git checkout failed for commit...` | The repo at `REPO_URL` does not contain the configured commit, or the launcher cannot fetch it | Check the repo URL, network access, credentials, and commit hash |
+| `existing checkout... origin ... but config wants...` | `WORK_DIR` already contains a clone of a different repo | Use a new `WORK_DIR`, or remove the old checkout intentionally |
+| `WORK_DIR ... is not empty and is not a git checkout` | The checkout directory contains unrelated files | Point `WORK_DIR` at an empty directory or a valid clone of `REPO_URL` |
+| `entry script ... not found` | Default mode is selected, but the pinned commit lacks the configured entry script | Add the script to the workload repo, set `ENTRYPOINT_SCRIPT`, or use advanced `RUN_CMD` mode |
+| `INSTALL_CMD requires RUN_CMD` | The config sets install logic without selecting advanced mode | Add `RUN_CMD`, or move install logic into the workload repo entry script |
 
 ## Tests
 
-`tests/run-tests.sh` builds a throwaway local git repo, points the launcher
-at specific commits, and asserts:
-
-* Happy path: launcher checks out the pinned commit and `exec`s the run
-  command from inside the requested subdirectory.
-* Re-running with a different `COMMIT_SHA` advances the pin in-place.
-* Bogus commit SHA aborts before running anything.
-* Branch names and short SHAs are rejected during validation.
-* Missing required keys are rejected.
-* Unknown keys are rejected.
-* `REPO_SUBDIR` containing `..` is rejected.
-* Pre-existing `WORK_DIR` whose `origin` differs from `REPO_URL` is rejected.
-* Normal process environment variables reach the workload.
-* `INSTALL_CMD` runs before `RUN_CMD`.
-* `--help` exits zero.
-* The release workflow runs launcher tests before building the image and
-  generates a GitHub artifact attestation bound to the pushed image digest.
-* The Dockerfile uses a small runtime base and exposes the launcher as
-  the entrypoint.
-
-Run with:
+Run the integration test suite from this directory:
 
 ```sh
 ./tests/run-tests.sh
 ```
 
-The tests only require `bash`, `git`, and standard coreutils, so they run
-unprivileged in CI or on a developer laptop.
+The tests create a local Git fixture and verify that the launcher:
+
+- Runs default-mode `entrypoint.sh` and advanced-mode `RUN_CMD`.
+- Rejects branches, tags, short SHAs, missing required keys, and unknown keys.
+- Refuses path traversal in `REPO_SUBDIR` and `ENTRYPOINT_SCRIPT`.
+- Refuses a non-empty non-Git `WORK_DIR`.
+- Refuses a reused checkout whose `origin` differs from `REPO_URL`.
+- Scrubs dirty tracked files and untracked files before launch.
+- Preserves normal process environment variables for the workload.
+- Checks that the release workflow publishes image build provenance.
 
 ## Release image provenance
 
-The release workflow (`.github/workflows/git-launcher-release.yml`
-in this repository's root `.github/`) follows the dstack-examples pattern:
+The release workflow at
+[.github/workflows/git-launcher-release.yml](../.github/workflows/git-launcher-release.yml)
+runs the launcher tests, builds and pushes
+`docker.io/${DOCKERHUB_ORG}/git-launcher:<tag>`, and publishes a GitHub
+artifact attestation for the pushed OCI digest.
 
-1. run `./tests/run-tests.sh`;
-2. build and push `docker.io/${DOCKERHUB_ORG}/git-launcher:<tag>`;
-3. call `actions/attest-build-provenance@v1` with the Docker build digest;
-4. write the digest and a Sigstore search link into both the GitHub Actions
-   step summary and the GitHub release body.
+The attestation is a signed chain of custody from the GitHub Actions workflow
+to the image digest. It is not a bit-for-bit reproducibility claim. A verifier
+should compare the deployed digest with the attested digest and audit the
+`git-launcher/` source at the commit named by that provenance.
 
-The attestation subject is the immutable OCI digest emitted by
-`docker/build-push-action`, not the mutable tag. A verifier should pin and
-compare that digest before trusting the launcher image.
+## Audit surface
 
-## Audit checklist
+Before relying on a deployment, audit:
 
-If you are reviewing this directory at commit `L` before signing off on a
-launcher image, the relevant audit surface is:
+1. `bin/git-launcher`, especially config parsing, SHA validation, checkout,
+   cleanup, `HEAD` verification, and the final exec path.
+2. The attested launcher config: `REPO_URL`, `COMMIT_SHA`, and any
+   `REPO_SUBDIR`, `ENTRYPOINT_SCRIPT`, `RUN_CMD`, or `INSTALL_CMD`.
+3. The workload repo at the pinned `COMMIT_SHA`, including the selected entry
+   script and all code it starts.
 
-1. `bin/git-launcher` — every line. Confirm:
-   * No `eval`, no `source`/`.`, no command substitution applied to config
-     values during parsing.
-   * `git checkout` always uses the verbatim `COMMIT_SHA` and the result is
-     reverified with `git rev-parse`.
-   * `INSTALL_CMD` / `RUN_CMD` are executed exactly once each, via a fresh
-     `bash -c`, with no implicit fallbacks.
-2. The config the launcher will load at deploy time (`REPO_URL`,
-   `COMMIT_SHA`, etc.). This pins which workload code runs, and is **not**
-   covered by the launcher image digest — verify it via the dstack attested
-   `compose_hash` / `config_id`, or via the digest of a derived image that
-   bakes the config in. See [Trust model](#trust-model).
-3. The contents of the upstream workload repo at the pinned `COMMIT_SHA` —
-   that is the surface that actually serves traffic.
+If those three surfaces match the values in the dstack attestation and the
+launcher image provenance, the deployment identifies one exact workload commit.
