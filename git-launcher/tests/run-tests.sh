@@ -5,8 +5,8 @@
 #
 # Builds a throwaway local git repo so the tests do not hit the network,
 # pins the launcher to specific commits in that repo, and asserts that the
-# launcher checks out the right commit, refuses bad inputs, and propagates
-# the child env file.
+# launcher checks out the right commit, refuses bad inputs, and preserves
+# the process environment for the workload.
 #
 # Requires: bash, git, mktemp.
 
@@ -339,26 +339,20 @@ EOF
   return 0
 }
 
-test_child_env_file() {
+test_environment_passes_through() {
   local work=$TMPROOT/work-env
   local marker=$TMPROOT/marker-env.txt
-  local envfile=$TMPROOT/workload.env
   local conf=$TMPROOT/conf-env.env
-  cat > "$envfile" <<EOF
-# a comment
-CHILD_ENV_EXTRA=passed-through
-EOF
   cat > "$conf" <<EOF
 REPO_URL=$FIXTURE
 COMMIT_SHA=$PIN_SHA
 WORK_DIR=$work
 REPO_SUBDIR=sub
-CHILD_ENV_FILE=$envfile
 INSTALL_CMD=
 RUN_CMD="MARKER_FILE='$marker' ./run.sh"
 EOF
-  "$LAUNCHER" "$conf" || return 1
-  grep -q "child_env_extra=passed-through" "$marker" || { echo "CHILD_ENV_FILE not applied" >&2; cat "$marker" >&2; return 1; }
+  CHILD_ENV_EXTRA=passed-through "$LAUNCHER" "$conf" || return 1
+  grep -q "child_env_extra=passed-through" "$marker" || { echo "process environment not preserved" >&2; cat "$marker" >&2; return 1; }
   return 0
 }
 
@@ -533,7 +527,7 @@ run_case "unknown_key_rejected"                  test_unknown_key_rejected
 run_case "repo_subdir_escape_rejected"           test_repo_subdir_escape_rejected
 run_case "origin_mismatch_rejected"              test_origin_mismatch_rejected
 run_case "non_git_non_empty_work_dir_rejected"   test_non_git_non_empty_work_dir_rejected
-run_case "child_env_file_passes_through"         test_child_env_file
+run_case "environment_passes_through"            test_environment_passes_through
 run_case "install_runs_before_run"               test_install_runs_before_run
 run_case "default_mode_happy"                    test_default_mode_happy
 run_case "default_mode_missing_script_fails"     test_default_mode_missing_script_fails

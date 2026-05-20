@@ -235,9 +235,10 @@ Parse the `configs:` content from step 2 and read `REPO_URL` and
 `COMMIT_SHA` (plus `REPO_SUBDIR` and `ENTRYPOINT_SCRIPT` if present —
 each selects which script in the pinned repo is used). `WORK_DIR` is
 local plumbing only and is not part of the trust-bearing config.
-`CHILD_ENV_FILE` (and any env it supplies) does not change the bytes that
-run; if used, audit it as runtime deployment configuration, not as
-source.
+Docker Compose `environment:` does not change the bytes that run, but it can
+change workload behavior. Audit non-secret environment variables as runtime
+deployment configuration, and keep secrets in encrypted secrets / KMS / mounted
+secret files rather than inline compose.
 
 In default mode there are no `INSTALL_CMD` / `RUN_CMD` strings to audit —
 the entry point is the fixed-path `entrypoint.sh` in the workload repo,

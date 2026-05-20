@@ -48,9 +48,6 @@ Optional keys:
   ENTRYPOINT_SCRIPT Relative path inside REPO_SUBDIR (or the repo root) to the
                     bash entry script for default mode. Defaults to
                     'entrypoint.sh'. Must not be absolute or contain '..'.
-  CHILD_ENV_FILE    Path to a separate KEY=VALUE env file. Each key listed
-                    there is exported into the environment of the entry point
-                    / RUN_CMD.
   RUN_CMD           Advanced: shell command to exec instead of the workload's
                     default entry point. Use only when the workload repo
                     cannot host its own entry script.
@@ -108,7 +105,6 @@ parse_config() {
   CFG_WORK_DIR=
   CFG_REPO_SUBDIR=
   CFG_ENTRYPOINT_SCRIPT=
-  CFG_CHILD_ENV_FILE=
   CFG_INSTALL_CMD=
   CFG_RUN_CMD=
   CFG_INSTALL_CMD_SET=0
@@ -137,7 +133,6 @@ parse_config() {
       WORK_DIR)          CFG_WORK_DIR=$val ;;
       REPO_SUBDIR)       CFG_REPO_SUBDIR=$val ;;
       ENTRYPOINT_SCRIPT) CFG_ENTRYPOINT_SCRIPT=$val ;;
-      CHILD_ENV_FILE)    CFG_CHILD_ENV_FILE=$val ;;
       INSTALL_CMD)       CFG_INSTALL_CMD=$val; CFG_INSTALL_CMD_SET=1 ;;
       RUN_CMD)           CFG_RUN_CMD=$val; CFG_RUN_CMD_SET=1 ;;
       *) die "unknown config key '$key' at $config_file:$lineno" ;;
@@ -221,30 +216,6 @@ ensure_repo_at_commit() {
   log "HEAD verified: $head"
 }
 
-apply_child_env() {
-  local env_file=$1
-  [[ -f $env_file ]] || die "CHILD_ENV_FILE not found: $env_file"
-  local line key val lineno=0 trimmed
-  while IFS= read -r line || [[ -n $line ]]; do
-    lineno=$((lineno + 1))
-    trimmed=${line#"${line%%[![:space:]]*}"}
-    [[ -z $trimmed ]] && continue
-    [[ ${trimmed:0:1} == '#' ]] && continue
-    if [[ ! $trimmed =~ ^([A-Za-z_][A-Za-z0-9_]*)=(.*)$ ]]; then
-      die "child env parse error at $env_file:$lineno: $trimmed"
-    fi
-    key=${BASH_REMATCH[1]}
-    val=${BASH_REMATCH[2]}
-    if [[ ${#val} -ge 2 ]]; then
-      local first=${val:0:1} last=${val: -1}
-      if [[ ($first == '"' && $last == '"') || ($first == "'" && $last == "'") ]]; then
-        val=${val:1:${#val}-2}
-      fi
-    fi
-    export "$key=$val"
-  done < "$env_file"
-}
-
 main() {
   parse_config "$CONFIG_FILE"
   validate_config
@@ -255,9 +226,6 @@ main() {
   log "workdir:  $CFG_WORK_DIR"
   if [[ -n $CFG_REPO_SUBDIR ]]; then
     log "subdir:   $CFG_REPO_SUBDIR"
-  fi
-  if [[ -n $CFG_CHILD_ENV_FILE ]]; then
-    log "envfile:  $CFG_CHILD_ENV_FILE"
   fi
   if [[ $CFG_RUN_CMD_SET -eq 1 ]]; then
     log "mode:     advanced (RUN_CMD)"
@@ -276,10 +244,6 @@ main() {
     [[ -d $target ]] || die "REPO_SUBDIR '$CFG_REPO_SUBDIR' does not exist under $CFG_WORK_DIR after checkout"
   fi
   cd "$target"
-
-  if [[ -n $CFG_CHILD_ENV_FILE ]]; then
-    apply_child_env "$CFG_CHILD_ENV_FILE"
-  fi
 
   if [[ $CFG_RUN_CMD_SET -eq 1 ]]; then
     if [[ -n $CFG_INSTALL_CMD ]]; then

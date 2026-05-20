@@ -139,7 +139,6 @@ no shell expansion in the parse step.
 | --- | --- |
 | `REPO_SUBDIR` | Relative directory inside the repo to `cd` into before running the entry point or `RUN_CMD`. Must not be absolute and must not contain `..`. |
 | `ENTRYPOINT_SCRIPT` | Relative path (inside `REPO_SUBDIR` or repo root) to the bash entry script for default mode. Defaults to `entrypoint.sh`. Must not be absolute and must not contain `..`. Trust-bearing in default mode — like `REPO_SUBDIR`, it selects which script runs. |
-| `CHILD_ENV_FILE` | Path to a separate env file. Each `KEY=VALUE` line is `export`ed into the environment seen by `entrypoint.sh` / `INSTALL_CMD` / `RUN_CMD`. The file is parsed line-by-line just like the main config (not sourced). |
 | `RUN_CMD` | **Advanced.** Shell command to exec instead of the default `entrypoint.sh`. Use only when the workload repo cannot host its own entry script. |
 | `INSTALL_CMD` | **Advanced.** Shell command to run before `RUN_CMD`. Only valid alongside `RUN_CMD`. |
 
@@ -155,10 +154,10 @@ In this mode the trust-bearing config in the launcher's config file is
 `REPO_URL` + `COMMIT_SHA` (and `REPO_SUBDIR` if used, since it selects
 which `entrypoint.sh` runs). `WORK_DIR` is local plumbing — it names
 where on the in-TEE filesystem to keep the checkout — and is not
-trust-bearing. `CHILD_ENV_FILE` (and any env it provides) can change the
-script's runtime behavior but does not change the bytes that run; if the
-deployment uses it, audit it the same way you audit any other runtime
-configuration the deployment ships with.
+trust-bearing. Normal process environment variables are inherited by the
+workload. Use Docker Compose `environment:` for non-secret runtime config that
+should be visible at launch, and use dstack encrypted secrets / KMS / mounted
+secret files for secrets.
 
 Because `entrypoint.sh`'s bytes are pinned by `COMMIT_SHA` and stored in
 the workload repo, they are covered by source provenance of the pinned
@@ -234,10 +233,10 @@ the workload container. By default the SDK looks at `/var/run/dstack.sock`.
 Mount it in every compose snippet below; the snippets already include the
 mount.
 
-If your workload talks to a non-default dstack endpoint, set
-`DSTACK_LLM_ROUTER_DSTACK_ENDPOINT` (or whatever endpoint variable your
-workload reads) via `CHILD_ENV_FILE` rather than baking it into the
-launcher config — it is runtime configuration, not a trust-bearing field.
+If your workload talks to a non-default dstack endpoint, set the endpoint
+variable your workload reads through Docker Compose `environment:` rather than
+baking it into the launcher config. It is runtime configuration, not part of
+the Git pin.
 
 ### Local development (host bind-mount)
 
@@ -325,7 +324,7 @@ at specific commits, and asserts:
 * Unknown keys are rejected.
 * `REPO_SUBDIR` containing `..` is rejected.
 * Pre-existing `WORK_DIR` whose `origin` differs from `REPO_URL` is rejected.
-* `CHILD_ENV_FILE` values reach the child process.
+* Normal process environment variables reach the workload.
 * `INSTALL_CMD` runs before `RUN_CMD`.
 * `--help` exits zero.
 * The release workflow runs launcher tests before building the image and
