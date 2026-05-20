@@ -131,7 +131,7 @@ no shell expansion in the parse step.
 | --- | --- |
 | `REPO_URL` | Git URL of the upstream workload repo (`https://…` or `git@…`). |
 | `COMMIT_SHA` | **Full** 40-hex SHA-1 or 64-hex SHA-256. Branches, tags, and short SHAs are rejected. |
-| `WORK_DIR` | Local directory used as the checkout. Created if missing. Reused on subsequent runs as long as the existing clone's `origin` URL matches `REPO_URL`. |
+| `WORK_DIR` | Local directory used as the checkout. Created if missing. Reused on subsequent runs as long as the existing clone's `origin` URL matches `REPO_URL`. Scrubbed before each launch; keep mutable app state outside this directory. |
 
 ### Optional
 
@@ -178,8 +178,9 @@ audited alongside `COMMIT_SHA`.
 
 * Will: clone fresh if `WORK_DIR` is empty; reuse the existing clone otherwise
   (after asserting that its `origin` URL matches `REPO_URL`).
-* Will: `git fetch --tags --prune origin`, then `git checkout --detach $SHA`,
-  then `git rev-parse HEAD` and assert it equals `COMMIT_SHA`.
+* Will: `git fetch --tags --prune origin`, `git checkout --detach $SHA`,
+  `git reset --hard $SHA`, `git clean -ffdx`, then `git rev-parse HEAD` and
+  assert it equals `COMMIT_SHA`.
 * Will not: fall back to a branch, tag, or `HEAD` if the commit is missing.
   A missing commit is a hard failure.
 * Will not: accept short SHAs. A truncated SHA could resolve ambiguously if
@@ -198,10 +199,13 @@ directory is reused only if it is already a git checkout whose `origin` exactly
 matches `REPO_URL`.
 
 Every boot still runs the same verification path: fetch from `origin`, detach
-checkout to `COMMIT_SHA`, then assert `git rev-parse HEAD == COMMIT_SHA`.
-Persistent state is therefore only a cache. It does not decide what runs. If
-the volume is empty, the launcher reclones. If the volume is non-empty but not a
-git checkout, or if it points at a different origin, startup fails.
+checkout to `COMMIT_SHA`, reset tracked files, remove untracked files with
+`git clean -ffdx`, then assert `git rev-parse HEAD == COMMIT_SHA`. The checkout
+volume is therefore a source cache only. It must not hold application state,
+SQLite databases, uploaded files, or build artefacts that the workload expects
+to survive; put those in a separate workload-owned volume. If the volume is
+empty, the launcher reclones. If the volume is non-empty but not a git checkout,
+or if it points at a different origin, startup fails.
 
 ## Example
 

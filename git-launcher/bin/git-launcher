@@ -41,6 +41,7 @@ Required keys:
                  Branches, tags, and short SHAs are rejected.
   WORK_DIR       Local directory used as the checkout. Created if missing.
                  Reused across runs if it already contains a clone of REPO_URL.
+                 Scrubbed before each launch; keep mutable app state elsewhere.
 
 Optional keys:
   REPO_SUBDIR       Path inside the repo to cd into before running the entry
@@ -205,6 +206,10 @@ ensure_repo_at_commit() {
   if ! git -c advice.detachedHead=false checkout --detach "$sha" 2>/dev/null; then
     die "git checkout failed for commit $sha (commit not present in $url? short SHA disallowed)"
   fi
+
+  log "scrubbing checkout"
+  git reset --hard "$sha" >/dev/null
+  git clean -ffdx >/dev/null
 
   local head
   head=$(git rev-parse --verify HEAD)

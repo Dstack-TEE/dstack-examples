@@ -173,6 +173,34 @@ EOF
   return 0
 }
 
+test_checkout_scrubs_dirty_source() {
+  local work=$TMPROOT/work-scrub
+  local marker=$TMPROOT/marker-scrub.txt
+  local conf=$TMPROOT/conf-scrub.env
+
+  git clone -q "$FIXTURE" "$work"
+  git -C "$work" checkout -q --detach "$PIN_SHA"
+  echo "tampered" > "$work/greeting.txt"
+  echo "stale" > "$work/stale.txt"
+  mkdir -p "$work/target"
+  echo "compiled object from a previous boot" > "$work/target/old.o"
+
+  cat > "$conf" <<EOF
+REPO_URL=$FIXTURE
+COMMIT_SHA=$PIN_SHA
+WORK_DIR=$work
+REPO_SUBDIR=sub
+INSTALL_CMD=
+RUN_CMD="MARKER_FILE='$marker' ./run.sh"
+EOF
+  "$LAUNCHER" "$conf" || return 1
+  grep -q "greeting=hello" "$marker" || { echo "dirty tracked file was not reset" >&2; cat "$marker" >&2; return 1; }
+  [[ ! -e $work/stale.txt ]] || { echo "untracked stale file survived checkout scrub" >&2; return 1; }
+  [[ ! -e $work/target/old.o ]] || { echo "untracked build artifact survived checkout scrub" >&2; return 1; }
+  [[ -z $(git -C "$work" status --short --untracked-files=all) ]] || { echo "worktree is not clean after launcher scrub" >&2; git -C "$work" status --short --untracked-files=all >&2; return 1; }
+  return 0
+}
+
 test_bogus_sha_fails() {
   local work=$TMPROOT/work-bogus
   local conf=$TMPROOT/conf-bogus.env
@@ -518,6 +546,7 @@ echo
 
 run_case "happy_pinning_runs_pinned_commit"      test_happy_pinning
 run_case "rerun_advances_pin"                    test_rerun_advance_pin
+run_case "checkout_scrubs_dirty_source"          test_checkout_scrubs_dirty_source
 run_case "bogus_sha_fails"                       test_bogus_sha_fails
 run_case "branch_name_rejected"                  test_branch_name_rejected
 run_case "tag_name_rejected"                     test_tag_name_rejected

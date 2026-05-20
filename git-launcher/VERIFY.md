@@ -42,8 +42,9 @@ flowchart LR
    the workload code *and* its entry point `entrypoint.sh`; no separate
    install/run command audit is needed.
 4. **Spot-check runtime logs.** `phala logs --cvm-id <id>` should show
-   `HEAD verified: <COMMIT_SHA>` and `exec in <dir>: bash entrypoint.sh`.
-   Logs are corroborating only; the trust root is steps 1–3.
+   `scrubbing checkout`, `HEAD verified: <COMMIT_SHA>`, and
+   `exec in <dir>: bash entrypoint.sh`. Logs are corroborating only; the
+   trust root is steps 1–3.
 
 If all four line up, the bytes executing in the TEE are exactly the
 upstream commit you audited, produced by an audited launcher.
@@ -263,12 +264,13 @@ phala logs --cvm-id <id> -n 200
 ```
 
 Default-mode output should include these lines (the launcher logs `mode`
-during config summary, then the checkout/verify lines, then the `exec`
+during config summary, then the checkout/scrub/verify lines, then the `exec`
 line, so they appear in this order):
 
 ```
 [git-launcher] mode:     default (workload repo entrypoint.sh)
 [git-launcher] checking out <COMMIT_SHA>
+[git-launcher] scrubbing checkout
 [git-launcher] HEAD verified: <COMMIT_SHA>
 [git-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: bash entrypoint.sh
 ```
