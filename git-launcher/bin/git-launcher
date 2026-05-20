@@ -23,17 +23,21 @@
 set -euo pipefail
 
 PROG=$(basename "$0")
+DEFAULT_CONFIG_FILE=/etc/git-launcher/config.conf
 
 log() { printf '[%s] %s\n' "$PROG" "$*" >&2; }
 die() { printf '[%s] error: %s\n' "$PROG" "$*" >&2; exit 1; }
 
 usage() {
   cat >&2 <<EOF
-Usage: $PROG <config-file>
+Usage: $PROG [config-file]
 
 The config file is a line-oriented KEY=VALUE env file. It is parsed, NOT
 sourced; the launcher only executes (via 'bash -c' / 'bash <script>') the
 workload's own entry point, plus optional INSTALL_CMD / RUN_CMD overrides.
+
+If config-file is omitted, the launcher reads:
+  $DEFAULT_CONFIG_FILE
 
 Required keys:
   REPO_URL       Git URL of the pinned repo (https://... or git@...).
@@ -73,16 +77,16 @@ Unknown keys are rejected.
 EOF
 }
 
-if [[ $# -ne 1 ]]; then
-  usage
-  exit 2
-fi
-
 case ${1:-} in
   -h|--help) usage; exit 0 ;;
 esac
 
-CONFIG_FILE=$1
+if [[ $# -gt 1 ]]; then
+  usage
+  exit 2
+fi
+
+CONFIG_FILE=${1:-$DEFAULT_CONFIG_FILE}
 
 require_tool() {
   command -v "$1" >/dev/null 2>&1 || die "required tool not found in PATH: $1"

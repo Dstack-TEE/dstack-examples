@@ -494,7 +494,26 @@ EOF
 }
 
 test_help_flag() {
-  "$LAUNCHER" --help >/dev/null
+  local out=$TMPROOT/help.out
+  "$LAUNCHER" --help >"$out" 2>&1
+  grep -q "Usage: .*\\[config-file\\]" "$out" || { echo "help does not show optional config file" >&2; cat "$out" >&2; return 1; }
+  grep -q "/etc/git-launcher/config.conf" "$out" || { echo "help does not document default config path" >&2; cat "$out" >&2; return 1; }
+}
+
+test_default_config_path_when_omitted() {
+  # The container path is absolute, so this test verifies selection by checking
+  # the missing-file error. If a developer machine happens to have that file,
+  # the image-level behavior is still covered by the help text and Dockerfile.
+  if [[ -e /etc/git-launcher/config.conf ]]; then
+    echo "default config exists on this host; skipping missing-file assertion" >&2
+    return 0
+  fi
+  local err=$TMPROOT/default-config.err
+  if "$LAUNCHER" 2>"$err"; then
+    echo "launcher succeeded without an explicit config path on a host with no default config" >&2
+    return 1
+  fi
+  grep -q "config file not found: /etc/git-launcher/config.conf" "$err" || { echo "launcher did not use default config path" >&2; cat "$err" >&2; return 1; }
 }
 
 test_release_workflow_attests_image_digest() {
@@ -564,6 +583,7 @@ run_case "entrypoint_script_override"            test_entrypoint_script_override
 run_case "entrypoint_script_escape_rejected"     test_entrypoint_script_escape_rejected
 run_case "install_cmd_without_run_cmd_fails"     test_install_cmd_without_run_cmd_fails
 run_case "help_flag"                             test_help_flag
+run_case "default_config_path_when_omitted"      test_default_config_path_when_omitted
 run_case "release_workflow_attests_image_digest" test_release_workflow_attests_image_digest
 run_case "dockerfile_runtime_is_minimal_launcher" test_dockerfile_runtime_is_minimal_launcher
 run_case "verify_doc_present_and_linked"          test_verify_doc_present_and_linked

@@ -1,9 +1,10 @@
 # git-launcher
 
 `git-launcher` runs a workload from one exact Git commit inside a dstack
-container. You give it a Git repository URL, a full commit SHA, and a checkout
-directory. It fetches that commit, verifies that `HEAD` is exactly the commit
-you configured, and then hands control to the workload's entry script.
+container. You give it a config file with a Git repository URL, a full commit
+SHA, and a checkout directory. It fetches that commit, verifies that `HEAD` is
+exactly the commit you configured, and then hands control to the workload's
+entry script.
 
 Use it when you want a generic launcher image whose image digest is stable and
 auditable, while the workload identity comes from an attested config file.
@@ -48,7 +49,9 @@ Do not use it when:
 
 On startup, `git-launcher`:
 
-1. Parses a line-oriented config file. The config is parsed, not sourced.
+1. Parses a line-oriented config file. By default it reads
+   `/etc/git-launcher/config.conf`; you can pass a different path for local
+   testing. The config is parsed, not sourced.
 2. Rejects missing required keys, unknown keys, short SHAs, branches, and tags.
 3. Creates or reuses `WORK_DIR` if it is a Git checkout for the same `REPO_URL`.
 4. Runs `git fetch --tags --prune origin`.
@@ -120,7 +123,9 @@ Rules:
 ## Run locally
 
 Local runs require `bash`, `git`, and standard coreutils. After writing a
-config file for a real workload commit, run the launcher script directly:
+config file for a real workload commit, run the launcher script directly.
+Pass the path explicitly when your local config is not at the container default
+`/etc/git-launcher/config.conf`:
 
 ```sh
 ./bin/git-launcher ./config.conf
@@ -163,7 +168,6 @@ or the workload pin changes the attestation.
 services:
   workload:
     image: docker.io/<org>/git-launcher@sha256:<launcher-digest>
-    command: ["/etc/git-launcher/config.conf"]
     configs:
       - source: pin
         target: /etc/git-launcher/config.conf
@@ -201,8 +205,7 @@ pin, build a small downstream image:
 
 ```dockerfile
 FROM docker.io/<org>/git-launcher@sha256:<launcher-digest>
-COPY web-app.conf /etc/git-launcher/config.conf
-CMD ["/etc/git-launcher/config.conf"]
+COPY config.conf /etc/git-launcher/config.conf
 ```
 
 Deploy the derived image by its own digest. The derived image digest now binds
@@ -218,9 +221,8 @@ For local iteration, bind-mounting the config is convenient:
 services:
   workload:
     image: docker.io/<org>/git-launcher@sha256:<launcher-digest>
-    command: ["/etc/git-launcher/config.conf"]
     volumes:
-      - ./web-app.conf:/etc/git-launcher/config.conf:ro
+      - ./config.conf:/etc/git-launcher/config.conf:ro
       - workload-checkout:/var/lib/git-launcher
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
