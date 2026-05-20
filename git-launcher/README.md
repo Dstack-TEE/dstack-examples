@@ -29,6 +29,80 @@ This is a separate example from [`launcher/`](../launcher), which is a
 Docker Compose auto-update pattern. This launcher does the opposite — it
 *prevents* auto-update by pinning to one full commit SHA per deploy.
 
+## Preparing a workload repo
+
+For a repo you control, use default mode. Put a bash entry script in the repo
+and let the launcher do only the Git pinning:
+
+```text
+example-workload/
+  entrypoint.sh
+  ...
+```
+
+`entrypoint.sh` is the workload boundary. It should:
+
+* Install or validate whatever runtime the workload needs.
+* Build or prepare the application from the pinned source tree.
+* Be idempotent across container restarts.
+* Fail closed when install, build, config validation, or startup fails.
+* `exec` the long-running workload process so it becomes PID 1.
+* Keep mutable state, databases, uploads, retained bodies, and build caches
+  outside `WORK_DIR`.
+
+A minimal shape:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null && pwd)
+cd "$SCRIPT_DIR"
+
+# Example only: replace with your workload's real install/build/run steps.
+./scripts/build.sh
+exec ./bin/server
+```
+
+Deployment config should keep the source checkout and workload state separate:
+
+```yaml
+services:
+  workload:
+    image: docker.io/<org>/git-launcher@sha256:<launcher-digest>
+    command: ["/etc/git-launcher/config.conf"]
+    configs:
+      - source: pin
+        target: /etc/git-launcher/config.conf
+    environment:
+      APP_CONFIG_PATH: /var/lib/example-workload/config.json
+    volumes:
+      - workload-checkout:/var/lib/git-launcher
+      - workload-state:/var/lib/example-workload
+      - /var/run/dstack.sock:/var/run/dstack.sock
+
+configs:
+  pin:
+    content: |
+      REPO_URL=https://github.com/example-org/example-workload.git
+      COMMIT_SHA=<full-40-or-64-hex-sha>
+      WORK_DIR=/var/lib/git-launcher/example-workload
+
+volumes:
+  workload-checkout:
+  workload-state:
+```
+
+Use Docker Compose `environment:` for non-secret runtime configuration that
+should be visible in the attested deployment. Use dstack encrypted secrets,
+dstack KMS, or mounted secret files for secrets. If the workload needs dstack
+KMS keys or quotes, mount `/var/run/dstack.sock` and let the workload use the
+dstack SDK.
+
+Before deploying, audit the workload commit, then put its full commit hash in
+`COMMIT_SHA`. Do not use a branch, tag, or short SHA; the launcher rejects
+them.
+
 ## What this is — and what it is not
 
 The launcher is **not** the workload. It is intentionally tiny so the contents
