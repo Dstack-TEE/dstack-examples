@@ -2,6 +2,8 @@ name: Reproducible Build
 
 on:
   push:
+    branches:
+      - '**'
     paths:
       - 'tutorial/01a-reproducible-builds/**'
   pull_request:
