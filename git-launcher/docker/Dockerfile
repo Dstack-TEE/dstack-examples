@@ -13,7 +13,7 @@ RUN apt-get update \
         openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
-COPY bin/trusted-workload-launcher /usr/local/bin/trusted-workload-launcher
-RUN chmod 0755 /usr/local/bin/trusted-workload-launcher
+COPY bin/git-launcher /usr/local/bin/git-launcher
+RUN chmod 0755 /usr/local/bin/git-launcher
 
-ENTRYPOINT ["trusted-workload-launcher"]
+ENTRYPOINT ["git-launcher"]

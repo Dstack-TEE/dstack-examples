@@ -1,9 +1,9 @@
-name: trusted-workload-launcher Release
+name: git-launcher Release
 on:
   workflow_dispatch: {}
   push:
     tags:
-      - 'trusted-workload-launcher-v*'
+      - 'git-launcher-v*'
 
 permissions:
   contents: write
@@ -16,14 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       IMAGE_REGISTRY: docker.io
-      IMAGE_REPOSITORY: ${{ vars.DOCKERHUB_ORG }}/trusted-workload-launcher
+      IMAGE_REPOSITORY: ${{ vars.DOCKERHUB_ORG }}/git-launcher
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Parse version from tag
         run: |
-          VERSION=${GITHUB_REF#refs/tags/trusted-workload-launcher-v}
+          VERSION=${GITHUB_REF#refs/tags/git-launcher-v}
           if [ -z "${VERSION}" ]; then
             echo "Unable to parse version from ref: ${GITHUB_REF}" >&2
             exit 1
@@ -33,7 +33,7 @@ jobs:
           echo "Parsed version: ${VERSION}"
 
       - name: Run launcher tests
-        working-directory: trusted-workload-launcher
+        working-directory: git-launcher
         run: ./tests/run-tests.sh
 
       - name: Set up Docker Buildx
@@ -50,13 +50,13 @@ jobs:
         id: build-and-push
         uses: docker/build-push-action@v5
         with:
-          context: trusted-workload-launcher
-          file: trusted-workload-launcher/docker/Dockerfile
+          context: git-launcher
+          file: git-launcher/docker/Dockerfile
           push: true
-          tags: docker.io/${{ vars.DOCKERHUB_ORG }}/trusted-workload-launcher:${{ env.VERSION }}
+          tags: docker.io/${{ vars.DOCKERHUB_ORG }}/git-launcher:${{ env.VERSION }}
           platforms: linux/amd64
           labels: |
-            org.opencontainers.image.title=trusted-workload-launcher
+            org.opencontainers.image.title=git-launcher
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.VERSION }}
@@ -64,7 +64,7 @@ jobs:
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1
         with:
-          subject-name: docker.io/${{ vars.DOCKERHUB_ORG }}/trusted-workload-launcher
+          subject-name: docker.io/${{ vars.DOCKERHUB_ORG }}/git-launcher
           subject-digest: ${{ steps.build-and-push.outputs.digest }}
           push-to-registry: true
 
@@ -74,7 +74,7 @@ jobs:
           IMAGE_DIGEST: ${{ steps.build-and-push.outputs.digest }}
         run: |
           {
-            echo "## trusted-workload-launcher image"
+            echo "## git-launcher image"
             echo ""
             echo "- Tag: \`${IMAGE_REFERENCE}\`"
             echo "- Digest: \`${IMAGE_DIGEST}\`"
@@ -85,7 +85,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           body: |
-            ## trusted-workload-launcher image (SHA256)
+            ## git-launcher image (SHA256)
 
             - Image: `${{ env.IMAGE_REFERENCE }}`
             - Digest: `${{ steps.build-and-push.outputs.digest }}`

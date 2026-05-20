@@ -1,7 +1,7 @@
-# Verifying a trusted-workload-launcher deployment
+# Verifying a git-launcher deployment
 
 How a relying party verifies that a dstack CVM is running
-`trusted-workload-launcher` and that the workload commit executed inside the
+`git-launcher` and that the workload commit executed inside the
 TEE is the one they audited.
 
 ## Quick path (default mode, 4 steps)
@@ -170,7 +170,7 @@ command and assert equality:
 A one-shot reference-comparison script looks roughly like this:
 
 ```sh
-expected_image=docker.io/<org>/trusted-workload-launcher@sha256:<L>
+expected_image=docker.io/<org>/git-launcher@sha256:<L>
 expected_compose_hash=$(sha256sum < audited-app_compose.json | awk '{print $1}')
 expected_mrtd=<from dstack release notes>
 expected_rtmr0=<from dstack release notes>
@@ -197,7 +197,7 @@ into `rtmr3` if your verifier supports it.
 
 ### 3. Verify launcher image provenance via Sigstore
 
-The `trusted-workload-launcher-release.yml` workflow publishes an
+The `git-launcher-release.yml` workflow publishes an
 `actions/attest-build-provenance` attestation bound to the pushed image
 digest. The attestation is not a claim of bit-for-bit reproducibility — it
 is a signed statement that *this* OCI digest was produced by *this*
@@ -207,7 +207,7 @@ the GitHub OIDC identity.
 ```sh
 gh attestation verify \
   --owner Dstack-TEE \
-  oci://docker.io/<org>/trusted-workload-launcher@sha256:<L>
+  oci://docker.io/<org>/git-launcher@sha256:<L>
 ```
 
 or equivalently with `cosign verify-attestation` against
@@ -219,7 +219,7 @@ or equivalently with `cosign verify-attestation` against
 
 That commit is the source of truth for the launcher's bytes. Treat the
 Sigstore attestation as the chain of custody from the
-`trusted-workload-launcher/` source at that commit to the deployed image
+`git-launcher/` source at that commit to the deployed image
 digest.
 
 If you want to go further you can rebuild the image from that commit and
@@ -266,10 +266,10 @@ during config summary, then the checkout/verify lines, then the `exec`
 line, so they appear in this order):
 
 ```
-[trusted-workload-launcher] mode:     default (workload repo entrypoint.sh)
-[trusted-workload-launcher] checking out <COMMIT_SHA>
-[trusted-workload-launcher] HEAD verified: <COMMIT_SHA>
-[trusted-workload-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: bash entrypoint.sh
+[git-launcher] mode:     default (workload repo entrypoint.sh)
+[git-launcher] checking out <COMMIT_SHA>
+[git-launcher] HEAD verified: <COMMIT_SHA>
+[git-launcher] exec in <WORK_DIR>[/<REPO_SUBDIR>]: bash entrypoint.sh
 ```
 
 Advanced mode logs `mode: advanced (RUN_CMD)` early on, and the last
@@ -292,7 +292,7 @@ suite. The compose-hash binding it demonstrates is identical:
 
 | Field | Value |
 | --- | --- |
-| Launcher image | `docker.io/h4x3rotab/trusted-workload-launcher-smoke@sha256:0d3f2dbda5e6ae9513ea4e8e69dcbc87c1f3af29744f0e36b9814685e5739866` |
+| Launcher image | `docker.io/h4x3rotab/git-launcher-smoke@sha256:0d3f2dbda5e6ae9513ea4e8e69dcbc87c1f3af29744f0e36b9814685e5739866` |
 | Compose pattern | inline `configs:` with `content:` block carrying the launcher config |
 | Workload repo | `https://github.com/octocat/Hello-World.git` |
 | Pinned commit | `7fd1a60b01f91b314f59955a4e4d4e80d8edf11d` |
@@ -310,16 +310,16 @@ get a different attestation.
 the expected launcher digest. `phala logs --cvm-id <id>` showed:
 
 ```
-[trusted-workload-launcher] checking out 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
-[trusted-workload-launcher] HEAD verified: 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
-[trusted-workload-launcher] exec in /var/lib/trusted-workload-launcher/hello: ...
-TWL_PINNED_HEAD=7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
-TWL_README_BYTES=13
-TWL_READY
+[git-launcher] checking out 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+[git-launcher] HEAD verified: 7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+[git-launcher] exec in /var/lib/git-launcher/hello: ...
+GIT_LAUNCHER_PINNED_HEAD=7fd1a60b01f91b314f59955a4e4d4e80d8edf11d
+GIT_LAUNCHER_README_BYTES=13
+GIT_LAUNCHER_READY
 ```
 
-`TWL_PINNED_HEAD` is from `git rev-parse HEAD` evaluated *inside the TEE
-container* by the workload's `RUN_CMD`, so it is independent
+`GIT_LAUNCHER_PINNED_HEAD` is from `git rev-parse HEAD` evaluated *inside
+the TEE container* by the workload's `RUN_CMD`, so it is independent
 corroboration that the bytes running are the pinned commit.
 
 ## Limitations

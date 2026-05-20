@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck disable=SC2317  # test_* functions are dispatched indirectly via run_case "$@"
 # shellcheck disable=SC2016  # we intentionally grep for literal GitHub Actions ${{ ... }} expressions
-# Integration tests for bin/trusted-workload-launcher.
+# Integration tests for bin/git-launcher.
 #
 # Builds a throwaway local git repo so the tests do not hit the network,
 # pins the launcher to specific commits in that repo, and asserts that the
@@ -16,11 +16,11 @@ THIS=$(readlink -f "$0" 2>/dev/null || realpath "$0")
 TEST_DIR=$(dirname "$THIS")
 ROOT=$(dirname "$TEST_DIR")
 REPO_ROOT=$(dirname "$ROOT")
-LAUNCHER=$ROOT/bin/trusted-workload-launcher
+LAUNCHER=$ROOT/bin/git-launcher
 
 [[ -x $LAUNCHER ]] || { echo "launcher not executable: $LAUNCHER" >&2; exit 2; }
 
-TMPROOT=$(mktemp -d -t trusted-workload-launcher-tests-XXXXXX)
+TMPROOT=$(mktemp -d -t git-launcher-tests-XXXXXX)
 trap 'rm -rf "$TMPROOT"' EXIT
 
 PASS=0
@@ -319,6 +319,26 @@ EOF
   return 0
 }
 
+test_non_git_non_empty_work_dir_rejected() {
+  local work=$TMPROOT/work-non-git
+  mkdir -p "$work"
+  echo stale > "$work/stale.txt"
+
+  local conf=$TMPROOT/conf-non-git.env
+  cat > "$conf" <<EOF
+REPO_URL=$FIXTURE
+COMMIT_SHA=$PIN_SHA
+WORK_DIR=$work
+INSTALL_CMD=
+RUN_CMD=echo nope
+EOF
+  if "$LAUNCHER" "$conf"; then
+    echo "launcher accepted non-empty WORK_DIR that is not a git checkout" >&2
+    return 1
+  fi
+  return 0
+}
+
 test_child_env_file() {
   local work=$TMPROOT/work-env
   local marker=$TMPROOT/marker-env.txt
@@ -456,7 +476,7 @@ test_help_flag() {
 }
 
 test_release_workflow_attests_image_digest() {
-  local workflow=$REPO_ROOT/.github/workflows/trusted-workload-launcher-release.yml
+  local workflow=$REPO_ROOT/.github/workflows/git-launcher-release.yml
   [[ -f $workflow ]] || { echo "missing release workflow: $workflow" >&2; return 1; }
 
   grep -q "attestations: write" "$workflow" || { echo "workflow missing attestations permission" >&2; return 1; }
@@ -465,8 +485,8 @@ test_release_workflow_attests_image_digest() {
   grep -q 'subject-digest: ${{ steps.build-and-push.outputs.digest }}' "$workflow" || { echo "attestation is not bound to build-push digest" >&2; return 1; }
   grep -q "push-to-registry: true" "$workflow" || { echo "attestation is not pushed to registry" >&2; return 1; }
   grep -q 'search.sigstore.dev/?hash=${{ steps.build-and-push.outputs.digest }}' "$workflow" || { echo "release does not annotate Sigstore digest link" >&2; return 1; }
-  grep -q 'docker.io/${{ vars.DOCKERHUB_ORG }}/trusted-workload-launcher' "$workflow" || { echo "image not published under dstack DOCKERHUB_ORG namespace" >&2; return 1; }
-  grep -q "trusted-workload-launcher-v" "$workflow" || { echo "workflow not gated on trusted-workload-launcher-v* tag prefix" >&2; return 1; }
+  grep -q 'docker.io/${{ vars.DOCKERHUB_ORG }}/git-launcher' "$workflow" || { echo "image not published under dstack DOCKERHUB_ORG namespace" >&2; return 1; }
+  grep -q "git-launcher-v" "$workflow" || { echo "workflow not gated on git-launcher-v* tag prefix" >&2; return 1; }
 
   local test_line build_line
   test_line=$(grep -n "Run launcher tests" "$workflow" | cut -d: -f1 | head -1)
@@ -482,8 +502,8 @@ test_dockerfile_runtime_is_minimal_launcher() {
   grep -Eq "^FROM ubuntu:24\.04@sha256:[0-9a-f]{64}\$" "$dockerfile" || { echo "Dockerfile must pin the Ubuntu 24.04 base by digest (FROM ubuntu:24.04@sha256:<64hex>)" >&2; return 1; }
   grep -q "bash" "$dockerfile" || { echo "Dockerfile missing bash dependency" >&2; return 1; }
   grep -q "git" "$dockerfile" || { echo "Dockerfile missing git dependency" >&2; return 1; }
-  grep -q "COPY bin/trusted-workload-launcher /usr/local/bin/trusted-workload-launcher" "$dockerfile" || { echo "Dockerfile does not copy only the launcher script" >&2; return 1; }
-  grep -q 'ENTRYPOINT \["trusted-workload-launcher"\]' "$dockerfile" || { echo "Dockerfile entrypoint is not trusted-workload-launcher" >&2; return 1; }
+  grep -q "COPY bin/git-launcher /usr/local/bin/git-launcher" "$dockerfile" || { echo "Dockerfile does not copy only the launcher script" >&2; return 1; }
+  grep -q 'ENTRYPOINT \["git-launcher"\]' "$dockerfile" || { echo "Dockerfile entrypoint is not git-launcher" >&2; return 1; }
 }
 
 test_verify_doc_present_and_linked() {
@@ -497,7 +517,7 @@ test_verify_doc_present_and_linked() {
 # Run all cases
 # ──────────────────────────────────────────────────────────────────────────
 
-echo "trusted-workload-launcher tests"
+echo "git-launcher tests"
 echo "  launcher: $LAUNCHER"
 echo "  tmproot:  $TMPROOT"
 echo
@@ -512,6 +532,7 @@ run_case "missing_required_field"                test_missing_required_field
 run_case "unknown_key_rejected"                  test_unknown_key_rejected
 run_case "repo_subdir_escape_rejected"           test_repo_subdir_escape_rejected
 run_case "origin_mismatch_rejected"              test_origin_mismatch_rejected
+run_case "non_git_non_empty_work_dir_rejected"   test_non_git_non_empty_work_dir_rejected
 run_case "child_env_file_passes_through"         test_child_env_file
 run_case "install_runs_before_run"               test_install_runs_before_run
 run_case "default_mode_happy"                    test_default_mode_happy

@@ -1,17 +1,16 @@
-# trusted-workload-launcher
+# git-launcher
 
-A minimal, auditable launcher image for dstack. Given a config file that
+A minimal, auditable Git launcher image for dstack. Given a config file that
 names an upstream Git repo and a full commit SHA, the launcher fetches that
 exact commit, verifies `HEAD` after checkout, and runs the workload's own
 entry point script — with no fallback to branches, tags, or short SHAs.
 
-"Trusted" in the name refers to what a dstack deployment using this image
-can produce — a *trusted workload deployment* — not to any intrinsic
-property of the workload code. The launcher's job is to make the identity
-of what runs in the TEE checkable: it combines TEE attestation with an
-auditable image digest and an attested config that names the workload
-commit. Whether the workload at that commit is itself trustworthy is up to
-the auditor.
+The name is literal: this image launches arbitrary Git input, but only at an
+explicit commit selected by attested config. It does not make the workload
+trustworthy by itself. Its job is to make the identity of what runs in the TEE
+checkable by combining TEE attestation, an auditable launcher image digest, and
+an attested config that names the workload commit. Whether the workload at that
+commit is itself trustworthy is up to the auditor.
 
 By convention, **the workload repo provides its own bash entry point at
 `entrypoint.sh`** (default mode). This keeps install/build/run logic inside
@@ -109,10 +108,10 @@ given (launcher image digest, attested config) pair.
 ## CLI
 
 ```
-trusted-workload-launcher <config-file>
+git-launcher <config-file>
 ```
 
-The launcher is a single bash script (`bin/trusted-workload-launcher`). It
+The launcher is a single bash script (`bin/git-launcher`). It
 depends only on `bash`, `git`, and POSIX coreutils. It is **not** sourced
 and **does not source** the config. In default mode, the only bytes it
 executes are those of the workload repo's `entrypoint.sh` at the pinned
@@ -191,6 +190,20 @@ audited alongside `COMMIT_SHA`.
   mode it executes `INSTALL_CMD` / `RUN_CMD` via `bash -c`. Nothing else
   from the config reaches a shell.
 
+### Persistent volume and reboot behavior
+
+`WORK_DIR` should normally live on a persistent Docker volume, for example
+`/var/lib/git-launcher/<workload>`. On first boot, `git-launcher` creates the
+directory and clones `REPO_URL` there. On reboot or container restart, the same
+directory is reused only if it is already a git checkout whose `origin` exactly
+matches `REPO_URL`.
+
+Every boot still runs the same verification path: fetch from `origin`, detach
+checkout to `COMMIT_SHA`, then assert `git rev-parse HEAD == COMMIT_SHA`.
+Persistent state is therefore only a cache. It does not decide what runs. If
+the volume is empty, the launcher reclones. If the volume is non-empty but not a
+git checkout, or if it points at a different origin, startup fails.
+
 ## Example
 
 See [`examples/web-app.conf`](./examples/web-app.conf). Adapt `REPO_URL`,
@@ -198,7 +211,7 @@ See [`examples/web-app.conf`](./examples/web-app.conf). Adapt `REPO_URL`,
 make sure the workload repo has a `entrypoint.sh` at the pinned commit.
 
 ```sh
-./bin/trusted-workload-launcher ./examples/web-app.conf
+./bin/git-launcher ./examples/web-app.conf
 ```
 
 The launcher logs the resolved repo, commit, workdir, and selected mode at
@@ -235,11 +248,11 @@ reflected in the dstack attestation.
 ```yaml
 services:
   workload:
-    image: docker.io/<org>/trusted-workload-launcher@sha256:<launcher-digest>
-    command: ["/etc/trusted-workload-launcher/config.conf"]
+    image: docker.io/<org>/git-launcher@sha256:<launcher-digest>
+    command: ["/etc/git-launcher/config.conf"]
     volumes:
-      - ./web-app.conf:/etc/trusted-workload-launcher/config.conf:ro
-      - workload-checkout:/var/lib/trusted-workload-launcher
+      - ./web-app.conf:/etc/git-launcher/config.conf:ro
+      - workload-checkout:/var/lib/git-launcher
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
@@ -257,13 +270,13 @@ against the one they audited:
 ```yaml
 services:
   workload:
-    image: docker.io/<org>/trusted-workload-launcher@sha256:<launcher-digest>
-    command: ["/etc/trusted-workload-launcher/config.conf"]
+    image: docker.io/<org>/git-launcher@sha256:<launcher-digest>
+    command: ["/etc/git-launcher/config.conf"]
     configs:
       - source: pin
-        target: /etc/trusted-workload-launcher/config.conf
+        target: /etc/git-launcher/config.conf
     volumes:
-      - workload-checkout:/var/lib/trusted-workload-launcher
+      - workload-checkout:/var/lib/git-launcher
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: unless-stopped
 
@@ -272,7 +285,7 @@ configs:
     content: |
       REPO_URL=https://github.com/example-org/example-web-app.git
       COMMIT_SHA=<full-40-or-64-hex-sha>
-      WORK_DIR=/var/lib/trusted-workload-launcher/example-web-app
+      WORK_DIR=/var/lib/git-launcher/example-web-app
 
 volumes:
   workload-checkout:
@@ -288,9 +301,9 @@ If you want a single digest to fully determine the workload, build a small
 downstream image that copies the config in:
 
 ```dockerfile
-FROM docker.io/<org>/trusted-workload-launcher@sha256:<launcher-digest>
-COPY web-app.conf /etc/trusted-workload-launcher/config.conf
-CMD ["/etc/trusted-workload-launcher/config.conf"]
+FROM docker.io/<org>/git-launcher@sha256:<launcher-digest>
+COPY web-app.conf /etc/git-launcher/config.conf
+CMD ["/etc/git-launcher/config.conf"]
 ```
 
 Deploy that derived image (pinned by its own `@sha256:…`). The derived
@@ -331,11 +344,11 @@ unprivileged in CI or on a developer laptop.
 
 ## Release image provenance
 
-The release workflow (`.github/workflows/trusted-workload-launcher-release.yml`
+The release workflow (`.github/workflows/git-launcher-release.yml`
 in this repository's root `.github/`) follows the dstack-examples pattern:
 
 1. run `./tests/run-tests.sh`;
-2. build and push `docker.io/${DOCKERHUB_ORG}/trusted-workload-launcher:<tag>`;
+2. build and push `docker.io/${DOCKERHUB_ORG}/git-launcher:<tag>`;
 3. call `actions/attest-build-provenance@v1` with the Docker build digest;
 4. write the digest and a Sigstore search link into both the GitHub Actions
    step summary and the GitHub release body.
@@ -349,7 +362,7 @@ compare that digest before trusting the launcher image.
 If you are reviewing this directory at commit `L` before signing off on a
 launcher image, the relevant audit surface is:
 
-1. `bin/trusted-workload-launcher` — every line. Confirm:
+1. `bin/git-launcher` — every line. Confirm:
    * No `eval`, no `source`/`.`, no command substitution applied to config
      values during parsing.
    * `git checkout` always uses the verbatim `COMMIT_SHA` and the result is

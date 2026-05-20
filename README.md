@@ -231,7 +231,7 @@ Implementation details and infrastructure patterns.
 | Example | Description |
 |---------|-------------|
 | [launcher](./launcher) | Generic launcher pattern for Docker Compose apps (auto-update) |
-| [trusted-workload-launcher](./trusted-workload-launcher) | Run a pinned Git commit in a TEE. |
+| [git-launcher](./git-launcher) | Run a pinned Git commit in a TEE. |
 | [prelaunch-script](./prelaunch-script) | Pre-launch script patterns (Phala Cloud) |
 | [private-docker-image-deployment](./private-docker-image-deployment) | Using private Docker registries |
 | [attestation/rtmr3-based](./attestation/rtmr3-based) | RTMR3-based attestation (legacy) |

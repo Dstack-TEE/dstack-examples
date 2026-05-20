@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# trusted-workload-launcher: minimal launcher for a workload pinned at a
+# git-launcher: minimal launcher for a workload pinned at a
 # specific upstream Git commit.
 #
 # Reads one env-file config, clones the configured repo, hard-pins to the
