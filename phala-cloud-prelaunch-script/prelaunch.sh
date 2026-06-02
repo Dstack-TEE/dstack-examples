@@ -1,5 +1,6 @@
+#!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.14"
+echo "Running Phala Cloud Pre-Launch Script v0.0.15"
 echo "----------------------------------------------"
 set -e
 
@@ -158,16 +159,13 @@ if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && 
         repo="${img#ghcr.io/}"; repo="${repo%%:*}"
         tag="${img##*:}"; [[ "$tag" == "$img" || "$tag" == "$repo" ]] && tag="latest"
         echo "Verifying GHCR pull access: $img"
-        token=$(curl -sf -u "$DSTACK_DOCKER_USERNAME:$DSTACK_DOCKER_PASSWORD" \
-            "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" | jq -r '.token // empty' || true)
+        token=$(curl -sf -u "$DSTACK_DOCKER_USERNAME:$DSTACK_DOCKER_PASSWORD"             "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" | jq -r '.token // empty' || true)
         if [[ -z "$token" ]]; then
             echo "ERROR: GHCR token exchange failed for $img"
             notify_host_hoot_error "GHCR token exchange failed: $img"
             exit 1
         fi
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" \
-            -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" \
-            "https://ghcr.io/v2/${repo}/manifests/${tag}")
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token"             -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"             "https://ghcr.io/v2/${repo}/manifests/${tag}")
         if [[ "$http_code" != "200" ]]; then
             echo "ERROR: GHCR pull access denied for $img (HTTP $http_code)"
             notify_host_hoot_error "GHCR pull access denied: $img (HTTP $http_code)"
@@ -176,6 +174,26 @@ if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && 
         echo "GHCR pull access OK: $img"
     done
 fi
+
+#
+# Pull latest images from docker-compose.yaml so existing CVMs pick up new tags.
+# Pull is fail-soft: short-lived tokens may expire between login and pull, but
+# falling back to already-cached images is preferable to blocking boot.
+#
+echo "Images before pull:"
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} ({{.CreatedSince}})'
+
+echo "Pulling latest images from /dstack/docker-compose.yaml..."
+if docker compose -f /dstack/docker-compose.yaml pull; then
+    echo "docker compose pull completed"
+    notify_host_hoot_info "docker compose pull completed"
+else
+    echo "WARNING: docker compose pull failed; continuing with existing images"
+    notify_host_hoot_info "docker compose pull failed; using existing images"
+fi
+
+echo "Images after pull:"
+docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} ({{.CreatedSince}})'
 
 #
 # Set root password.
@@ -221,8 +239,9 @@ else
 
         if [ -n "$DSTACK_ROOT_PASSWORD" ]; then
             echo "Setting root password from user.."
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null \
-                || printf '%s\n%s\n' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
+            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null                 || printf '%s
+%s
+' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
             unset DSTACK_ROOT_PASSWORD
             echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
@@ -230,8 +249,9 @@ else
             DSTACK_ROOT_PASSWORD=$(
                 LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
             )
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null \
-                || printf '%s\n%s\n' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
+            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null                 || printf '%s
+%s
+' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
             unset DSTACK_ROOT_PASSWORD
             echo "Root password set (random auto-init)"
         else
