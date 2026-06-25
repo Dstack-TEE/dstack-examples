@@ -1,17 +1,10 @@
 name: tsm-shim-example
 
-# Run an UNMODIFIED configfs-tsm attestation binary on a stock dstack CVM.
-#
-# `tsm-shim` is a prebuilt sidecar (built & published to GHCR by
-# .github/workflows/build-tsm-shim.yml) that re-exposes the dstack guest-agent's
-# GetQuote RPC under the standard configfs-tsm file ABI (inblob/outblob). Your
-# app talks to the kernel-style interface it already expects; the shim forwards
-# report_data to real TDX hardware and returns the genuine quote. No OS change,
-# no FUSE, no privileged container, no extra capabilities.
-#
-# The `app` service below is a self-test (it reuses the shim image only to run a
-# bundled demo client). In your own deployment, replace `app` with your service
-# and add the four lines marked (+).
+# Run an unmodified configfs-tsm attestation binary on a stock dstack CVM: the
+# tsm-shim sidecar re-exposes the guest-agent GetQuote RPC as inblob/outblob.
+# `app` is a self-test (reuses the shim image to run a bundled demo client); in
+# your deployment, replace it with your service and add the four (+) lines.
+# See README.md for details.
 
 services:
   # ---------- the shim sidecar ----------

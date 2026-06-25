@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
-"""Demo "unmodified" attestation app — a standard configfs-tsm consumer.
-
-Does exactly what a real binary built against the Linux TSM interface does:
-  1. check that the TDX guest device exists,
-  2. write up to 64 bytes of report_data to <dir>/inblob,
-  3. read the raw Intel DCAP TDX quote from <dir>/outblob.
-
-The only deployment-specific knob is TSM_REPORT_PATH. On a stock dstack CVM that
-directory is served by the tsm-shim sidecar instead of the kernel.
+"""Demo configfs-tsm consumer: check the device, write report_data to inblob,
+read the quote from outblob. TSM_REPORT_PATH points at the shim (vs the kernel's
+/sys/kernel/config/tsm/report). An empty outblob read means the quote failed.
 """
 import hashlib
 import os

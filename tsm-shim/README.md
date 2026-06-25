@@ -2,22 +2,18 @@
 
 Some programs request a TDX quote through the **standard Linux interfaces** —
 `configfs-tsm` (`/sys/kernel/config/tsm/report/*`, with `inblob`/`outblob`) and a
-`/dev/tdx-guest` device — rather than through the dstack SDK / guest-agent
-socket. On a stock dstack CVM those kernel interfaces aren't exposed to app
-containers, so such binaries fail out of the box.
+`/dev/tdx-guest` device — rather than through the dstack SDK / guest-agent socket.
+A stock dstack CVM doesn't expose those kernel interfaces to app containers, so
+such binaries fail out of the box.
 
-This example ships a small **sidecar** that bridges the gap. It re-exposes the
-guest-agent's `GetQuote` RPC under the configfs-tsm file ABI: your app writes
+This example ships a small **sidecar** that bridges the gap: it re-exposes the
+guest-agent's `GetQuote` RPC under the configfs-tsm file ABI. Your app writes
 `report_data` to `inblob` and reads the raw Intel DCAP TDX quote from `outblob`,
-exactly as it would against the kernel.
+exactly as against the kernel. No OS change, no FUSE, no privileged container; the
+quote is the genuine hardware quote and `report_data` is forwarded byte-for-byte.
 
-- **No OS change** — pure userspace, runs in a normal container.
-- **No FUSE, no `CAP_SYS_ADMIN`, no privileged mode, no device passthrough.**
-- **No weaker attestation** — the quote is the genuine hardware quote and
-  `report_data` is forwarded byte-for-byte.
-
-The shim image is built and published to GHCR by
-[`.github/workflows/build-tsm-shim.yml`](../.github/workflows/build-tsm-shim.yml):
+The image is built and published to GHCR by
+[`build-tsm-shim.yml`](../.github/workflows/build-tsm-shim.yml):
 `ghcr.io/dstack-tee/dstack-tsm-shim`.
 
 ## Try it
@@ -69,46 +65,32 @@ volumes:
 
 If your binary **hard-codes** `/sys/kernel/config/tsm/report`, mount the shared
 volume there instead of using `TSM_REPORT_PATH`:
-
-```yaml
-    volumes:
-      - tsm-report:/sys/kernel/config/tsm/report
-```
-
-For production, pin the image by digest (e.g.
-`ghcr.io/dstack-tee/dstack-tsm-shim:latest@sha256:...`).
+`- tsm-report:/sys/kernel/config/tsm/report`. For production, pin the image by
+digest (`ghcr.io/dstack-tee/dstack-tsm-shim@sha256:...`).
 
 ## How it works
 
-`tsm-shim` exposes `inblob` and `outblob` as **named pipes (FIFOs)** in a shared
-volume. A read of `outblob` blocks until the quote for the most recent `inblob`
-write is ready — which matches configfs-tsm's write-then-read contract with no
-race and no privileges. When `inblob` is written, the shim calls
-`POST /GetQuote` on `/var/run/dstack.sock` and writes the returned quote to
-`outblob`. The image reports healthy only once both FIFOs exist, so the app can
-gate on `depends_on: { condition: service_healthy }`.
+`inblob`/`outblob` are **named pipes (FIFOs)** in a shared volume; a read of
+`outblob` blocks until the quote is ready (configfs-tsm's write-then-read
+contract). On an `inblob` write the shim `POST`s `/GetQuote` to
+`/var/run/dstack.sock` and writes the quote to `outblob`. The image reports
+healthy only once both FIFOs exist, so the app gates on `service_healthy`. An
+**empty `outblob` read means the quote failed** (the shim logs why).
 
-The `/dev/tdx-guest` device can't be created inside another container from a
-sidecar, so an empty volume is mounted at that path — enough for the common
-"does the device exist?" check. (dstack permits mounting under `/dev`.)
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `tsm_shim.py` | the sidecar daemon (pure Python stdlib, no dependencies) |
-| `demo-app.py` | a stand-in unmodified configfs-tsm consumer (bundled self-test) |
-| `Dockerfile` | builds the published image |
-| `docker-compose.yaml` | the shim + demo app wired together |
+`/dev/tdx-guest` can't be created in another container from a sidecar, so an
+empty volume is mounted there to satisfy the common "does the device exist?"
+check (dstack permits mounting under `/dev`).
 
 ## Limitations
 
 - Covers the **configfs-tsm `inblob`/`outblob`** path (used by `go-configfs-tsm`,
   recent `libtdx-attest`, etc.).
-- Does **not** emulate the `/dev/tdx-guest` `TDX_CMD_GET_REPORT0` ioctl. That
-  returns a raw, locally-MAC'd TDREPORT, which dstack does not expose and which
-  can't be derived from a quote — so it isn't recoverable in userspace by any
-  shim. Binaries that drive the device by ioctl rather than configfs are out of
-  scope.
-- One quote at a time per shim instance (matches the kernel's single
-  configfs-tsm entry). Run one shim per app.
+- Does **not** emulate the `/dev/tdx-guest` `TDX_CMD_GET_REPORT0` ioctl: it
+  returns a raw, locally-MAC'd TDREPORT, which dstack doesn't expose and which
+  can't be derived from a quote, so it isn't recoverable in userspace by any
+  shim. Binaries that drive the device by ioctl are out of scope.
+- **Single in-flight requester** per shim — the shared `inblob`/`outblob` pair
+  can't correlate concurrent callers (the kernel gives each opener its own
+  `report/<entry>/`; this doesn't). Run one shim per app; the shim rejects an
+  `inblob` write larger than 64 bytes (a sign of racing writers) rather than
+  return an ambiguous quote.

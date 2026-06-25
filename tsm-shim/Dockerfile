@@ -1,6 +1,6 @@
 # Pure stdlib — no pip, no build deps. Built & pushed to GHCR by
 # .github/workflows/build-tsm-shim.yml.
-FROM python:3.12-slim
+FROM python:3.12-slim@sha256:6c4dd321d176d61ea848dc8c73a4f7dbae8f70e0ee48bb411ea2f045b599fa8e
 
 LABEL org.opencontainers.image.title="dstack-tsm-shim"
 LABEL org.opencontainers.image.description="configfs-tsm compatibility shim: re-exposes dstack guest-agent GetQuote as inblob/outblob FIFOs"
@@ -13,7 +13,7 @@ ENV TSM_REPORT_DIR=/run/tsm/report \
     DSTACK_SOCKET=/var/run/dstack.sock
 
 # Report healthy only once both FIFOs exist, so an app can gate on
-# `depends_on: { tsm-shim: { condition: service_healthy } }` with no race.
+# `depends_on: { tsm-shim: { condition: service_healthy } }`.
 HEALTHCHECK --interval=2s --timeout=2s --retries=30 --start-period=1s \
   CMD test -p "$TSM_REPORT_DIR/inblob" && test -p "$TSM_REPORT_DIR/outblob" || exit 1
 
