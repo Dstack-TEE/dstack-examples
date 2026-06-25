@@ -128,6 +128,7 @@ volumes:
 |---------|-------------|--------|
 | [timelock-nts](./timelock-nts) | Raw socket usage (what the SDK wraps) | Available |
 | [attestation/configid-based](./attestation/configid-based) | ConfigID-based verification | Available |
+| [tsm-shim](./tsm-shim) | Run unmodified `configfs-tsm` binaries (inblob/outblob) via a sidecar | Available |
 
 ### Gateway & Domains
 
