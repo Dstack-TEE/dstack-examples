@@ -1,0 +1,33 @@
+name: tsm-shim-example
+
+# Run an unmodified configfs-tsm attestation binary on a stock dstack CVM: the
+# tsm-shim sidecar re-exposes the guest-agent GetQuote RPC as inblob/outblob.
+# `app` is a self-test (reuses the shim image to run a bundled demo client); in
+# your deployment, replace it with your service and add the four (+) lines.
+# See README.md for details.
+
+services:
+  # ---------- the shim sidecar ----------
+  tsm-shim:
+    image: ghcr.io/dstack-tee/dstack-tsm-shim:latest
+    restart: unless-stopped
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock    # source of real quotes
+      - tsm-report:/run/tsm/report                    # FIFOs shared with the app
+
+  # ---------- your app (here: a bundled demo client) ----------
+  app:
+    image: ghcr.io/dstack-tee/dstack-tsm-shim:latest  # <- replace with your image
+    entrypoint: ["python3", "/usr/local/bin/demo-app.py"]  # <- your app's entrypoint
+    depends_on:
+      tsm-shim:
+        condition: service_healthy                   # (+) wait until FIFOs exist
+    environment:
+      - TSM_REPORT_PATH=/run/tsm/report              # (+) point the app at the shim
+    volumes:
+      - tsm-report:/run/tsm/report                   # (+) see the shim's FIFOs
+      - tsm-devstub:/dev/tdx-guest                   # (+) make /dev/tdx-guest "exist"
+
+volumes:
+  tsm-report: {}
+  tsm-devstub: {}
