@@ -28,6 +28,10 @@ SOCKET = os.environ.get("DSTACK_SOCKET", "/var/run/dstack.sock")
 # How long to wait for the app to open outblob for reading before giving up, so a
 # caller that writes inblob then dies can't wedge the daemon.
 OUTBLOB_DEADLINE = float(os.environ.get("TSM_OUTBLOB_DEADLINE", "30"))
+# Mode for inblob/outblob. Default 0666 so a non-root app (any uid) in the same
+# container can read/write them -- the shared volume is the access boundary, not
+# the file bits. Set e.g. 0660 to restrict to the file's group.
+REPORT_MODE = int(os.environ.get("TSM_REPORT_MODE", "0666"), 8)
 
 
 def log(msg):
@@ -88,7 +92,8 @@ def open_write_deadline(path, deadline=30.0):
 def make_fifo(path):
     if os.path.lexists(path):
         os.remove(path)
-    os.mkfifo(path, 0o600)
+    os.mkfifo(path)
+    os.chmod(path, REPORT_MODE)  # chmod, not the mkfifo arg: the latter is cut by umask
 
 
 def main():
