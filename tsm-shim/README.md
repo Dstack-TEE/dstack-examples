@@ -4,11 +4,12 @@ Some attestation binaries get their TDX quote through the kernel's `configfs-tsm
 files (`/sys/kernel/config/tsm/report/*` — write `inblob`, read `outblob`) instead
 of the dstack SDK. dstack doesn't expose those files to containers, so they fail.
 
-This sidecar bridges them: it serves `inblob`/`outblob` from a shared volume and
-forwards each request to the guest-agent's `GetQuote`. The quote is the real
-hardware quote (`report_data` passed through unchanged), so an unmodified binary
-works with only docker-compose changes — no OS change, no FUSE, no privileged
-container. CI publishes the image to `ghcr.io/dstack-tee/dstack-tsm-shim`.
+This sidecar bridges them: it serves one **fixed** `inblob`/`outblob` directory
+from a shared volume and forwards each request to the guest-agent's `GetQuote`.
+The quote is the real hardware quote (`report_data` passed through unchanged), so
+a binary pointed at that directory works with only docker-compose changes — no OS
+change, no FUSE, no privileged container. CI publishes the image to
+`ghcr.io/dstack-tee/dstack-tsm-shim`.
 
 ## Use it
 
@@ -51,8 +52,10 @@ phala cvms logs <app_id> -c app    # expect PASS and a ~5 KB quote
 
 ## Good to know
 
-- Covers the configfs-tsm `inblob`/`outblob` path (go-configfs-tsm, recent
-  libtdx-attest). It does **not** handle the `/dev/tdx-guest` ioctl, which needs a
-  raw TDREPORT that dstack doesn't expose.
+- Works for binaries pointed at a **fixed** report directory (write `inblob`, read
+  `outblob`, no `mkdir`). It does **not** implement the standard configfs-tsm flow
+  where the caller `mkdir`s a fresh `report/<entry>/` per request (e.g.
+  `go-configfs-tsm`), nor the `/dev/tdx-guest` ioctl (which needs a raw TDREPORT
+  dstack doesn't expose).
 - One request at a time, one shim per app — a shared `inblob`/`outblob` can't tell
   concurrent callers apart. An empty `outblob` read means the quote failed.
