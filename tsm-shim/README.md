@@ -59,3 +59,5 @@ phala cvms logs <app_id> -c app    # expect PASS and a ~5 KB quote
   dstack doesn't expose).
 - One request at a time, one shim per app — a shared `inblob`/`outblob` can't tell
   concurrent callers apart. An empty `outblob` read means the quote failed.
+- `inblob`/`outblob` are created mode `0666`, so a non-root app can use them. Set
+  `TSM_REPORT_MODE` (e.g. `0660`) on the `tsm-shim` service to restrict access.
