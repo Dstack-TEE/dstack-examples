@@ -268,6 +268,13 @@ backend ${be_name}
 
 set_alias_record() {
     local domain="$1"
+    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
+        echo "[challenge-delegation] Not touching ${domain}'s own zone (token is scoped to the delegated zone)."
+        echo "[challenge-delegation] Set these in your production zone yourself (static, one-time):"
+        echo "    ${domain}  CNAME  ${GATEWAY_DOMAIN}"
+        echo "    _acme-challenge.${domain}  CNAME  _acme-challenge.${domain}.${ACME_CHALLENGE_ALIAS}"
+        return
+    fi
     echo "Setting alias record for $domain"
     dnsman.py set_alias \
         --domain "$domain" \
@@ -299,6 +306,12 @@ set_txt_record() {
         txt_domain="${TXT_PREFIX}-wildcard.${domain#\*.}"
     else
         txt_domain="${TXT_PREFIX}.${domain}"
+    fi
+
+    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
+        echo "[challenge-delegation] Set this in your production zone yourself (static, one-time):"
+        echo "    ${txt_domain}  TXT  \"$APP_ID:$PORT\""
+        return
     fi
 
     dnsman.py set_txt \
@@ -337,6 +350,30 @@ set_caa_record() {
     fi
 
     ACCOUNT_URI=$(jq -j '.uri' "$account_file")
+
+    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
+        # Delegation mode: our token has no access to the served domain's zone,
+        # so we cannot set the accounturi CAA ourselves. This CAA is the
+        # forge-prevention (only the enclave's ACME account may issue), so we do
+        # NOT silently skip it — we print the exact record the operator must set,
+        # then best-effort verify it and warn loudly if it is missing.
+        local caa_value="letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
+        echo "[challenge-delegation] Set this CAA in your production zone yourself (static):"
+        echo "    ${caa_domain}  CAA  0 ${caa_tag} \"${caa_value}\""
+        # Verify via DNS-over-HTTPS (dig is not installed; curl is).
+        local caa_answer
+        caa_answer=$(curl -s --max-time 10 "https://dns.google/resolve?name=${caa_domain}&type=257" 2>/dev/null || true)
+        if echo "$caa_answer" | grep -q "accounturi=$ACCOUNT_URI"; then
+            echo "[challenge-delegation] Verified: accounturi CAA is present for $caa_domain"
+        else
+            echo "WARNING: accounturi CAA is NOT present for $caa_domain."
+            echo "WARNING: Without it, anyone who can satisfy the DNS-01 challenge could obtain a"
+            echo "WARNING: publicly-trusted certificate for this domain (forged TLS termination)."
+            echo "WARNING: Set the CAA record shown above before relying on this endpoint."
+        fi
+        return
+    fi
+
     echo "Adding CAA record ($caa_tag) for $caa_domain, accounturi=$ACCOUNT_URI"
     dnsman.py set_caa \
         --domain "$caa_domain" \

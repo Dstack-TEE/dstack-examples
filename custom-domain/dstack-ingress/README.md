@@ -179,8 +179,38 @@ environment:
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
+| `ACME_CHALLENGE_ALIAS` | | Delegate the ACME DNS-01 challenge to this zone (see below) so the DNS token needs no access to the served domain's own zone |
+| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `30` | Wait after writing the delegated challenge TXT before validation (only used with `ACME_CHALLENGE_ALIAS`) |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
+
+### ACME challenge delegation (least-privilege DNS token)
+
+By default the DNS token must be able to edit the **served domain's own zone**
+(to write `_acme-challenge`, and — with `SET_CAA` — the CAA record). If the
+served name lives under a shared production zone (e.g. `svc.example.com` under
+`example.com`), that token can edit every record in the zone, which may be more
+privilege than you want.
+
+Set `ACME_CHALLENGE_ALIAS=<delegation-zone>` to answer the DNS-01 challenge in a
+separate zone that your token controls, so the token never touches the served
+domain's zone. In this mode dstack-ingress **only** manages the challenge TXT in
+the delegation zone; you set the following records **once, statically**, in the
+served domain's production zone (the container prints the exact values on start):
+
+```
+svc.example.com                       CNAME  <GATEWAY_DOMAIN>
+_dstack-app-address.svc.example.com   TXT    "<app-id>:<port>"
+_acme-challenge.svc.example.com       CNAME  _acme-challenge.svc.example.com.<delegation-zone>
+svc.example.com                       CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=<account-uri>"
+```
+
+> **Security note.** The `accounturi` CAA restricts issuance to this enclave's
+> ACME account. In delegation mode dstack-ingress cannot set it for you (no
+> token for the served zone), so it prints the record and verifies (via DoH)
+> that it is present, warning loudly if not. Without this CAA, anyone who can
+> satisfy the delegated challenge could obtain a certificate for the domain.
+> Provide the token scoped only to `<delegation-zone>`.
 
 ## Evidence & Attestation
 

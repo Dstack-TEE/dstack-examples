@@ -14,7 +14,7 @@ def main():
     )
     parser.add_argument(
         "action",
-        choices=["set_cname", "set_alias", "set_txt", "set_caa"],
+        choices=["set_cname", "set_alias", "set_txt", "unset_txt", "set_caa"],
         help="Action to perform",
     )
     parser.add_argument("--domain", required=True, help="Domain name")
@@ -66,6 +66,13 @@ def main():
                 print(f"Failed to set TXT record for {args.domain}", file=sys.stderr)
                 sys.exit(1)
             print(f"Successfully set TXT record for {args.domain}")
+
+        elif args.action == "unset_txt":
+            success = provider.unset_txt_record(args.domain)
+            if not success:
+                print(f"Failed to unset TXT record for {args.domain}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Successfully unset TXT record for {args.domain}")
 
         elif args.action == "set_caa":
             if not args.caa_tag or not args.caa_value:

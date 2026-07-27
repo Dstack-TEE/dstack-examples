@@ -265,13 +265,40 @@ class CertManager:
 
     def _build_certbot_command(self, action: str, domain: str, email: str) -> List[str]:
         """Build certbot command using provider configuration."""
+        certbot_cmd = self._get_certbot_command()
+
+        # Challenge-delegation mode: when ACME_CHALLENGE_ALIAS is set, answer the
+        # DNS-01 challenge in a delegated zone via a manual hook instead of the
+        # provider's certbot plugin, so our DNS token never needs access to the
+        # served domain's own zone. See scripts/acme-dns-alias-hook.sh.
+        if os.environ.get("ACME_CHALLENGE_ALIAS", "").strip():
+            hook = "/scripts/acme-dns-alias-hook.sh"
+            base_cmd = certbot_cmd + [action, "--non-interactive", "-v"]
+            if action == "certonly":
+                base_cmd.extend([
+                    "--manual",
+                    "--preferred-challenges=dns",
+                    f"--manual-auth-hook={hook} auth",
+                    f"--manual-cleanup-hook={hook} cleanup",
+                    "--agree-tos", "--no-eff-email",
+                    "--email", email, "-d", domain,
+                ])
+            # For `renew`, certbot reuses the authenticator + hooks saved in the
+            # renewal config from the initial `certonly`, so we don't re-specify
+            # them here (and must not fall back to the DNS plugin).
+            if os.environ.get("CERTBOT_STAGING", "false") == "true":
+                base_cmd.append("--staging")
+            masked = [a if not (i > 0 and base_cmd[i - 1] == "--email") else "<email>"
+                      for i, a in enumerate(base_cmd)]
+            print(f"Executing (challenge-delegation): {' '.join(masked)}")
+            return base_cmd
+
         plugin = self.provider.CERTBOT_PLUGIN
         if not plugin:
             raise ValueError(
                 f"No certbot plugin configured for {self.provider_type}")
 
         # Use Python module execution to ensure same environment
-        certbot_cmd = self._get_certbot_command()
         base_cmd = certbot_cmd + [action, "-a",
                                   plugin, "--non-interactive", "-v"]
 
