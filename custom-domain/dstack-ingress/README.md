@@ -180,7 +180,8 @@ environment:
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
 | `ACME_CHALLENGE_ALIAS` | | Delegate the ACME DNS-01 challenge to this zone (see below) so the DNS token needs no access to the served domain's own zone |
-| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `30` | Wait after writing the delegated challenge TXT before validation (only used with `ACME_CHALLENGE_ALIAS`) |
+| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `30` | Wait after writing the delegated challenge TXT before validation (only with `ACME_CHALLENGE_ALIAS`). Keep well under ~250s — certbot is killed after a 300s per-run timeout |
+| `ALLOW_MISSING_CAA` | `false` | In delegation mode, continue even if the required `accounturi` CAA cannot be confirmed. Default fails closed (see below) |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
@@ -206,11 +207,21 @@ svc.example.com                       CAA    0 issue "letsencrypt.org;validation
 ```
 
 > **Security note.** The `accounturi` CAA restricts issuance to this enclave's
-> ACME account. In delegation mode dstack-ingress cannot set it for you (no
-> token for the served zone), so it prints the record and verifies (via DoH)
-> that it is present, warning loudly if not. Without this CAA, anyone who can
-> satisfy the delegated challenge could obtain a certificate for the domain.
-> Provide the token scoped only to `<delegation-zone>`.
+> ACME account and is the control that prevents forged certificates. In
+> delegation mode dstack-ingress cannot set it for you (no token for the served
+> zone), so it prints the record and verifies its presence via DoH. **If the
+> CAA is confirmed absent the container fails to start** (set `ALLOW_MISSING_CAA=true`
+> to override; a transient DoH failure only warns, it does not block). Without
+> this CAA, anyone who can satisfy the delegated challenge could obtain a
+> certificate for the domain.
+>
+> Use a **dedicated** delegation zone and scope the token to only that zone — a
+> zone shared with other tenants lets anyone with write access to it complete
+> the challenge. `SET_CAA` does not affect delegation mode (this CAA path always
+> runs). If a certificate was previously issued with the standard DNS-plugin
+> authenticator, delete `/etc/letsencrypt/renewal/<domain>.conf` before enabling
+> delegation, otherwise `certbot renew` reuses the old plugin (which needs the
+> production-zone token this mode avoids).
 
 ## Evidence & Attestation
 

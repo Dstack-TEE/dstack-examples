@@ -261,7 +261,11 @@ class DNSProvider(ABC):
         """
         ok = True
         for record in self.get_dns_records(name, RecordType.TXT):
-            if record.id and not self.delete_dns_record(record.id, name):
+            if not record.id:
+                print(f"Warning: TXT record for {name} has no id; cannot delete")
+                ok = False
+                continue
+            if not self.delete_dns_record(record.id, name):
                 ok = False
         return ok
 
