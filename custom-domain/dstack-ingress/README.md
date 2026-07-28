@@ -209,8 +209,8 @@ privilege than you want.
 Set `DELEGATION_ZONE=<delegation-zone>` to move every name this deployment
 needs into a zone your token controls. You create three CNAMEs in the served
 domain's zone **once, before deploying**, and then never touch DNS again — not
-when the app id changes with the compose, not when the ACME account is
-recreated, not when the gateway moves:
+when the app id moves, not when the ACME account is recreated, not when the
+gateway moves:
 
 ```
 svc.example.com                      CNAME  svc.example.com.deleg.example.net
@@ -251,25 +251,21 @@ A wildcard and its base name share a delegated target: both `*.example.com` and
 is fine, since it publishes the same values twice. Two deployments pointing at
 different gateways are not — give them separate delegation zones.
 
-**Wildcards keep an operator-managed CAA.** RFC 8659 evaluates `*.example.com`
-at `example.com`, which is your own name and cannot be aliased away, so for a
-wildcard the container prints the CAA and verifies it rather than publishing it.
+**A wildcard needs a fourth CNAME.** RFC 8659 evaluates `*.app.example.com` at
+`app.example.com`, so the base gets its own alias and the container publishes an
+`issuewild` CAA behind it:
 
-> **Security note.** The `accounturi` CAA restricts issuance to this enclave's
-> ACME account and is the control that prevents forged certificates. In
-> delegation mode dstack-ingress cannot set it for you (no token for the served
-> zone), so it prints the record and verifies it. **A CAA that is confirmed
-> absent stops issuance** — set `ALLOW_MISSING_CAA=true` to downgrade that to a
-> warning. Without this CAA, anyone who can satisfy the delegated challenge
-> could obtain a certificate for the domain.
->
-> Use a **dedicated** delegation zone and scope the token to only that zone — a
-> zone shared with other tenants lets anyone with write access to it complete
-> the challenge. `SET_CAA` does not affect delegation mode (this CAA path always
-> runs). If a certificate was previously issued with the standard DNS-plugin
-> authenticator, delete `/etc/letsencrypt/renewal/<domain>.conf` before enabling
-> delegation, otherwise `certbot renew` reuses the old plugin (which needs the
-> production-zone token this mode avoids).
+```
+*.app.example.com                            CNAME  app.example.com.deleg.example.net
+app.example.com                              CNAME  app.example.com.deleg.example.net
+_dstack-app-address-wildcard.app.example.com CNAME  _dstack-app-address-wildcard.app.example.com.deleg.example.net
+_acme-challenge.app.example.com              CNAME  _acme-challenge.app.example.com.deleg.example.net
+```
+
+The base has to be a name you can alias, which rules out a zone apex — an apex
+carries SOA and NS records and a CNAME excludes them. `*.example.com` served
+straight off the `example.com` zone is therefore not a fit for delegation; a
+label down, `*.app.example.com`, is.
 
 The records above are checked the same way tls-alpn-01 checks its own: two DoH
 resolvers, both CAA wire formats, and `DNS_SETUP_MODE` deciding what happens

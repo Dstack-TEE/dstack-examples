@@ -175,21 +175,20 @@ delegation_publish() {
     dnsman.py set_txt --domain "$txt_name" --content "$(txt_record_value)" || return 1
 }
 
-# The accounturi CAA goes on the delegated name, beside the address record.
+# The accounturi CAA goes on the delegated name, beside the gateway pointer.
 #
-# Not for a wildcard: RFC 8659 evaluates `*.example.com` at `example.com`, which
-# is the operator's own name and cannot be aliased away. Wildcards keep the
-# operator-managed CAA.
+# A wildcard is evaluated at its base (RFC 8659), so it needs the `issuewild`
+# tag and it needs the operator to have aliased the base as well -- dnsguide
+# asks for that fourth CNAME. A base that is a zone apex cannot be aliased at
+# all, so such a domain is not a fit for delegation; the CAA check reports the
+# record missing rather than the container pretending to have set it.
 delegation_publish_caa() {
     local domain="$1" account_file account_uri
-    if [[ "$domain" == \*.* ]]; then
-        return 2
-    fi
     account_file=$(get_letsencrypt_account_file) || return 1
     account_uri=$(jq -j '.uri' "$account_file")
     dnsman.py set_caa \
         --domain "$(delegated_name "$domain")" \
-        --caa-tag issue \
+        --caa-tag "$(caa_tag_for "$domain")" \
         --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri"
 }
 
@@ -252,17 +251,11 @@ set_caa_record() {
     # thing stopping anyone else who can satisfy the delegated challenge, so it
     # is not optional here.
     if [ -n "${DELEGATION_ZONE:-}" ]; then
-        delegation_publish_caa "$domain"
-        case $? in
-            0) return ;;
-            2) # Wildcard: RFC 8659 evaluates *.example.com at example.com,
-               # which is the operator's own name and cannot be aliased away,
-               # so ask for it instead of publishing it.
-               delegation_verify_caa "$domain" || exit 1
-               return ;;
-            *) echo "Error: could not publish the CAA record for $domain" >&2
-               exit 1 ;;
-        esac
+        if ! delegation_publish_caa "$domain"; then
+            echo "Error: could not publish the CAA record for $domain" >&2
+            exit 1
+        fi
+        return
     fi
 
     if [ "$SET_CAA" != "true" ]; then

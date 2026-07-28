@@ -146,6 +146,29 @@ class TestDelegationRecord(unittest.TestCase):
         self.assertEqual(dnsguide.build_records(self._args("svc.example.com", "")), [])
 
 
+class TestWildcardDelegation(unittest.TestCase):
+    """A wildcard is evaluated at its base, so the base needs its own alias."""
+
+    def _records(self, domain, txt):
+        import argparse
+        return dnsguide.build_records(argparse.Namespace(
+            domain=domain, alias_target="gw", txt_name=txt, txt_value="x",
+            caa_name="", caa_tag="issue", caa_value="", account_uri="",
+            challenge="dns-01", challenge_alias="deleg.net", include="delegated"))
+
+    def test_wildcard_aliases_its_base_as_well(self):
+        names = [r.name for r in self._records(
+            "*.app.example.com", "_dstack-app-address-wildcard.app.example.com")]
+        self.assertIn("app.example.com", names)
+        self.assertEqual(len(names), 4)
+
+    def test_plain_domain_does_not(self):
+        names = [r.name for r in self._records(
+            "svc.example.com", "_dstack-app-address.svc.example.com")]
+        self.assertNotIn("example.com", names)
+        self.assertEqual(len(names), 3)
+
+
 class TestExactCnameCheck(unittest.TestCase):
     """check_alias falls back to comparing addresses; a delegation target has none."""
 

@@ -413,11 +413,22 @@ def build_records(args: argparse.Namespace) -> List[Record]:
         # rather than as "does not resolve".
         base = args.domain[2:] if args.domain.startswith("*.") else args.domain
         alias = args.challenge_alias
-        for name, note in (
+        wanted = [
             (args.domain, "routes traffic for this hostname into the delegated zone"),
             (args.txt_name, "lets the container publish the gateway routing target"),
             (f"_acme-challenge.{base}", "delegates the ACME challenge"),
-        ):
+        ]
+        if args.domain.startswith("*."):
+            # RFC 8659 evaluates CAA for *.example.com at example.com, not at the
+            # wildcard, so the base needs its own alias for the CAA to be
+            # delegated too. Verified: with this in place the CA followed it and
+            # honoured an issuewild record in the delegated zone.
+            #
+            # The base has to be aliasable, which a zone apex is not (SOA and
+            # NS live there and a CNAME excludes them), so `*.example.com`
+            # served straight off its own zone is not a fit for delegation.
+            wanted.insert(1, (base, "delegates CAA, which a wildcard is evaluated at"))
+        for name, note in wanted:
             records.append(
                 Record(
                     type="CNAME",
