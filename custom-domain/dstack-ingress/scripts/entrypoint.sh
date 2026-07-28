@@ -13,8 +13,38 @@ TIMEOUT_SERVER=${TIMEOUT_SERVER:-86400s}
 EVIDENCE_SERVER=${EVIDENCE_SERVER:-true}
 EVIDENCE_PORT=${EVIDENCE_PORT:-80}
 ALPN=${ALPN:-}
+CHALLENGE_TYPE=${CHALLENGE_TYPE:-dns-01}
+# Loopback address/port lego's tls-alpn-01 responder binds to, and the loopback
+# port the real TLS frontend moves to so the public port can be used for
+# ALPN-based routing. Neither is reachable from outside the container.
+TLSALPN_ADDRESS=${TLSALPN_ADDRESS:-127.0.0.1}
+TLSALPN_PORT=${TLSALPN_PORT:-9443}
+TLS_TERMINATE_PORT=${TLS_TERMINATE_PORT:-9444}
+DNS_SETUP_MODE=${DNS_SETUP_MODE:-wait}
+
+case "$CHALLENGE_TYPE" in
+    dns-01|tls-alpn-01) ;;
+    *)
+        echo "Error: invalid CHALLENGE_TYPE '$CHALLENGE_TYPE' (expected dns-01 or tls-alpn-01)" >&2
+        exit 1
+        ;;
+esac
+
+case "$DNS_SETUP_MODE" in
+    wait|print|webhook) ;;
+    *)
+        echo "Error: invalid DNS_SETUP_MODE '$DNS_SETUP_MODE' (expected wait, print or webhook)" >&2
+        exit 1
+        ;;
+esac
 
 if ! PORT=$(sanitize_port "$PORT"); then
+    exit 1
+fi
+if ! TLSALPN_PORT=$(sanitize_port "$TLSALPN_PORT"); then
+    exit 1
+fi
+if ! TLS_TERMINATE_PORT=$(sanitize_port "$TLS_TERMINATE_PORT"); then
     exit 1
 fi
 if ! DOMAIN=$(sanitize_domain "$DOMAIN"); then
@@ -44,6 +74,10 @@ fi
 if ! ALPN=$(sanitize_alpn "$ALPN"); then
     exit 1
 fi
+
+# renew-certificate.sh, renewal-daemon.sh and certman.py run as child processes
+# and read these from the environment.
+export CHALLENGE_TYPE TLSALPN_ADDRESS TLSALPN_PORT DNS_SETUP_MODE PORT
 
 # Warn about deprecated L7 env vars
 for var in CLIENT_MAX_BODY_SIZE PROXY_READ_TIMEOUT PROXY_SEND_TIMEOUT PROXY_CONNECT_TIMEOUT PROXY_BUFFER_SIZE PROXY_BUFFERS PROXY_BUSY_BUFFERS_SIZE; do
@@ -79,13 +113,20 @@ setup_py_env() {
     source /opt/app-venv/bin/activate
 
     if [ ! -f /.venv_bootstrapped ]; then
-        echo "Bootstrapping certbot dependencies"
         pip install --upgrade pip
-        pip install certbot requests boto3 botocore
+        if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+            # lego handles ACME here, so certbot and the cloud SDKs are dead
+            # weight: skip them and keep startup and attack surface smaller.
+            echo "Bootstrapping python dependencies (tls-alpn-01: no certbot)"
+            pip install requests
+        else
+            echo "Bootstrapping certbot dependencies"
+            pip install certbot requests boto3 botocore
+        fi
         touch /.venv_bootstrapped
     fi
 
-    ln -sf /opt/app-venv/bin/certbot /usr/local/bin/certbot
+    [ -x /opt/app-venv/bin/certbot ] && ln -sf /opt/app-venv/bin/certbot /usr/local/bin/certbot
     echo 'source /opt/app-venv/bin/activate' > /etc/profile.d/app-venv.sh
 }
 
@@ -93,6 +134,17 @@ setup_certbot_env() {
     # Ensure the virtual environment is active for certbot configuration
     # shellcheck disable=SC1091
     source /opt/app-venv/bin/activate
+
+    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+        # No DNS provider and no certbot plugin: lego handles this path and is
+        # baked into the image.
+        if [ ! -x "${LEGO_BIN:-/usr/local/bin/lego}" ]; then
+            echo "Error: lego binary not found at ${LEGO_BIN:-/usr/local/bin/lego}" >&2
+            exit 1
+        fi
+        echo "Using lego for tls-alpn-01: $(${LEGO_BIN:-/usr/local/bin/lego} --version)"
+        return
+    fi
 
     if [ "${DNS_PROVIDER}" = "route53" ]; then
       mkdir -p /root/.aws
@@ -128,6 +180,17 @@ setup_py_env
 # Emit common haproxy global/defaults/frontend preamble.
 # Both single-domain and multi-domain modes share this identical config.
 emit_haproxy_preamble() {
+    # In tls-alpn-01 mode the ACME responder has to complete the TLS handshake
+    # itself, but haproxy owns the public port. So the public port becomes a
+    # plain TCP frontend that peeks at the ClientHello and forwards only
+    # acme-tls/1 connections to lego; everything else goes to the real TLS
+    # frontend, which moves to loopback. PROXY protocol carries the client
+    # address across that extra hop so the backend still sees the real peer.
+    local tls_bind=":${PORT}"
+    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+        tls_bind="127.0.0.1:${TLS_TERMINATE_PORT} accept-proxy"
+    fi
+
     # "crt <dir>" loads all PEM files from the directory.
     # ALPN is appended conditionally via ${ALPN:+ alpn ${ALPN}}.
     cat <<EOF >/etc/haproxy/haproxy.cfg
@@ -148,8 +211,31 @@ defaults
     timeout client  ${TIMEOUT_CLIENT}
     timeout server  ${TIMEOUT_SERVER}
 
+EOF
+
+    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+        cat <<EOF >>/etc/haproxy/haproxy.cfg
+frontend tls_peek
+    bind :${PORT}
+    tcp-request inspect-delay 5s
+    tcp-request content accept if { req.ssl_hello_type 1 }
+    # Only the CA sends this ALPN protocol. A client that sends it anyway just
+    # reaches lego's responder, which refuses anything but acme-tls/1.
+    use_backend be_acme if { req.ssl_alpn -i acme-tls/1 }
+    default_backend be_tls_terminate
+
+backend be_acme
+    server lego ${TLSALPN_ADDRESS}:${TLSALPN_PORT}
+
+backend be_tls_terminate
+    server local 127.0.0.1:${TLS_TERMINATE_PORT} send-proxy-v2
+
+EOF
+    fi
+
+    cat <<EOF >>/etc/haproxy/haproxy.cfg
 frontend tls_in
-    bind :${PORT} ssl crt /etc/haproxy/certs/${ALPN:+ alpn ${ALPN}}
+    bind ${tls_bind} ssl crt /etc/haproxy/certs/${ALPN:+ alpn ${ALPN}}
 EOF
 
     if [ "$EVIDENCE_SERVER" = "true" ]; then
@@ -290,26 +376,67 @@ set_alias_record() {
     echo "Alias record set for $domain"
 }
 
-set_txt_record() {
-    local domain="$1"
-    local APP_ID
-
+# Query the guest agent once for this app's identity.
+load_dstack_identity() {
+    local info
     if [[ -S /var/run/dstack.sock ]]; then
-        DSTACK_APP_ID=$(curl -s --unix-socket /var/run/dstack.sock http://localhost/Info | jq -j .app_id)
-        export DSTACK_APP_ID
+        info=$(curl -s --unix-socket /var/run/dstack.sock http://localhost/Info)
     else
-        DSTACK_APP_ID=$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info | jq -j .app_id)
-        export DSTACK_APP_ID
+        info=$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info)
     fi
-    APP_ID=${APP_ID:-"$DSTACK_APP_ID"}
 
-    local txt_domain
+    DSTACK_APP_ID=$(echo "$info" | jq -j .app_id)
+    DSTACK_INSTANCE_ID=$(echo "$info" | jq -j .instance_id)
+    export DSTACK_APP_ID DSTACK_INSTANCE_ID
+
+    if [ -z "$DSTACK_APP_ID" ] || [ "$DSTACK_APP_ID" = "null" ]; then
+        echo "Error: could not read app_id from the dstack guest agent" >&2
+        exit 1
+    fi
+    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ] &&
+        { [ -z "$DSTACK_INSTANCE_ID" ] || [ "$DSTACK_INSTANCE_ID" = "null" ]; }; then
+        echo "Error: could not read instance_id from the dstack guest agent, which" >&2
+        echo "tls-alpn-01 needs to pin gateway routing to this instance" >&2
+        exit 1
+    fi
+}
+
+txt_record_name() {
+    local domain="$1"
     if [[ "$domain" == \*.* ]]; then
         # Wildcard domain: *.myapp.com → _dstack-app-address-wildcard.myapp.com
-        txt_domain="${TXT_PREFIX}-wildcard.${domain#\*.}"
+        echo "${TXT_PREFIX}-wildcard.${domain#\*.}"
     else
-        txt_domain="${TXT_PREFIX}.${domain}"
+        echo "${TXT_PREFIX}.${domain}"
     fi
+}
+
+# What the gateway should route this hostname to.
+#
+# dns-01 uses the app id, so the gateway load-balances across every instance of
+# the app. tls-alpn-01 cannot: the challenge is answered by whichever instance
+# certbot runs on, and routing by app id makes the gateway race connections
+# across the app's instances (select_top_n_hosts -> connect_multiple_hosts)
+# while the CA validates from several vantage points at once. The challenge
+# would land on the wrong replica. Pinning to the instance id makes validation
+# deterministic -- at the cost of sending all traffic to this one instance, so
+# tls-alpn-01 mode is effectively single-instance.
+txt_record_value() {
+    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+        echo "${DSTACK_INSTANCE_ID}:${PORT}"
+    else
+        echo "${APP_ID:-$DSTACK_APP_ID}:${PORT}"
+    fi
+}
+
+caa_tag_for() {
+    if [[ "$1" == \*.* ]]; then echo "issuewild"; else echo "issue"; fi
+}
+
+set_txt_record() {
+    local domain="$1"
+    local txt_domain
+    txt_domain=$(txt_record_name "$domain")
 
     if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
         echo "[challenge-delegation] Set this in your production zone yourself (static, one-time):"
@@ -319,7 +446,7 @@ set_txt_record() {
 
     dnsman.py set_txt \
         --domain "$txt_domain" \
-        --content "$APP_ID:$PORT"
+        --content "$(txt_record_value)"
 
     if [ $? -ne 0 ]; then
         echo "Error: Failed to set TXT record for $domain"
@@ -421,7 +548,7 @@ set_caa_record() {
     dnsman.py set_caa \
         --domain "$caa_domain" \
         --caa-tag "$caa_tag" \
-        --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri"
+        --caa-value "letsencrypt.org;validationmethods=${CHALLENGE_TYPE};accounturi=$account_uri"
 
     if [ $? -ne 0 ]; then
         echo "Warning: Failed to set CAA record for $domain"
@@ -430,15 +557,74 @@ set_caa_record() {
     fi
 }
 
-process_domain() {
+process_domain_dns01() {
     local domain="$1"
-    echo "Processing domain: $domain"
 
     set_alias_record "$domain"
     set_txt_record "$domain"
     renew-certificate.sh "$domain" || echo "First certificate renewal failed for $domain, will retry after set CAA record"
     set_caa_record "$domain"
     renew-certificate.sh "$domain"
+}
+
+process_domain_tlsalpn() {
+    local domain="$1"
+
+    if [[ "$domain" == \*.* ]]; then
+        echo "Error: cannot issue a wildcard certificate for $domain with tls-alpn-01." >&2
+        echo "RFC 8737 forbids it; use CHALLENGE_TYPE=dns-01 for wildcards." >&2
+        exit 1
+    fi
+
+    # Register the ACME account first so the CAA record we print can already
+    # pin accounturi. Without this the operator would have to add CAA in a
+    # second pass, after the account exists.
+    if ! legoman.py register --email "$CERTBOT_EMAIL"; then
+        echo "Error: failed to register the ACME account" >&2
+        exit 1
+    fi
+
+    local account_uri caa_value
+    account_uri=$(legoman.py account-uri --email "$CERTBOT_EMAIL" 2>/dev/null || true)
+    if [ -n "$account_uri" ]; then
+        caa_value="letsencrypt.org;validationmethods=tls-alpn-01;accounturi=$account_uri"
+    else
+        echo "Warning: could not read the ACME account URI; the CAA record will not pin it" >&2
+        caa_value="letsencrypt.org;validationmethods=tls-alpn-01"
+    fi
+
+    # Wait for the records routing depends on. An existing CAA record is also
+    # checked for compatibility -- not because CAA is required (an absent CAA
+    # record set permits every CA), but because an incompatible one makes the CA
+    # refuse and burns Let's Encrypt's failed-validation budget: 5 per account
+    # per hostname per hour.
+    if ! dnsguide.py \
+        --domain "$domain" \
+        --alias-target "$GATEWAY_DOMAIN" \
+        --txt-name "$(txt_record_name "$domain")" \
+        --txt-value "$(txt_record_value)" \
+        --caa-name "${domain#\*.}" \
+        --caa-tag "$(caa_tag_for "$domain")" \
+        --caa-value "$caa_value" \
+        --account-uri "$account_uri" \
+        --challenge tls-alpn-01 \
+        --mode "$DNS_SETUP_MODE"; then
+        echo "Error: required DNS records for $domain are not in place" >&2
+        exit 1
+    fi
+
+    renew-certificate.sh "$domain"
+}
+
+process_domain() {
+    local domain="$1"
+    echo "Processing domain: $domain (challenge: $CHALLENGE_TYPE)"
+
+    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+        process_domain_tlsalpn "$domain"
+    else
+        process_domain_dns01 "$domain"
+    fi
 }
 
 bootstrap() {
@@ -467,21 +653,67 @@ bootstrap() {
     touch /.bootstrapped
 }
 
+# haproxy refuses to start when the crt directory has no PEM in it. In
+# tls-alpn-01 mode the proxy has to be listening *before* the first certificate
+# exists, because it is what forwards the ACME challenge to certbot, so seed a
+# self-signed placeholder that the real certificate overwrites later.
+ensure_placeholder_certs() {
+    local all_domains domain pem
+    all_domains=$(get-all-domains.sh)
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] || continue
+        pem="/etc/haproxy/certs/${domain}.pem"
+        [ -f "$pem" ] && continue
+        echo "Generating placeholder certificate for ${domain}"
+        openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -keyout /tmp/placeholder.key -out /tmp/placeholder.crt \
+            -subj "/CN=${domain#\*.}" >/dev/null 2>&1
+        cat /tmp/placeholder.crt /tmp/placeholder.key >"$pem"
+        chmod 600 "$pem"
+        rm -f /tmp/placeholder.key /tmp/placeholder.crt
+    done <<<"$all_domains"
+}
+
+# Obtain certificates once the proxy is already serving, then swap them in.
+bootstrap_and_reload() {
+    # Nested subshell so an `exit 1` from a process_domain helper is reported as
+    # a failed condition here rather than silently killing this background job.
+    if ( bootstrap ); then
+        build-combined-pems.sh || echo "Combined PEM build failed" >&2
+        if [ -f /var/run/haproxy/haproxy.pid ]; then
+            kill -USR2 "$(cat /var/run/haproxy/haproxy.pid)" &&
+                echo "Certificates installed and HAProxy reloaded"
+        fi
+    else
+        echo "Bootstrap failed; the proxy keeps serving the placeholder certificate." >&2
+        echo "Fix the DNS records above; the renewal daemon retries every 12 hours." >&2
+    fi
+}
+
 # Credentials are now handled by certman.py setup
 
 # Setup certbot environment (venv is already created in Dockerfile)
 setup_certbot_env
+load_dstack_identity
 
-# Check if it's the first time the container is started
-if [ ! -f "/.bootstrapped" ]; then
-    bootstrap
+if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+    # Ordering is load-bearing here. The tls-alpn-01 challenge arrives on the
+    # public TLS port, so haproxy must already be routing acme-tls/1 to certbot
+    # before the first certificate can be issued. Start the proxy on a
+    # placeholder certificate and let issuance converge behind it.
+    ensure_placeholder_certs
+    build-combined-pems.sh || true
 else
-    echo "Certificate for $DOMAIN already exists"
-    generate-evidences.sh
+    # dns-01 needs no inbound traffic, so keep the original order: get the
+    # certificate first, start serving second.
+    if [ ! -f "/.bootstrapped" ]; then
+        bootstrap
+    else
+        echo "Certificate for $DOMAIN already exists"
+        generate-evidences.sh
+    fi
+    build-combined-pems.sh
 fi
-
-# Build combined PEM files for haproxy
-build-combined-pems.sh
 
 # Generate haproxy config
 if [ -n "$ROUTING_MAP" ]; then
@@ -494,6 +726,15 @@ fi
 if [ "$EVIDENCE_SERVER" = "true" ]; then
     mini_httpd -d /evidences -p "${EVIDENCE_PORT}" -D -l /dev/stderr &
     echo "Evidence server started on port ${EVIDENCE_PORT} (mini_httpd)"
+fi
+
+if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
+    if [ ! -f "/.bootstrapped" ]; then
+        bootstrap_and_reload &
+    else
+        echo "Certificates already bootstrapped"
+        generate-evidences.sh || echo "Evidence generation failed" >&2
+    fi
 fi
 
 renewal-daemon.sh &

@@ -13,10 +13,11 @@ all_domains=$(get-all-domains.sh)
 
 while IFS= read -r domain; do
     [[ -n "$domain" ]] || continue
-    le_dir="/etc/letsencrypt/live/$(cert_dir_name "$domain")"
+    fullchain=$(cert_fullchain_path "$domain")
+    privkey=$(cert_privkey_path "$domain")
     combined="${CERT_DIR}/${domain}.pem"
-    if [ -f "${le_dir}/fullchain.pem" ] && [ -f "${le_dir}/privkey.pem" ]; then
-        cat "${le_dir}/fullchain.pem" "${le_dir}/privkey.pem" > "$combined"
+    if [ -f "$fullchain" ] && [ -f "$privkey" ]; then
+        cat "$fullchain" "$privkey" > "$combined"
         chmod 600 "$combined"
         echo "Combined PEM created: ${combined}"
     else

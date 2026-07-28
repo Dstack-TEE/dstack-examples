@@ -169,9 +169,19 @@ environment:
 | `PORT` | `443` | HAProxy listen port |
 | `DOMAINS` | | Multiple domains, one per line |
 | `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line |
-| `SET_CAA` | `false` | Enable CAA DNS record |
+| `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `CERTBOT_STAGING` | `false` | Use Let's Encrypt staging server |
+| `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
+| `DNS_SETUP_MODE` | `wait` | tls-alpn-01 only: `wait`, `print` or `webhook` — see below |
+| `DNS_SETUP_TIMEOUT` | `1800` | tls-alpn-01 only: seconds to wait for the records to appear |
+| `DNS_SETUP_INTERVAL` | `15` | tls-alpn-01 only: seconds between DNS checks |
+| `DNS_WEBHOOK_URL` | | tls-alpn-01 + `DNS_SETUP_MODE=webhook`: endpoint to notify |
+| `DNS_WEBHOOK_TOKEN` | | Shared secret; the payload is HMAC-SHA256 signed with it |
+| `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records |
+| `TLSALPN_PORT` | `9443` | Loopback port lego's ACME responder binds to |
+| `TLS_TERMINATE_PORT` | `9444` | Loopback port the TLS frontend moves to in tls-alpn-01 mode |
+| `RENEW_DAYS_BEFORE` | lego default | Days of remaining lifetime that trigger renewal |
 | `MAXCONN` | `4096` | HAProxy max connections |
 | `TIMEOUT_CONNECT` | `10s` | Backend connect timeout |
 | `TIMEOUT_CLIENT` | `86400s` | Client-side timeout (24h for long-lived connections) |
@@ -266,3 +276,120 @@ Permission is hereby granted, free of charge, to any person obtaining a copy of 
 The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+## Certificates without DNS credentials (tls-alpn-01)
+
+The default `dns-01` flow needs a DNS API token inside the CVM: the container
+creates the CNAME, TXT and CAA records itself. `CHALLENGE_TYPE=tls-alpn-01`
+removes that requirement — nothing in the container can touch your DNS zone —
+at the cost of you creating three records by hand (or via a webhook).
+
+```yaml
+services:
+  dstack-ingress:
+    image: dstacktee/dstack-ingress:<tag>
+    environment:
+      - CHALLENGE_TYPE=tls-alpn-01
+      - DOMAIN=app.example.com
+      - TARGET_ENDPOINT=http://app:80
+      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - CERTBOT_EMAIL=you@example.com
+      # - DNS_SETUP_MODE=wait          # default; blocks until the records exist
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - cert-data:/etc/letsencrypt
+      - evidences:/evidences
+```
+
+On first start the container prints the exact records to create, then polls
+public DNS until they are visible:
+
+```
+==========================================================================
+  DNS records required for app.example.com
+==========================================================================
+  CNAME  app.example.com
+         -> _.dstack-prod5.phala.network
+  TXT    _dstack-app-address.app.example.com
+         -> b1ea785543bbbb19ce9de33744321360992bf63b:443
+  CAA    app.example.com
+         -> 0 issue "letsencrypt.org;validationmethods=tls-alpn-01;accounturi=https://..."
+==========================================================================
+```
+
+`DNS_SETUP_MODE` picks what happens after printing: `wait` (default) blocks
+until the records resolve or `DNS_SETUP_TIMEOUT` elapses; `print` continues
+immediately; `webhook` POSTs the records to `DNS_WEBHOOK_URL` first and then
+waits, so a service of yours can create them automatically.
+
+### The TXT record names an *instance*, not an app
+
+Under `dns-01` the TXT record carries the **app ID** and the gateway
+load-balances across every instance of the app. tls-alpn-01 cannot work that
+way. The challenge is answered by whichever instance holds the ACME order, and
+Let's Encrypt validates from several vantage points at once (5 distinct source
+IPs within ~2 seconds, measured), while the gateway races connections across the
+app's instances. The challenge would land on the wrong replica almost every
+time. So this mode publishes the **instance ID** instead, pinning the hostname
+to one instance.
+
+Two consequences:
+
+- **tls-alpn-01 mode is effectively single-instance.** All traffic for the
+  hostname goes to the pinned instance; you lose the gateway's failover.
+- **The TXT record changes when the CVM instance is replaced.** Redeploying
+  means updating DNS. `DNS_SETUP_MODE=webhook` exists so this can be automated;
+  doing it by hand means downtime on every redeploy.
+
+### Limitations
+
+- **No wildcards.** RFC 8737 forbids tls-alpn-01 for wildcard identifiers, and
+  the CA will not offer the challenge. Use `dns-01` for `*.example.com`.
+- **The gateway must be reachable on port 443.** The CA connects to port 443 of
+  whatever the CNAME resolves to; the port is fixed by the protocol.
+- **CAA must permit `tls-alpn-01`.** A record left over from a `dns-01`
+  deployment says `validationmethods=dns-01` and will make the CA refuse. The
+  container checks this before asking for a certificate, so you get a clear
+  message instead of a failed validation.
+- **Losing the `cert-data` volume changes the account URI.** With `dns-01` the
+  container just rewrites the CAA record; here it cannot, so a pinned
+  `accounturi` would start rejecting issuance until you update it by hand.
+
+### Webhook payload
+
+`DNS_SETUP_MODE=webhook` POSTs this envelope to `DNS_WEBHOOK_URL`:
+
+```json
+{
+  "payload": "{\"version\":1,\"domain\":\"app.example.com\",\"records\":[...]}",
+  "hmac_sha256": "…",
+  "attestation": { "quote": "…", "report_data": "…" }
+}
+```
+
+`payload` is a *string* so you sign and hash exactly the bytes you received.
+Verify `hmac_sha256` with `DNS_WEBHOOK_TOKEN`, and — since this request asks you
+to point a hostname at the instance it names — verify `attestation` too: the
+quote's `report_data` is `sha256(payload)`, so it proves which enclave produced
+those records. Check the app ID and measurements in it before changing DNS.
+
+### Why lego and not certbot
+
+certbot cannot do tls-alpn-01. Its standalone plugin is HTTP-01 only, the
+maintainers declined to implement the challenge
+([certbot#6724](https://github.com/certbot/certbot/issues/6724)), and the `acme`
+library removed it outright in 4.2.0 — the last release carrying
+`acme.standalone.TLSALPN01Server` is 4.1.1, where it is already marked
+deprecated. This path therefore runs [lego](https://github.com/go-acme/lego),
+pinned by checksum in the Dockerfile. The `dns-01` path still uses certbot and
+is untouched.
+
+Because haproxy owns the public port, the proxy peeks at each ClientHello and
+forwards only connections advertising the `acme-tls/1` ALPN protocol to lego's
+responder on loopback; everything else goes to the normal TLS frontend. Issuance
+and renewal therefore never interrupt serving traffic. In this mode haproxy
+starts on a self-signed placeholder certificate — it has to be listening before
+the first certificate can be issued — and reloads onto the real one as soon as
+it arrives.

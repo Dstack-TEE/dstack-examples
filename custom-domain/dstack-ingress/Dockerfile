@@ -34,6 +34,22 @@ RUN --mount=type=bind,source=pinned-packages.txt,target=/tmp/pinned-packages.txt
         mini-httpd && \
         rm -rf /var/lib/apt/lists/* /var/log/* /var/cache/ldconfig/aux-cache
 
+# lego, for the tls-alpn-01 challenge. certbot cannot do tls-alpn-01: its
+# standalone plugin is HTTP-01 only and the acme library removed the challenge
+# in 4.2.0. Pinned by checksum so the build stays reproducible; bump both the
+# version and the digest together.
+ARG LEGO_VERSION=5.3.1
+ARG LEGO_SHA256=b3c71b122ee1947eacfe0b809b955647f6377239fe4bfc49f73b1a091ae1252a
+RUN set -eu; \
+    url="https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_amd64.tar.gz"; \
+    curl -fsSL -o /tmp/lego.tar.gz "$url"; \
+    echo "${LEGO_SHA256}  /tmp/lego.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/lego.tar.gz -C /usr/local/bin lego; \
+    rm -f /tmp/lego.tar.gz; \
+    chmod 755 /usr/local/bin/lego; \
+    touch -d @0 /usr/local/bin/lego; \
+    lego --version
+
 RUN mkdir -p \
     /etc/letsencrypt \
     /var/www/certbot \

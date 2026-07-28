@@ -187,3 +187,65 @@ get_letsencrypt_account_file() {
 
     echo "${account_files[0]}"
 }
+
+# --- ACME client layout ------------------------------------------------------
+#
+# The two challenge types use different clients, and they lay their state out
+# differently:
+#
+#   certbot (dns-01)     /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem
+#                        /etc/letsencrypt/accounts/<server>/directory/*/regr.json
+#   lego    (tls-alpn-01) $LEGO_PATH/certificates/<domain>.{crt,key}
+#                        $LEGO_PATH/accounts/<server>/<email>/account.json
+#
+# Everything downstream (combined PEMs, evidence) goes through these helpers so
+# it does not have to care which client produced the files.
+
+lego_path() {
+    echo "${LEGO_PATH:-/etc/letsencrypt/lego}"
+}
+
+using_lego() {
+    [[ "${CHALLENGE_TYPE:-dns-01}" == "tls-alpn-01" ]]
+}
+
+# lego writes the full chain into the .crt file.
+cert_fullchain_path() {
+    local domain="$1"
+    if using_lego; then
+        echo "$(lego_path)/certificates/${domain}.crt"
+    else
+        echo "/etc/letsencrypt/live/$(cert_dir_name "$domain")/fullchain.pem"
+    fi
+}
+
+cert_privkey_path() {
+    local domain="$1"
+    if using_lego; then
+        echo "$(lego_path)/certificates/${domain}.key"
+    else
+        echo "/etc/letsencrypt/live/$(cert_dir_name "$domain")/privkey.pem"
+    fi
+}
+
+get_lego_account_file() {
+    local pattern account_files
+    pattern="$(lego_path)/accounts/*/*/account.json"
+    account_files=( $pattern )
+
+    if [[ ! -f "${account_files[0]}" ]]; then
+        echo "Error: lego account file not found at $pattern" >&2
+        return 1
+    fi
+
+    echo "${account_files[0]}"
+}
+
+# Account registration document, whichever client produced it.
+acme_account_file() {
+    if using_lego; then
+        get_lego_account_file
+    else
+        get_letsencrypt_account_file
+    fi
+}

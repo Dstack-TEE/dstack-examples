@@ -4,14 +4,21 @@ set -e
 
 source "/scripts/functions.sh"
 
-if ! ACME_ACCOUNT_FILE=$(get_letsencrypt_account_file); then
-    echo "Error: Cannot generate evidences without Let's Encrypt account file"
+if ! ACME_ACCOUNT_FILE=$(acme_account_file); then
+    echo "Error: Cannot generate evidences without the ACME account file"
     exit 1
 fi
 
 mkdir -p /evidences
 cd /evidences || exit
 cp "${ACME_ACCOUNT_FILE}" acme-account.json
+# These files exist to be published, so force them world-readable. lego writes
+# its account document and certificates 0600 and cp keeps that mode, which makes
+# the evidence server answer 403. (certbot's regr.json/fullchain.pem are 0644,
+# so this only ever bit the lego path.) Neither file carries a private key: the
+# account document holds the account URL and status, and a certificate chain is
+# public by construction.
+chmod 644 acme-account.json
 
 # Get all domains and copy their certificates
 all_domains=$(get-all-domains.sh)
@@ -23,9 +30,10 @@ fi
 # Copy all certificate files
 while IFS= read -r domain; do
     [[ -n "$domain" ]] || continue
-    cert_file="/etc/letsencrypt/live/$(cert_dir_name "$domain")/fullchain.pem"
+    cert_file=$(cert_fullchain_path "$domain")
     if [ -f "$cert_file" ]; then
         cp "$cert_file" "cert-${domain}.pem"
+        chmod 644 "cert-${domain}.pem"
     else
         echo "Warning: Certificate not found for domain: $domain"
     fi

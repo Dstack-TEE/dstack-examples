@@ -3,9 +3,15 @@ source /opt/app-venv/bin/activate
 
 DOMAIN=$1
 
-# Use the unified certbot manager
 SCRIPT_DIR="$(dirname "$(readlink -f "$0")")"
-python3 "$SCRIPT_DIR/certman.py" auto --domain "$DOMAIN" --email "$CERTBOT_EMAIL"
+
+# dns-01 runs certbot with a DNS provider plugin. tls-alpn-01 runs lego: certbot
+# never implemented the challenge and the acme library removed it in 4.2.0.
+if [ "${CHALLENGE_TYPE:-dns-01}" = "tls-alpn-01" ]; then
+    python3 "$SCRIPT_DIR/legoman.py" auto --domain "$DOMAIN" --email "$CERTBOT_EMAIL"
+else
+    python3 "$SCRIPT_DIR/certman.py" auto --domain "$DOMAIN" --email "$CERTBOT_EMAIL"
+fi
 CERT_STATUS=$?
 
 if [ $CERT_STATUS -eq 1 ]; then
