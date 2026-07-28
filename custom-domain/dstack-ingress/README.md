@@ -182,7 +182,7 @@ environment:
 | `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records |
 | `TLSALPN_PORT` | `9443` | Loopback port lego's ACME responder binds to |
 | `TLS_TERMINATE_PORT` | `9444` | Loopback port the TLS frontend moves to in tls-alpn-01 mode |
-| `RENEW_DAYS_BEFORE` | lego default | Days of remaining lifetime that trigger renewal |
+| `RENEW_DAYS_BEFORE` | client default | Days of remaining lifetime that trigger renewal. Applies to both modes: passed to lego as `--renew-days`, and written to certbot's `renew_before_expiry` |
 | `RENEW_INTERVAL` | `43200` | Seconds between successful certificate passes |
 | `DNS_SETTLE_SECONDS` | `30` | Wait after DNS verifies, so the gateway's own TXT cache expires |
 | `MAXCONN` | `4096` | HAProxy max connections |

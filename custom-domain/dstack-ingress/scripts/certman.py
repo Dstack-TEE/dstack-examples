@@ -3,6 +3,7 @@
 from dns_providers import DNSProviderFactory
 import argparse
 import os
+import re
 import subprocess
 import sys
 import pkg_resources
@@ -414,6 +415,7 @@ class CertManager:
             print(f"Failed to install plugin for renewal", file=sys.stderr)
             return False, False
 
+        self.apply_renewal_window(domain)
         cmd = self._build_certbot_command("renew", domain, "")
 
         try:
@@ -458,6 +460,73 @@ class CertManager:
         """Check if certificate already exists for domain."""
         cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
         return os.path.isfile(cert_path)
+
+    @staticmethod
+    def _lineage_name(domain: str) -> str:
+        """certbot stores a wildcard lineage under the bare name."""
+        return domain[2:] if domain.startswith("*.") else domain
+
+    def apply_renewal_window(self, domain: str) -> None:
+        """Make RENEW_DAYS_BEFORE mean the same thing here as it does for lego.
+
+        lego takes the renewal window as a flag (`--renew-days`). certbot has no
+        equivalent: it reads `renew_before_expiry` out of the lineage's renewal
+        config, so the setting has to be written there before `certbot renew`
+        runs. Without this the variable is silently tls-alpn-01 only, which also
+        left the dns-01 renewal branch with no way to be exercised on demand.
+
+        Leaving it unset keeps certbot's own default (30 days).
+        """
+        days = os.environ.get("RENEW_DAYS_BEFORE", "").strip()
+        if not days:
+            return
+        if not days.isdigit() or int(days) < 1:
+            print(
+                f"Warning: ignoring invalid RENEW_DAYS_BEFORE={days!r} "
+                f"(expected a positive number of days)",
+                file=sys.stderr,
+            )
+            return
+
+        path = f"/etc/letsencrypt/renewal/{self._lineage_name(domain)}.conf"
+        if not os.path.isfile(path):
+            # No lineage yet: the first issuance has not happened, and certbot
+            # writes this file itself. Nothing to do.
+            return
+
+        setting = f"renew_before_expiry = {days} days"
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError as exc:
+            print(f"Warning: cannot read {path}: {exc}", file=sys.stderr)
+            return
+
+        out, replaced = [], False
+        for line in lines:
+            # The key ships commented out, so match both forms.
+            if re.match(r"\s*#?\s*renew_before_expiry\s*=", line):
+                if not replaced:
+                    out.append(setting)
+                    replaced = True
+                continue
+            out.append(line)
+
+        if not replaced:
+            # Must land before the first section header; the key is top-level.
+            insert_at = next(
+                (i for i, line in enumerate(out) if line.strip().startswith("[")),
+                len(out),
+            )
+            out.insert(insert_at, setting)
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(out) + "\n")
+        except OSError as exc:
+            print(f"Warning: cannot write {path}: {exc}", file=sys.stderr)
+            return
+        print(f"Renewal window for {domain} set to {days} days before expiry")
 
     def acme_account_exists(self) -> bool:
         """Check if an ACME account exists for the current server (staging or production).
