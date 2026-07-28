@@ -247,6 +247,28 @@ class DNSProvider(ABC):
         )
         return self.create_dns_record(new_record)
 
+    def unset_txt_record(self, name: str) -> bool:
+        """Delete all TXT records for a name.
+
+        Used to clean up ACME DNS-01 challenge records (e.g. from a certbot
+        --manual cleanup hook). Missing records are treated as success.
+
+        Args:
+            name: The record name
+
+        Returns:
+            True if all matching records were removed (or none existed).
+        """
+        ok = True
+        for record in self.get_dns_records(name, RecordType.TXT):
+            if not record.id:
+                print(f"Warning: TXT record for {name} has no id; cannot delete")
+                ok = False
+                continue
+            if not self.delete_dns_record(record.id, name):
+                ok = False
+        return ok
+
     def set_caa_record(
         self,
         name: str,

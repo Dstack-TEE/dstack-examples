@@ -179,8 +179,49 @@ environment:
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
+| `ACME_CHALLENGE_ALIAS` | | Delegate the ACME DNS-01 challenge to this zone (see below) so the DNS token needs no access to the served domain's own zone |
+| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `30` | Wait after writing the delegated challenge TXT before validation (only with `ACME_CHALLENGE_ALIAS`). Keep well under ~250s — certbot is killed after a 300s per-run timeout |
+| `ALLOW_MISSING_CAA` | `false` | In delegation mode, continue even if the required `accounturi` CAA cannot be confirmed. Default fails closed (see below) |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
+
+### ACME challenge delegation (least-privilege DNS token)
+
+By default the DNS token must be able to edit the **served domain's own zone**
+(to write `_acme-challenge`, and — with `SET_CAA` — the CAA record). If the
+served name lives under a shared production zone (e.g. `svc.example.com` under
+`example.com`), that token can edit every record in the zone, which may be more
+privilege than you want.
+
+Set `ACME_CHALLENGE_ALIAS=<delegation-zone>` to answer the DNS-01 challenge in a
+separate zone that your token controls, so the token never touches the served
+domain's zone. In this mode dstack-ingress **only** manages the challenge TXT in
+the delegation zone; you set the following records **once, statically**, in the
+served domain's production zone (the container prints the exact values on start):
+
+```
+svc.example.com                       CNAME  <GATEWAY_DOMAIN>
+_dstack-app-address.svc.example.com   TXT    "<app-id>:<port>"
+_acme-challenge.svc.example.com       CNAME  _acme-challenge.svc.example.com.<delegation-zone>
+svc.example.com                       CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=<account-uri>"
+```
+
+> **Security note.** The `accounturi` CAA restricts issuance to this enclave's
+> ACME account and is the control that prevents forged certificates. In
+> delegation mode dstack-ingress cannot set it for you (no token for the served
+> zone), so it prints the record and verifies its presence via DoH. **If the
+> CAA is confirmed absent the container fails to start** (set `ALLOW_MISSING_CAA=true`
+> to override; a transient DoH failure only warns, it does not block). Without
+> this CAA, anyone who can satisfy the delegated challenge could obtain a
+> certificate for the domain.
+>
+> Use a **dedicated** delegation zone and scope the token to only that zone — a
+> zone shared with other tenants lets anyone with write access to it complete
+> the challenge. `SET_CAA` does not affect delegation mode (this CAA path always
+> runs). If a certificate was previously issued with the standard DNS-plugin
+> authenticator, delete `/etc/letsencrypt/renewal/<domain>.conf` before enabling
+> delegation, otherwise `certbot renew` reuses the old plugin (which needs the
+> production-zone token this mode avoids).
 
 ## Evidence & Attestation
 
