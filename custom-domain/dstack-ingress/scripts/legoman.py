@@ -47,9 +47,10 @@ REGISTER_TIMEOUT = 120
 
 
 def acme_server() -> str:
-    if os.environ.get("CERTBOT_STAGING", "false") == "true":
-        return ACME_STAGING
-    return ACME_PROD
+    # CERTBOT_STAGING is the historical name and still works, but there is no
+    # certbot on this path: the ACME client here is lego.
+    staging = os.environ.get("ACME_STAGING") or os.environ.get("CERTBOT_STAGING", "false")
+    return ACME_STAGING if staging == "true" else ACME_PROD
 
 
 def server_dir() -> str:
@@ -210,11 +211,11 @@ def main() -> int:
     parser.add_argument("--email", help="Email for ACME registration")
     args = parser.parse_args()
 
-    email = args.email or os.environ.get("CERTBOT_EMAIL", "")
+    email = args.email or os.environ.get("ACME_EMAIL") or os.environ.get("CERTBOT_EMAIL", "")
 
     if args.action == "account-uri":
         if not email:
-            print("Error: --email or CERTBOT_EMAIL is required", file=sys.stderr)
+            print("Error: --email or ACME_EMAIL is required", file=sys.stderr)
             return EXIT_ERROR
         uri = account_uri(email)
         if not uri:
@@ -231,7 +232,7 @@ def main() -> int:
         return EXIT_CHANGED
 
     if not email:
-        print("Error: --email or CERTBOT_EMAIL is required", file=sys.stderr)
+        print("Error: --email or ACME_EMAIL is required", file=sys.stderr)
         return EXIT_ERROR
     if not os.path.isfile(LEGO_BIN):
         print(f"Error: lego binary not found at {LEGO_BIN}", file=sys.stderr)

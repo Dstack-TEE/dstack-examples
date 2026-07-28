@@ -159,7 +159,7 @@ environment:
 | `DOMAIN` | Your domain (single-domain mode). Supports wildcards (`*.example.com`) |
 | `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80` |
 | `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `_.dstack-prod5.phala.network`) |
-| `CERTBOT_EMAIL` | Email for Let's Encrypt registration |
+| `CERTBOT_EMAIL` | Email for Let's Encrypt registration. In tls-alpn-01 mode the preferred name is `ACME_EMAIL` |
 | `DNS_PROVIDER` | DNS provider (`cloudflare`, `linode`, `namecheap`) |
 
 ### Optional
@@ -171,7 +171,8 @@ environment:
 | `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line |
 | `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
-| `CERTBOT_STAGING` | `false` | Use Let's Encrypt staging server |
+| `CERTBOT_STAGING` | `false` | Use Let's Encrypt staging server. `ACME_STAGING` is the preferred name in tls-alpn-01 mode |
+| `ACME_EMAIL` | | ACME account email in tls-alpn-01 mode. Falls back to `CERTBOT_EMAIL`; there is no certbot on that path |
 | `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
 | `DNS_SETUP_MODE` | `wait` | tls-alpn-01 only: `wait`, `print` or `webhook` — see below |
 | `DNS_SETUP_TIMEOUT` | `1800` | tls-alpn-01 only: seconds to wait for the records to appear |
@@ -294,8 +295,10 @@ services:
       - CHALLENGE_TYPE=tls-alpn-01
       - DOMAIN=app.example.com
       - TARGET_ENDPOINT=http://app:80
+      # Printed as the CNAME target, and used to verify that the hostname
+      # really resolves to the gateway before issuance starts.
       - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
-      - CERTBOT_EMAIL=you@example.com
+      - ACME_EMAIL=you@example.com
       # - DNS_SETUP_MODE=wait          # default; blocks until the records exist
     ports:
       - "443:443"
