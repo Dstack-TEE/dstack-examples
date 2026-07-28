@@ -89,6 +89,26 @@ require_instance_id() {
     fi
 }
 
+# RFC 8737 forbids tls-alpn-01 for wildcard identifiers, so a wildcard here can
+# never succeed. That makes it a configuration error, and it has to be caught
+# before the startup sequence below: past that point the container has generated
+# a placeholder certificate for a name that will never get a real one, started
+# haproxy serving it, and settled into retrying an unsatisfiable config forever.
+#
+# Fatal for the container rather than skipping the one domain. A mixed config
+# does contain the damage -- the other domains are issued normally -- but it
+# leaves a self-signed certificate served for the wildcard indefinitely and a
+# permanently failing loop, which reads as a TLS bug rather than a typo.
+reject_wildcards() {
+    local wildcards
+    wildcards=$(get-all-domains.sh | grep '^\*\.' || true)
+    [ -n "$wildcards" ] || return 0
+    echo "Error: tls-alpn-01 cannot issue wildcard certificates (RFC 8737)." >&2
+    echo "$wildcards" | sed 's/^/  /' >&2
+    echo "Use CHALLENGE_TYPE=dns-01 for wildcards, or list the names individually." >&2
+    exit 1
+}
+
 # What the gateway should route this hostname to.
 #
 # dns-01 uses the app id, so the gateway load-balances across every instance of
@@ -190,11 +210,9 @@ collect_evidence() {
 process_domain() {
     local domain="$1"
 
-    if [[ "$domain" == \*.* ]]; then
-        echo "Error: cannot issue a wildcard certificate for $domain with tls-alpn-01." >&2
-        echo "RFC 8737 forbids it; use CHALLENGE_TYPE=dns-01 for wildcards." >&2
-        exit 1
-    fi
+    # No wildcard check here: reject_wildcards has already refused to start over
+    # the same domain list, which cannot change while the container runs.
+    # legoman.py checks independently, guarding the ACME call itself.
 
     # Register the ACME account first so the CAA record we print can already
     # pin accounturi. Without this the operator would have to add CAA in a
@@ -303,6 +321,7 @@ cert_loop() {
     done
 }
 
+reject_wildcards
 setup_py_env
 check_lego
 load_dstack_identity

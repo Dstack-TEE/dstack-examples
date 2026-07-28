@@ -366,7 +366,10 @@ Encrypt dropping expiry mail, and the container passes it for you.
 ### Limitations
 
 - **No wildcards.** RFC 8737 forbids tls-alpn-01 for wildcard identifiers, and
-  the CA will not offer the challenge. Use `dns-01` for `*.example.com`.
+  the CA will not offer the challenge. The container refuses to start rather
+  than serve a name it can never obtain a certificate for, so a wildcard
+  anywhere in `DOMAIN`/`DOMAINS` is a startup error even if the other names are
+  fine. Use `dns-01` for `*.example.com`.
 - **The gateway must be reachable on port 443.** The CA connects to port 443 of
   whatever the CNAME resolves to; the port is fixed by the protocol.
 - **CAA must permit `tls-alpn-01`.** A record left over from a `dns-01`
