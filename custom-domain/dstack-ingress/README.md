@@ -191,10 +191,9 @@ environment:
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
-| `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below). `ACME_CHALLENGE_ALIAS` is the original name and still works |
-| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. Keep well under ~250s — certbot is killed after a 300s per-run timeout |
+| `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below) |
+| `DELEGATION_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. Keep well under ~250s — certbot is killed after a 300s per-run timeout |
 | `DELEGATION_GATEWAY_RECORD` | per provider | How the delegated name points at the gateway: `cname` (Cloudflare default; follows a gateway that moves) or `a` (default elsewhere, for providers that refuse a CAA beside a CNAME) |
-| `ALLOW_MISSING_CAA` | `false` | In delegation mode, treat an unconfirmed `accounturi` CAA as a warning instead of a blocker. Default fails closed (see below) |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 

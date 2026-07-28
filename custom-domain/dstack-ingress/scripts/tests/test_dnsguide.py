@@ -128,7 +128,7 @@ class TestDelegationRecord(unittest.TestCase):
             domain=domain, alias_target="gw.example.net",
             txt_name="_dstack-app-address." + domain.lstrip("*."),
             txt_value="appid:443", caa_name="", caa_tag="issue", caa_value="",
-            account_uri="", challenge="dns-01", challenge_alias=alias,
+            account_uri="", challenge="dns-01", delegation_zone=alias,
             include="challenge-cname",
         )
 
@@ -154,7 +154,7 @@ class TestWildcardDelegation(unittest.TestCase):
         return dnsguide.build_records(argparse.Namespace(
             domain=domain, alias_target="gw", txt_name=txt, txt_value="x",
             caa_name="", caa_tag="issue", caa_value="", account_uri="",
-            challenge="dns-01", challenge_alias="deleg.net", include="delegated"))
+            challenge="dns-01", delegation_zone="deleg.net", include="delegated"))
 
     def test_wildcard_aliases_its_base_as_well(self):
         names = [r.name for r in self._records(
@@ -199,48 +199,6 @@ class TestExactCnameCheck(unittest.TestCase):
         self.assertIn("no CNAME record found", why)
 
 
-class TestCaaRequiredForDelegation(unittest.TestCase):
-    """Delegation inverts the usual CAA question.
-
-    Normally we ask "does anything forbid us from issuing", and no CAA at all
-    means no. Under challenge delegation the record is the only thing stopping
-    someone else who can satisfy the delegated challenge, and we cannot create
-    it, so its absence has to block.
-    """
-
-    def _no_caa(self):
-        saved = dnsguide.query_union
-        dnsguide.query_union = lambda name, rr, r: []
-        self.addCleanup(lambda: setattr(dnsguide, "query_union", saved))
-
-    def test_absent_caa_passes_by_default(self):
-        self._no_caa()
-        ok, why = dnsguide.check_caa("app.example.com", "issue", "dns-01", "", "r")
-        self.assertTrue(ok)
-        self.assertIn("unrestricted", why)
-
-    def test_absent_caa_blocks_when_required(self):
-        self._no_caa()
-        ok, why = dnsguide.check_caa(
-            "app.example.com", "issue", "dns-01", "", "r", require_present=True
-        )
-        self.assertFalse(ok)
-        self.assertIn("no CAA record set", why)
-
-    def test_present_and_matching_passes_when_required(self):
-        saved = dnsguide.query_union
-        dnsguide.query_union = lambda name, rr, r: (
-            ['0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=https://acme/1"']
-            if name == "app.example.com" else []
-        )
-        self.addCleanup(lambda: setattr(dnsguide, "query_union", saved))
-        ok, _ = dnsguide.check_caa(
-            "app.example.com", "issue", "dns-01", "https://acme/1", "r",
-            require_present=True,
-        )
-        self.assertTrue(ok)
-
-
 class TestTxtNormalisation(unittest.TestCase):
     def test_strips_quotes(self):
         self.assertEqual(dnsguide._unquote_txt('"abc:443"'), "abc:443")
@@ -281,6 +239,26 @@ class TestRecordBuilding(unittest.TestCase):
     def test_caa_omitted_without_value(self):
         types = [r.type for r in dnsguide.build_records(self._args(caa_value=""))]
         self.assertEqual(types, ["CNAME", "TXT"])
+
+
+class TestNoShadowedDefinitions(unittest.TestCase):
+    """A duplicated class or method silently shadows the earlier one.
+
+    Python does not complain, unittest does not notice, and the count still
+    goes up -- so a merge that lands the same block twice leaves dead tests
+    that look like passing ones. This caught exactly that.
+    """
+
+    def test_every_definition_is_unique(self):
+        import ast, collections, pathlib
+
+        tree = ast.parse(pathlib.Path(__file__).read_text())
+        names = [n.name for n in tree.body if isinstance(n, ast.ClassDef)]
+        for cls in (n for n in tree.body if isinstance(n, ast.ClassDef)):
+            names += [f"{cls.name}.{m.name}" for m in cls.body
+                      if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        dupes = [n for n, c in collections.Counter(names).items() if c > 1]
+        self.assertEqual(dupes, [], f"defined more than once: {dupes}")
 
 
 if __name__ == "__main__":

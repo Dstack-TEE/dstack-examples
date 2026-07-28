@@ -46,7 +46,7 @@ case "$action" in
         # attempts. At 30s Let's Encrypt's multi-perspective check fails with
         # "During secondary validation: Incorrect TXT record found". The dns-01
         # plugin path waits 120s for the same reason.
-        sleep "${ACME_CHALLENGE_PROPAGATION_SECONDS:-120}"
+        sleep "${DELEGATION_PROPAGATION_SECONDS:-120}"
         ;;
     cleanup)
         echo "acme-dns-alias-hook: removing challenge TXT $record"

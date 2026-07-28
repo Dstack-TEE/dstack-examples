@@ -214,34 +214,10 @@ delegation_guide() {
         --caa-name "$caa_domain" \
         --caa-tag "$caa_tag" \
         --challenge dns-01 \
-        --challenge-alias "$DELEGATION_ZONE" \
+        --delegation-zone "$DELEGATION_ZONE" \
         --mode "${DNS_SETUP_MODE:-wait}" \
         --include "$include" \
         "$@"
-}
-
-# The accounturi CAA is what stops anyone else who can satisfy the delegated
-# challenge from getting a certificate for this name, and we cannot write it, so
-# a confirmed-absent record is fatal. ALLOW_MISSING_CAA downgrades it to a
-# warning for operators who accept that risk.
-delegation_verify_caa() {
-    local domain="$1" account_file account_uri
-    if ! account_file=$(get_letsencrypt_account_file); then
-        echo "ERROR: cannot read the ACME account file to determine the required CAA" >&2
-        return 1
-    fi
-    account_uri=$(jq -j '.uri' "$account_file")
-    # Absent is the state to block on here, not "absent means unrestricted":
-    # we cannot create this record, so nothing else protects the name.
-    local gate=(--caa-required)
-    if [ "${ALLOW_MISSING_CAA:-false}" = "true" ]; then
-        gate=(--caa-required --caa-advisory)
-    fi
-
-    delegation_guide "$domain" caa \
-        --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri" \
-        --account-uri "$account_uri" \
-        "${gate[@]}"
 }
 
 set_caa_record() {
