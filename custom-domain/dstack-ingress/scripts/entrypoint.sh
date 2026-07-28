@@ -404,8 +404,22 @@ fi
 
 # Start evidence HTTP server if enabled
 if [ "$EVIDENCE_SERVER" = "true" ]; then
-    mini_httpd -d /evidences -p "${EVIDENCE_PORT}" -D -l /dev/stderr &
-    echo "Evidence server started on port ${EVIDENCE_PORT} (mini_httpd)"
+    # Bind loopback explicitly, for two reasons.
+    #
+    # Correctness of the logs: left to itself mini_httpd binds [::]:port first,
+    # and since the container has net.ipv6.bindv6only=0 that socket already
+    # covers IPv4, so its second bind on 0.0.0.0:port fails with EADDRINUSE. It
+    # logs "bind: Address already in use", keeps serving on the surviving
+    # socket, and leaves a scary line in the log forever.
+    #
+    # Reach: the only consumer is haproxy's be_evidence backend, which connects
+    # to 127.0.0.1:${EVIDENCE_PORT}. Listening on every interface additionally
+    # exposed the evidence server to any other container on the compose
+    # network at ingress:${EVIDENCE_PORT}, bypassing the proxy. Nothing
+    # documented depends on that; evidence is meant to be read through
+    # https://<domain>/evidences/ or the shared /evidences volume.
+    mini_httpd -d /evidences -p "${EVIDENCE_PORT}" -h 127.0.0.1 -D -l /dev/stderr &
+    echo "Evidence server started on 127.0.0.1:${EVIDENCE_PORT} (mini_httpd)"
 fi
 
 # One process owns certificates from here on: first pass (tls-alpn-01, where it
