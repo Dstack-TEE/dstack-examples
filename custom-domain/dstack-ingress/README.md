@@ -159,7 +159,7 @@ environment:
 | `DOMAIN` | Your domain (single-domain mode). Supports wildcards (`*.example.com`) |
 | `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80` |
 | `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `_.dstack-prod5.phala.network`) |
-| `CERTBOT_EMAIL` | Email for Let's Encrypt registration. Not required in tls-alpn-01 mode, where the preferred name is `ACME_EMAIL` |
+| `CERTBOT_EMAIL` | *(optional)* ACME contact address. `ACME_EMAIL` is accepted too, and is the preferred name in tls-alpn-01 mode |
 | `DNS_PROVIDER` | DNS provider (`cloudflare`, `linode`, `namecheap`) |
 
 ### Optional
@@ -172,7 +172,7 @@ environment:
 | `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `CERTBOT_STAGING` | `false` | Use Let's Encrypt staging server. `ACME_STAGING` is the preferred name in tls-alpn-01 mode |
-| `ACME_EMAIL` | | Optional ACME contact address in tls-alpn-01 mode. Falls back to `CERTBOT_EMAIL`; there is no certbot on that path |
+| `ACME_EMAIL` | | ACME contact address, in either mode. Falls back to `CERTBOT_EMAIL`. Optional — see below |
 | `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
 | `DNS_SETUP_MODE` | `wait` | tls-alpn-01 only: `wait`, `print` or `webhook` — see below |
 | `DNS_SETUP_TIMEOUT` | `1800` | tls-alpn-01 only: seconds to wait for the records to appear |
@@ -348,16 +348,20 @@ Two consequences:
   means updating DNS. `DNS_SETUP_MODE=webhook` exists so this can be automated;
   doing it by hand means downtime on every redeploy.
 
-### The ACME contact address is optional, and public
+## The ACME contact address is optional, and public
 
-`ACME_EMAIL` may be left unset. RFC 8555 makes the ACME `contact` field
-optional, and Let's Encrypt stopped sending expiry notification mail in 2025, so
-setting one buys little.
+`ACME_EMAIL` (or `CERTBOT_EMAIL`) may be left unset in **either** mode. RFC 8555
+makes the ACME `contact` field optional, and Let's Encrypt stopped sending expiry
+notification mail in 2025, so setting one buys little.
 
 It also does not stay private. The ACME account document is published as
-attestation evidence at `/evidences/acme-account.json`, so an address set here
-is readable by anyone who fetches the evidence endpoint. Leave it unset unless
-you specifically want a contact on the account.
+attestation evidence at `/evidences/acme-account.json`, so an address set here is
+readable by anyone who fetches the evidence endpoint. Leave it unset unless you
+specifically want a contact on the account.
+
+Under the hood the two clients differ: lego simply omits the flag, while certbot
+needs `--register-unsafely-without-email` — its "unsafely" naming predates Let's
+Encrypt dropping expiry mail, and the container passes it for you.
 
 ### Limitations
 

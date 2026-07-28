@@ -11,6 +11,12 @@ source /scripts/functions.sh
 source /scripts/haproxy-lib.sh
 source /scripts/evidence-lib.sh
 
+# ACME contact address. CERTBOT_EMAIL is the documented name on this path --
+# certbot really is the client here -- and ACME_EMAIL is accepted too so one
+# variable works in either mode. Optional either way.
+ACME_EMAIL=${ACME_EMAIL:-${CERTBOT_EMAIL:-}}
+export ACME_EMAIL
+
 # certbot stores certificates under /etc/letsencrypt/live/<domain>/.
 cert_fullchain_path() { echo "/etc/letsencrypt/live/$(cert_dir_name "$1")/fullchain.pem"; }
 cert_privkey_path()   { echo "/etc/letsencrypt/live/$(cert_dir_name "$1")/privkey.pem"; }
@@ -136,20 +142,38 @@ set_caa_record() {
 }
 
 process_domain() {
-    local domain="$1"
+    local domain="$1" first status
 
     set_alias_record "$domain"
     set_txt_record "$domain"
+
     # The CAA record names our ACME account, so the account has to exist first:
-    # try once (expected to fail on a fresh deployment), write CAA, try again.
-    issue_certificate "$domain" || echo "First certificate attempt failed for $domain, retrying after the CAA record is set"
+    # try once, write CAA, try again. The first attempt is expected to fail when
+    # a CAA record from an earlier account is still in place.
+    if issue_certificate "$domain"; then first=0; else first=$?; fi
+    if [ "$first" -eq 1 ]; then
+        echo "First certificate attempt failed for $domain, retrying after the CAA record is set"
+    fi
+
     set_caa_record "$domain"
-    issue_certificate "$domain"
+
+    if issue_certificate "$domain"; then status=0; else status=$?; fi
+
+    # Either attempt producing a certificate counts as a change. Reporting only
+    # the second one hid the common case: on a clean first deployment attempt
+    # one obtains the certificate and attempt two reports "nothing to renew",
+    # so the pass looked quiet and skipped evidence generation entirely.
+    if [ "$first" -eq 0 ] || [ "$status" -eq 0 ]; then
+        return 0
+    fi
+    return "$status"
 }
 
 issue_certificate() {
     source /opt/app-venv/bin/activate
-    certman.py auto --domain "$1" --email "$CERTBOT_EMAIL"
+    # The contact address is optional; certman.py asks for a contactless
+    # account when none is given.
+    certman.py auto --domain "$1" ${ACME_EMAIL:+--email "$ACME_EMAIL"}
 }
 
 build_combined_pems() {

@@ -313,8 +313,18 @@ class CertManager:
                     f"Credentials file does not exist: {credentials_file}")
 
         if action == "certonly":
-            base_cmd.extend(["--agree-tos", "--no-eff-email",
-                            "--email", email, "-d", domain])
+            base_cmd.extend(["--agree-tos", "--no-eff-email"])
+            # The ACME contact address is optional (RFC 8555 section 7.3), and
+            # it is published: the account document is served as attestation
+            # evidence, so an address set here is readable by anyone who
+            # fetches it. certbot will not simply omit the flag, so ask for a
+            # contactless account explicitly. Its "unsafely" naming predates
+            # Let's Encrypt dropping expiry notification mail in 2025.
+            if email:
+                base_cmd.extend(["--email", email])
+            else:
+                base_cmd.append("--register-unsafely-without-email")
+            base_cmd.extend(["-d", domain])
         if os.environ.get("CERTBOT_STAGING", "false") == "true":
             base_cmd.extend(["--staging"])
 
@@ -528,15 +538,11 @@ def main():
             )
             sys.exit(1)
 
-        # Email is required for obtain and auto actions
-        if args.action in ["obtain", "auto"] and not args.email:
-            if not os.environ.get("CERTBOT_EMAIL"):
-                print(
-                    "Error: --email is required or set CERTBOT_EMAIL environment variable",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            args.email = os.environ["CERTBOT_EMAIL"]
+        # The contact address is optional; see _build_certbot_command.
+        if not args.email:
+            args.email = os.environ.get("ACME_EMAIL") or os.environ.get(
+                "CERTBOT_EMAIL", ""
+            )
 
         success, needs_evidence = manager.run_action(
             args.domain, args.email, args.action
