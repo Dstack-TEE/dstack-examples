@@ -148,7 +148,11 @@ openssl s_client -connect <domain>:443 -servername <domain> </dev/null 2>/dev/nu
 ```
 
 Shorten `RENEW_INTERVAL` (default 43200s) if you want the loop to come round
-again without restarting.
+again without restarting — but note that `RENEW_DAYS_BEFORE=365` makes the
+certificate *permanently* due, so every pass renews. Combined with a short
+interval that is a loop issuing certificates as fast as the CA will allow. Set
+one or the other, unset it once you have seen the branch you came for, and never
+carry it into production.
 
 Do not assert on the ACME client's log wording. lego 4.x wrote `no renewal` and
 5.x writes `Skip renewal`; certbot's phrasing has moved too. The container uses
