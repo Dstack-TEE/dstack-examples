@@ -76,6 +76,16 @@ EOF
 
 set_alias_record() {
     local domain="$1"
+    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
+        # certbot validates the challenge at the base name even for a wildcard,
+        # so the _acme-challenge CNAME must use the base domain (strip "*.").
+        local base="${domain#\*.}"
+        echo "[challenge-delegation] Not touching ${domain}'s own zone (token is scoped to the delegated zone)."
+        echo "[challenge-delegation] Set these in your production zone yourself (static, one-time):"
+        echo "    ${domain}  CNAME  ${GATEWAY_DOMAIN}"
+        echo "    _acme-challenge.${base}  CNAME  _acme-challenge.${base}.${ACME_CHALLENGE_ALIAS}"
+        return
+    fi
     echo "Setting alias record for $domain"
     dnsman.py set_alias \
         --domain "$domain" \
@@ -95,6 +105,12 @@ set_txt_record() {
     local txt_domain
     txt_domain=$(txt_record_name "$domain")
 
+    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
+        echo "[challenge-delegation] Set this in your production zone yourself (static, one-time):"
+        echo "    ${txt_domain}  TXT  \"$(txt_record_value)\""
+        return
+    fi
+
     dnsman.py set_txt \
         --domain "$txt_domain" \
         --content "$(txt_record_value)"
@@ -105,8 +121,73 @@ set_txt_record() {
     fi
 }
 
+# In delegation mode we have NO token for the served domain's zone, so we cannot
+# set the accounturi CAA ourselves. That CAA is the forge-prevention (only this
+# enclave's ACME account may issue), so this path is deliberately NOT gated by
+# SET_CAA and fails closed if the record is confirmed absent -- otherwise anyone
+# who can satisfy the delegated DNS-01 challenge could obtain a cert for the
+# domain. Set ALLOW_MISSING_CAA=true to override (accept the risk).
+verify_delegation_caa() {
+    local domain="$1"
+    local account_file account_uri caa_domain caa_tag caa_value resp status found
+
+    if ! account_file=$(get_letsencrypt_account_file); then
+        echo "ERROR: cannot read the Let's Encrypt account file to determine the required accounturi CAA" >&2
+        caa_fail_or_allow "$domain"
+        return
+    fi
+    caa_domain="${domain#\*.}"
+    caa_tag=$(caa_tag_for "$domain")
+    account_uri=$(jq -j '.uri' "$account_file")
+    caa_value="letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri"
+
+    echo "[challenge-delegation] Set this CAA in your production zone (static, one-time):"
+    echo "    ${caa_domain}  CAA  0 ${caa_tag} \"${caa_value}\""
+
+    # Verify via DNS-over-HTTPS (dig is not installed in the image; curl+jq are).
+    resp=$(curl -s --max-time 10 "https://dns.google/resolve?name=${caa_domain}&type=257" 2>/dev/null || true)
+    if [ -z "$resp" ]; then
+        echo "WARNING: could not reach dns.google to verify the CAA (network issue) — NOT confirmed; continuing"
+        return
+    fi
+    status=$(echo "$resp" | jq -r '.Status // empty' 2>/dev/null || true)
+    if [ "$status" != "0" ]; then
+        echo "WARNING: CAA DoH query for ${caa_domain} returned status ${status:-unknown} — NOT confirmed; continuing"
+        return
+    fi
+    # Literal (grep -F) match on the CAA data fields — the account URI contains
+    # '/' and '.', which must not be treated as regex.
+    found=$(echo "$resp" | jq -r '.Answer // [] | .[] | .data' 2>/dev/null | grep -F "accounturi=$account_uri" || true)
+    if [ -n "$found" ]; then
+        echo "[challenge-delegation] Verified: accounturi CAA is present for $caa_domain"
+        return
+    fi
+    echo "ERROR: the accounturi CAA is NOT present for $caa_domain." >&2
+    echo "ERROR: without it, anyone who can satisfy the delegated DNS-01 challenge could obtain a" >&2
+    echo "ERROR: publicly-trusted certificate for this domain (forged TLS termination)." >&2
+    caa_fail_or_allow "$domain"
+}
+
+caa_fail_or_allow() {
+    local domain="$1"
+    if [ "${ALLOW_MISSING_CAA:-false}" = "true" ]; then
+        echo "WARNING: ALLOW_MISSING_CAA=true — continuing without a verified accounturi CAA for $domain"
+        return 0
+    fi
+    echo "ERROR: refusing to continue without the accounturi CAA for $domain." >&2
+    echo "ERROR: set the CAA record shown above, or ALLOW_MISSING_CAA=true to override." >&2
+    exit 1
+}
+
 set_caa_record() {
     local domain="$1"
+
+    # Delegation mode is handled separately and is NOT gated by SET_CAA.
+    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
+        verify_delegation_caa "$domain"
+        return
+    fi
+
     if [ "$SET_CAA" != "true" ]; then
         echo "Skipping CAA record setup"
         return

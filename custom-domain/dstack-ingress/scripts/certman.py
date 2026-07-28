@@ -293,12 +293,17 @@ class CertManager:
                     f"--manual-auth-hook={hook} auth",
                     f"--manual-cleanup-hook={hook} cleanup",
                     "--agree-tos", "--no-eff-email",
-                    "--email", email, "-d", domain,
                 ])
+                # Same optional-contact handling as the plugin path below.
+                if email:
+                    base_cmd.extend(["--email", email])
+                else:
+                    base_cmd.append("--register-unsafely-without-email")
+                base_cmd.extend(["-d", domain])
             # For `renew`, certbot reuses the authenticator + hooks saved in the
             # renewal config from the initial `certonly`, so we don't re-specify
             # them here (and must not fall back to the DNS plugin).
-            if os.environ.get("CERTBOT_STAGING", "false") == "true":
+            if staging_enabled():
                 base_cmd.append("--staging")
             masked = [a if not (i > 0 and base_cmd[i - 1] == "--email") else "<email>"
                       for i, a in enumerate(base_cmd)]
