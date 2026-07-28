@@ -16,9 +16,12 @@ CERT_STATUS=$?
 
 if [ $CERT_STATUS -eq 1 ]; then
     echo "Certificate management failed" >&2
-    exit 1
 elif [ $CERT_STATUS -eq 2 ]; then
     echo "No certificates need renewal, skipping evidence generation"
 fi
 
-exit 0
+# Propagate the tri-state: 0 = certificate changed, 2 = nothing to do, 1 =
+# failure. This used to always exit 0, which told the caller "something
+# changed" on every single pass -- so evidences were regenerated and haproxy
+# reloaded every 12 hours whether or not a certificate had moved.
+exit $CERT_STATUS

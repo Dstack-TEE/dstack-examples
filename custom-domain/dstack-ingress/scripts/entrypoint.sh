@@ -3,6 +3,7 @@
 set -e
 
 source "/scripts/functions.sh"
+source "/scripts/domains.sh"
 
 PORT=${PORT:-443}
 TXT_PREFIX=${TXT_PREFIX:-"_dstack-app-address"}
@@ -75,8 +76,8 @@ if ! ALPN=$(sanitize_alpn "$ALPN"); then
     exit 1
 fi
 
-# renew-certificate.sh, renewal-daemon.sh and certman.py run as child processes
-# and read these from the environment.
+# cert-manager.sh, renew-certificate.sh and the ACME clients run as child
+# processes and read these from the environment.
 export CHALLENGE_TYPE TLSALPN_ADDRESS TLSALPN_PORT DNS_SETUP_MODE PORT
 
 # Warn about deprecated L7 env vars
@@ -352,319 +353,6 @@ backend ${be_name}
     emit_evidence_backend
 }
 
-set_alias_record() {
-    local domain="$1"
-    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
-        # certbot validates the challenge at the base name even for a wildcard,
-        # so the _acme-challenge CNAME must use the base domain (strip "*.").
-        local base="${domain#\*.}"
-        echo "[challenge-delegation] Not touching ${domain}'s own zone (token is scoped to the delegated zone)."
-        echo "[challenge-delegation] Set these in your production zone yourself (static, one-time):"
-        echo "    ${domain}  CNAME  ${GATEWAY_DOMAIN}"
-        echo "    _acme-challenge.${base}  CNAME  _acme-challenge.${base}.${ACME_CHALLENGE_ALIAS}"
-        return
-    fi
-    echo "Setting alias record for $domain"
-    dnsman.py set_alias \
-        --domain "$domain" \
-        --content "$GATEWAY_DOMAIN"
-
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to set alias record for $domain"
-        exit 1
-    fi
-    echo "Alias record set for $domain"
-}
-
-# Query the guest agent once for this app's identity.
-load_dstack_identity() {
-    local info
-    if [[ -S /var/run/dstack.sock ]]; then
-        info=$(curl -s --unix-socket /var/run/dstack.sock http://localhost/Info)
-    else
-        info=$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info)
-    fi
-
-    DSTACK_APP_ID=$(echo "$info" | jq -j .app_id)
-    DSTACK_INSTANCE_ID=$(echo "$info" | jq -j .instance_id)
-    export DSTACK_APP_ID DSTACK_INSTANCE_ID
-
-    if [ -z "$DSTACK_APP_ID" ] || [ "$DSTACK_APP_ID" = "null" ]; then
-        echo "Error: could not read app_id from the dstack guest agent" >&2
-        exit 1
-    fi
-    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ] &&
-        { [ -z "$DSTACK_INSTANCE_ID" ] || [ "$DSTACK_INSTANCE_ID" = "null" ]; }; then
-        echo "Error: could not read instance_id from the dstack guest agent, which" >&2
-        echo "tls-alpn-01 needs to pin gateway routing to this instance" >&2
-        exit 1
-    fi
-}
-
-txt_record_name() {
-    local domain="$1"
-    if [[ "$domain" == \*.* ]]; then
-        # Wildcard domain: *.myapp.com → _dstack-app-address-wildcard.myapp.com
-        echo "${TXT_PREFIX}-wildcard.${domain#\*.}"
-    else
-        echo "${TXT_PREFIX}.${domain}"
-    fi
-}
-
-# What the gateway should route this hostname to.
-#
-# dns-01 uses the app id, so the gateway load-balances across every instance of
-# the app. tls-alpn-01 cannot: the challenge is answered by whichever instance
-# certbot runs on, and routing by app id makes the gateway race connections
-# across the app's instances (select_top_n_hosts -> connect_multiple_hosts)
-# while the CA validates from several vantage points at once. The challenge
-# would land on the wrong replica. Pinning to the instance id makes validation
-# deterministic -- at the cost of sending all traffic to this one instance, so
-# tls-alpn-01 mode is effectively single-instance.
-txt_record_value() {
-    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
-        echo "${DSTACK_INSTANCE_ID}:${PORT}"
-    else
-        echo "${APP_ID:-$DSTACK_APP_ID}:${PORT}"
-    fi
-}
-
-caa_tag_for() {
-    if [[ "$1" == \*.* ]]; then echo "issuewild"; else echo "issue"; fi
-}
-
-set_txt_record() {
-    local domain="$1"
-    local txt_domain
-    txt_domain=$(txt_record_name "$domain")
-
-    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
-        echo "[challenge-delegation] Set this in your production zone yourself (static, one-time):"
-        echo "    ${txt_domain}  TXT  \"$APP_ID:$PORT\""
-        return
-    fi
-
-    dnsman.py set_txt \
-        --domain "$txt_domain" \
-        --content "$(txt_record_value)"
-
-    if [ $? -ne 0 ]; then
-        echo "Error: Failed to set TXT record for $domain"
-        exit 1
-    fi
-}
-
-# caa_domain_and_tag DOMAIN -> prints "caa_domain caa_tag" (strips a wildcard).
-caa_domain_and_tag() {
-    local domain="$1"
-    if [[ "$domain" == \*.* ]]; then
-        echo "${domain#\*.} issuewild"
-    else
-        echo "$domain issue"
-    fi
-}
-
-# In delegation mode we have NO token for the served domain's zone, so we cannot
-# set the accounturi CAA ourselves. That CAA is the forge-prevention (only this
-# enclave's ACME account may issue), so this path is deliberately NOT gated by
-# SET_CAA and fails closed if the record is confirmed absent — otherwise anyone
-# who can satisfy the delegated DNS-01 challenge could obtain a cert for the
-# domain. Set ALLOW_MISSING_CAA=true to override (accept the risk).
-verify_delegation_caa() {
-    local domain="$1"
-    local account_file account_uri caa_domain caa_tag caa_value resp status found
-
-    if ! account_file=$(get_letsencrypt_account_file); then
-        echo "ERROR: cannot read the Let's Encrypt account file to determine the required accounturi CAA" >&2
-        caa_fail_or_allow "$domain"
-        return
-    fi
-    read -r caa_domain caa_tag < <(caa_domain_and_tag "$domain")
-    account_uri=$(jq -j '.uri' "$account_file")
-    caa_value="letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri"
-
-    echo "[challenge-delegation] Set this CAA in your production zone (static, one-time):"
-    echo "    ${caa_domain}  CAA  0 ${caa_tag} \"${caa_value}\""
-
-    # Verify via DNS-over-HTTPS (dig is not installed in the image; curl+jq are).
-    resp=$(curl -s --max-time 10 "https://dns.google/resolve?name=${caa_domain}&type=257" 2>/dev/null || true)
-    if [ -z "$resp" ]; then
-        echo "WARNING: could not reach dns.google to verify the CAA (network issue) — NOT confirmed; continuing"
-        return
-    fi
-    status=$(echo "$resp" | jq -r '.Status // empty' 2>/dev/null || true)
-    if [ "$status" != "0" ]; then
-        echo "WARNING: CAA DoH query for ${caa_domain} returned status ${status:-unknown} — NOT confirmed; continuing"
-        return
-    fi
-    # Literal (grep -F) match on the CAA data fields — the account URI contains
-    # '/' and '.', which must not be treated as regex.
-    found=$(echo "$resp" | jq -r '.Answer // [] | .[] | .data' 2>/dev/null | grep -F "accounturi=$account_uri" || true)
-    if [ -n "$found" ]; then
-        echo "[challenge-delegation] Verified: accounturi CAA is present for $caa_domain"
-        return
-    fi
-    echo "ERROR: the accounturi CAA is NOT present for $caa_domain." >&2
-    echo "ERROR: without it, anyone who can satisfy the delegated DNS-01 challenge could obtain a" >&2
-    echo "ERROR: publicly-trusted certificate for this domain (forged TLS termination)." >&2
-    caa_fail_or_allow "$domain"
-}
-
-caa_fail_or_allow() {
-    local domain="$1"
-    if [ "${ALLOW_MISSING_CAA:-false}" = "true" ]; then
-        echo "WARNING: ALLOW_MISSING_CAA=true — continuing without a verified accounturi CAA for $domain"
-        return 0
-    fi
-    echo "ERROR: refusing to continue without the accounturi CAA for $domain." >&2
-    echo "ERROR: set the CAA record shown above, or ALLOW_MISSING_CAA=true to override." >&2
-    exit 1
-}
-
-set_caa_record() {
-    local domain="$1"
-
-    # Delegation mode is handled separately and is NOT gated by SET_CAA.
-    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
-        verify_delegation_caa "$domain"
-        return
-    fi
-
-    if [ "$SET_CAA" != "true" ]; then
-        echo "Skipping CAA record setup"
-        return
-    fi
-
-    local account_file account_uri caa_domain caa_tag
-    if ! account_file=$(get_letsencrypt_account_file); then
-        echo "Warning: Cannot set CAA record - account file not found"
-        echo "This is not critical - certificates can still be issued without CAA records"
-        return
-    fi
-    read -r caa_domain caa_tag < <(caa_domain_and_tag "$domain")
-    account_uri=$(jq -j '.uri' "$account_file")
-
-    echo "Adding CAA record ($caa_tag) for $caa_domain, accounturi=$account_uri"
-    dnsman.py set_caa \
-        --domain "$caa_domain" \
-        --caa-tag "$caa_tag" \
-        --caa-value "letsencrypt.org;validationmethods=${CHALLENGE_TYPE};accounturi=$account_uri"
-
-    if [ $? -ne 0 ]; then
-        echo "Warning: Failed to set CAA record for $domain"
-        echo "This is not critical - certificates can still be issued without CAA records"
-        echo "Consider disabling CAA records by setting SET_CAA=false if this continues to fail"
-    fi
-}
-
-process_domain_dns01() {
-    local domain="$1"
-
-    set_alias_record "$domain"
-    set_txt_record "$domain"
-    renew-certificate.sh "$domain" || echo "First certificate renewal failed for $domain, will retry after set CAA record"
-    set_caa_record "$domain"
-    renew-certificate.sh "$domain"
-}
-
-process_domain_tlsalpn() {
-    local domain="$1"
-
-    if [[ "$domain" == \*.* ]]; then
-        echo "Error: cannot issue a wildcard certificate for $domain with tls-alpn-01." >&2
-        echo "RFC 8737 forbids it; use CHALLENGE_TYPE=dns-01 for wildcards." >&2
-        exit 1
-    fi
-
-    # Register the ACME account first so the CAA record we print can already
-    # pin accounturi. Without this the operator would have to add CAA in a
-    # second pass, after the account exists.
-    if ! legoman.py register --email "$CERTBOT_EMAIL"; then
-        echo "Error: failed to register the ACME account" >&2
-        exit 1
-    fi
-
-    local account_uri caa_value
-    account_uri=$(legoman.py account-uri --email "$CERTBOT_EMAIL" 2>/dev/null || true)
-    if [ -n "$account_uri" ]; then
-        caa_value="letsencrypt.org;validationmethods=tls-alpn-01;accounturi=$account_uri"
-    else
-        echo "Warning: could not read the ACME account URI; the CAA record will not pin it" >&2
-        caa_value="letsencrypt.org;validationmethods=tls-alpn-01"
-    fi
-
-    # Wait for the records routing depends on. An existing CAA record is also
-    # checked for compatibility -- not because CAA is required (an absent CAA
-    # record set permits every CA), but because an incompatible one makes the CA
-    # refuse and burns Let's Encrypt's failed-validation budget: 5 per account
-    # per hostname per hour.
-    if ! dnsguide.py \
-        --domain "$domain" \
-        --alias-target "$GATEWAY_DOMAIN" \
-        --txt-name "$(txt_record_name "$domain")" \
-        --txt-value "$(txt_record_value)" \
-        --caa-name "${domain#\*.}" \
-        --caa-tag "$(caa_tag_for "$domain")" \
-        --caa-value "$caa_value" \
-        --account-uri "$account_uri" \
-        --challenge tls-alpn-01 \
-        --mode "$DNS_SETUP_MODE"; then
-        echo "Error: required DNS records for $domain are not in place" >&2
-        exit 1
-    fi
-
-    # Public DNS being correct is not the same as the gateway acting on it. The
-    # gateway resolves the app-address TXT itself and caches the answer for the
-    # record's TTL, so right after the value changes -- which is every time the
-    # CVM instance is replaced, since the record names the instance -- it can
-    # still route the challenge to the previous target. Observed exactly that:
-    # dnsguide passed, then the CA got "Error getting validation data" because
-    # the gateway was still sending it to the old instance.
-    if [ "${DNS_SETTLE_SECONDS:-30}" -gt 0 ]; then
-        echo "Waiting ${DNS_SETTLE_SECONDS:-30}s for the gateway's DNS cache to expire"
-        sleep "${DNS_SETTLE_SECONDS:-30}"
-    fi
-
-    renew-certificate.sh "$domain"
-}
-
-process_domain() {
-    local domain="$1"
-    echo "Processing domain: $domain (challenge: $CHALLENGE_TYPE)"
-
-    if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
-        process_domain_tlsalpn "$domain"
-    else
-        process_domain_dns01 "$domain"
-    fi
-}
-
-bootstrap() {
-    echo "Bootstrap: Setting up domains"
-
-    local all_domains
-    all_domains=$(get-all-domains.sh)
-
-    if [ -z "$all_domains" ]; then
-        echo "Error: No domains found. Set either DOMAIN or DOMAINS environment variable"
-        exit 1
-    fi
-
-    echo "Found domains:"
-    echo "$all_domains"
-
-    while IFS= read -r domain; do
-        [[ -n "$domain" ]] || continue
-        process_domain "$domain"
-    done <<<"$all_domains"
-
-    # Generate evidences after all certificates are obtained
-    echo "Generating evidence files for all domains..."
-    generate-evidences.sh
-
-    touch /.bootstrapped
-}
-
 # haproxy refuses to start when the crt directory has no PEM in it. In
 # tls-alpn-01 mode the proxy has to be listening *before* the first certificate
 # exists, because it is what forwards the ACME challenge to certbot, so seed a
@@ -687,32 +375,6 @@ ensure_placeholder_certs() {
 }
 
 # Obtain certificates once the proxy is already serving, then swap them in.
-bootstrap_and_reload() {
-    local attempt=0 delay
-    while true; do
-        attempt=$((attempt + 1))
-        # Nested subshell so an `exit 1` from a process_domain helper is
-        # reported as a failed condition here rather than silently killing
-        # this background job.
-        if ( bootstrap ); then
-            build-combined-pems.sh || echo "Combined PEM build failed" >&2
-            if [ -f /var/run/haproxy/haproxy.pid ]; then
-                kill -USR2 "$(cat /var/run/haproxy/haproxy.pid)" &&
-                    echo "Certificates installed and HAProxy reloaded"
-            fi
-            return 0
-        fi
-
-        # Falling through to the 12-hour renewal daemon would be a terrible
-        # retry interval for a flow whose normal state is "waiting for the
-        # operator to create a DNS record". Back off, but keep trying.
-        delay=$((60 * attempt))
-        [ "$delay" -gt 1800 ] && delay=1800
-        echo "Bootstrap attempt ${attempt} failed; the proxy keeps serving the" >&2
-        echo "placeholder certificate. Retrying in ${delay}s." >&2
-        sleep "$delay"
-    done
-}
 
 # Credentials are now handled by certman.py setup
 
@@ -721,23 +383,17 @@ setup_certbot_env
 load_dstack_identity
 
 if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
-    # Ordering is load-bearing here. The tls-alpn-01 challenge arrives on the
-    # public TLS port, so haproxy must already be routing acme-tls/1 to certbot
-    # before the first certificate can be issued. Start the proxy on a
-    # placeholder certificate and let issuance converge behind it.
+    # Ordering is load-bearing. The tls-alpn-01 challenge arrives on the public
+    # TLS port, so haproxy has to be forwarding acme-tls/1 before the first
+    # certificate can exist. Start on a placeholder and let the certificate
+    # manager converge behind it.
     ensure_placeholder_certs
-    build-combined-pems.sh || true
 else
-    # dns-01 needs no inbound traffic, so keep the original order: get the
-    # certificate first, start serving second.
-    if [ ! -f "/.bootstrapped" ]; then
-        bootstrap
-    else
-        echo "Certificate for $DOMAIN already exists"
-        generate-evidences.sh
-    fi
-    build-combined-pems.sh
+    # dns-01 needs no inbound traffic, so keep the original order: certificate
+    # first, serving second, and a failure here is fatal as it always was.
+    cert-manager.sh --once
 fi
+build-combined-pems.sh || true
 
 # Generate haproxy config
 if [ -n "$ROUTING_MAP" ]; then
@@ -752,15 +408,8 @@ if [ "$EVIDENCE_SERVER" = "true" ]; then
     echo "Evidence server started on port ${EVIDENCE_PORT} (mini_httpd)"
 fi
 
-if [ "$CHALLENGE_TYPE" = "tls-alpn-01" ]; then
-    if [ ! -f "/.bootstrapped" ]; then
-        bootstrap_and_reload &
-    else
-        echo "Certificates already bootstrapped"
-        generate-evidences.sh || echo "Evidence generation failed" >&2
-    fi
-fi
-
-renewal-daemon.sh &
+# One process owns certificates from here on: first pass (tls-alpn-01, where it
+# has to run behind a live proxy) and every renewal after that.
+cert-manager.sh &
 
 exec "$@"
