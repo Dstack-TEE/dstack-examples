@@ -62,6 +62,11 @@ class Record:
     name: str
     value: str
     note: str = ""
+    # A CNAME the operator points at the gateway may legitimately be flattened
+    # to an address record, so check_alias accepts either. A delegation CNAME
+    # cannot: its target holds only a TXT, so there is no address to compare
+    # and the record has to be the CNAME itself.
+    exact: bool = False
 
 
 class ResolveError(RuntimeError):
@@ -154,6 +159,17 @@ def check_txt(record: Record, resolvers: str) -> Tuple[bool, str]:
         if len(lagging) == len(split_resolvers(resolvers))
         else f"not yet propagated to {', '.join(lagging)} (saw {observed!r})"
     )
+
+
+def check_cname_exact(record: Record, resolvers: str) -> Tuple[bool, str]:
+    """Verify a CNAME points at exactly this target, with no address fallback."""
+    target = _fqdn(record.value)
+    cnames = [_fqdn(v) for v in query_union(record.name, RR_CNAME, resolvers)]
+    if target in cnames:
+        return True, "ok (CNAME)"
+    if cnames:
+        return False, f"CNAME points at {cnames!r}, expected {target!r}"
+    return False, "no CNAME record found"
 
 
 def check_alias(record: Record, resolvers: str) -> Tuple[bool, str]:
@@ -253,12 +269,24 @@ def _caa_permits(value: str, tag: str, want_method: str, account_uri: str) -> Tu
 
 
 def check_caa(
-    domain: str, want_tag: str, want_method: str, account_uri: str, resolvers: str
+    domain: str,
+    want_tag: str,
+    want_method: str,
+    account_uri: str,
+    resolvers: str,
+    require_present: bool = False,
 ) -> Tuple[bool, str]:
     """Check CAA for domain, walking up to the closest ancestor that has one.
 
     An absent CAA record set means every CA may issue (RFC 8659), so "no CAA
-    anywhere" is a pass, not a failure.
+    anywhere" is normally a pass: we are asking whether *we* may issue, and
+    nothing forbids it.
+
+    `require_present` inverts that for challenge delegation, where the question
+    is different. There the record is not a formality but the only thing stopping
+    someone else who can satisfy the delegated challenge from getting a
+    certificate for this name, and we hold no token to create it ourselves. An
+    unrestricted name is exactly the state that must block.
     """
     labels = _fqdn(domain).split(".")
     for i in range(len(labels) - 1):
@@ -292,6 +320,11 @@ def check_caa(
             reasons.append(reason)
         return False, f"CAA at {candidate} does not permit issuance: {'; '.join(reasons)}"
 
+    if require_present:
+        return False, (
+            "no CAA record set, so any account that can satisfy the delegated "
+            "challenge could obtain a certificate for this name"
+        )
     return True, "ok (no CAA record set; issuance is unrestricted)"
 
 
@@ -324,6 +357,8 @@ def verify_once(
     caa_method: str,
     account_uri: str,
     resolvers: str,
+    caa_advisory: bool = False,
+    caa_required: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     results = []
     for rec in records:
@@ -331,10 +366,18 @@ def verify_once(
             ok, why = check_txt(rec, resolvers)
             results.append((f"TXT {rec.name}", ok, why))
         elif rec.type == "CNAME":
-            ok, why = check_alias(rec, resolvers)
+            if rec.exact:
+                ok, why = check_cname_exact(rec, resolvers)
+            else:
+                ok, why = check_alias(rec, resolvers)
             results.append((f"CNAME {rec.name}", ok, why))
-    ok, why = check_caa(domain, caa_tag, caa_method, account_uri, resolvers)
-    results.append((f"CAA {domain}", ok, why))
+    ok, why = check_caa(
+        domain, caa_tag, caa_method, account_uri, resolvers, caa_required
+    )
+    if not ok and caa_advisory:
+        results.append((f"CAA {domain}", True, f"WARNING: {why} (continuing: CAA is advisory)"))
+    else:
+        results.append((f"CAA {domain}", ok, why))
     return results
 
 
@@ -357,6 +400,21 @@ def build_records(args: argparse.Namespace) -> List[Record]:
                 name=args.txt_name,
                 value=args.txt_value,
                 note="tells the gateway which instance to route this hostname to",
+            )
+        )
+    if "challenge-cname" in include and args.challenge_alias:
+        # Challenge delegation: the CA follows this CNAME when it looks for
+        # _acme-challenge, so the TXT can live in a zone whose token we hold and
+        # the served zone never needs one. certbot validates at the base name
+        # even for a wildcard, so strip "*." here too.
+        base = args.domain[2:] if args.domain.startswith("*.") else args.domain
+        records.append(
+            Record(
+                type="CNAME",
+                name=f"_acme-challenge.{base}",
+                value=f"_acme-challenge.{base}.{args.challenge_alias}",
+                note="delegates the ACME challenge to a zone this container can write",
+                exact=True,
             )
         )
     if "caa" in include and args.caa_value:
@@ -386,6 +444,22 @@ def main() -> int:
     parser.add_argument("--account-uri", default="")
     parser.add_argument("--challenge", default="tls-alpn-01")
     parser.add_argument(
+        "--challenge-alias",
+        default=os.environ.get("ACME_CHALLENGE_ALIAS", ""),
+        help="delegation zone for the _acme-challenge CNAME (dns-01 delegation)",
+    )
+    parser.add_argument(
+        "--caa-required",
+        action="store_true",
+        help="treat an absent CAA record set as a failure (challenge delegation: "
+             "the record is the only protection and we cannot create it)",
+    )
+    parser.add_argument(
+        "--caa-advisory",
+        action="store_true",
+        help="report a failing CAA check as a warning instead of blocking",
+    )
+    parser.add_argument(
         "--mode",
         default=os.environ.get("DNS_SETUP_MODE", "wait"),
         choices=["wait", "print", "webhook"],
@@ -401,7 +475,8 @@ def main() -> int:
     parser.add_argument(
         "--include",
         default="cname,txt,caa",
-        help="comma-separated subset of records to handle (cname,txt,caa)",
+        help="comma-separated subset of records to handle "
+             "(cname,txt,caa,challenge-cname)",
     )
     args = parser.parse_args()
 
@@ -434,7 +509,8 @@ def main() -> int:
         try:
             results = verify_once(
                 records, args.domain.lstrip("*."), args.caa_tag, args.challenge,
-                args.account_uri, args.resolver,
+                args.account_uri, args.resolver, args.caa_advisory,
+                args.caa_required,
             )
         except ResolveError as exc:
             print(f"[dns-check #{attempt}] resolver problem: {exc}", flush=True)

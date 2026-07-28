@@ -158,9 +158,17 @@ class CloudflareDNSProvider(DNSProvider):
                 return self.zone_id
 
         zone_info = self._get_zone_info(domain)
-        if zone_info:
-            self.zone_id, self.zone_domain = zone_info
+        if not zone_info:
+            # Returning the cached id here would hand back a *different* zone's
+            # id, so a write meant for one zone could land in another. That is a
+            # correctness problem generally and a security one under challenge
+            # delegation, where "which zone are we writing to" is the point.
+            return None
+        self.zone_id, self.zone_domain = zone_info
         return self.zone_id
+
+    def zone_is_resolvable(self, name: str) -> bool:
+        return self._ensure_zone_id(name) is not None
 
     def get_dns_records(
         self, name: str, record_type: Optional[RecordType] = None
