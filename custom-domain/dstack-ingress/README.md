@@ -173,9 +173,9 @@ environment:
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode. `CERTBOT_STAGING` is the historical name and still works |
 | `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
-| `DNS_SETUP_MODE` | `wait` | tls-alpn-01 only: `wait`, `print` or `webhook` — see below |
-| `DNS_SETUP_TIMEOUT` | `1800` | tls-alpn-01 only: seconds to wait for the records to appear |
-| `DNS_SETUP_INTERVAL` | `15` | tls-alpn-01 only: seconds between DNS checks |
+| `DNS_SETUP_MODE` | `wait` | How to handle operator-managed records: `wait`, `print` or `webhook` — see below. Applies to tls-alpn-01 and to dns-01 challenge delegation |
+| `DNS_SETUP_TIMEOUT` | `1800` | Seconds to wait for those records to appear |
+| `DNS_SETUP_INTERVAL` | `15` | Seconds between DNS checks |
 | `DNS_WEBHOOK_URL` | | tls-alpn-01 + `DNS_SETUP_MODE=webhook`: endpoint to notify |
 | `DNS_WEBHOOK_TOKEN` | | Shared secret; the payload is HMAC-SHA256 signed with it |
 | `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records |
@@ -193,7 +193,7 @@ environment:
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
 | `ACME_CHALLENGE_ALIAS` | | Delegate the ACME DNS-01 challenge to this zone (see below) so the DNS token needs no access to the served domain's own zone |
 | `ACME_CHALLENGE_PROPAGATION_SECONDS` | `30` | Wait after writing the delegated challenge TXT before validation (only with `ACME_CHALLENGE_ALIAS`). Keep well under ~250s — certbot is killed after a 300s per-run timeout |
-| `ALLOW_MISSING_CAA` | `false` | In delegation mode, continue even if the required `accounturi` CAA cannot be confirmed. Default fails closed (see below) |
+| `ALLOW_MISSING_CAA` | `false` | In delegation mode, treat an unconfirmed `accounturi` CAA as a warning instead of a blocker. Default fails closed (see below) |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
@@ -221,11 +221,10 @@ svc.example.com                       CAA    0 issue "letsencrypt.org;validation
 > **Security note.** The `accounturi` CAA restricts issuance to this enclave's
 > ACME account and is the control that prevents forged certificates. In
 > delegation mode dstack-ingress cannot set it for you (no token for the served
-> zone), so it prints the record and verifies its presence via DoH. **If the
-> CAA is confirmed absent the container fails to start** (set `ALLOW_MISSING_CAA=true`
-> to override; a transient DoH failure only warns, it does not block). Without
-> this CAA, anyone who can satisfy the delegated challenge could obtain a
-> certificate for the domain.
+> zone), so it prints the record and verifies it. **A CAA that is confirmed
+> absent stops issuance** — set `ALLOW_MISSING_CAA=true` to downgrade that to a
+> warning. Without this CAA, anyone who can satisfy the delegated challenge
+> could obtain a certificate for the domain.
 >
 > Use a **dedicated** delegation zone and scope the token to only that zone — a
 > zone shared with other tenants lets anyone with write access to it complete
@@ -234,6 +233,13 @@ svc.example.com                       CAA    0 issue "letsencrypt.org;validation
 > authenticator, delete `/etc/letsencrypt/renewal/<domain>.conf` before enabling
 > delegation, otherwise `certbot renew` reuses the old plugin (which needs the
 > production-zone token this mode avoids).
+
+The records above are checked the same way tls-alpn-01 checks its own: two DoH
+resolvers, both CAA wire formats, and `DNS_SETUP_MODE` deciding what happens
+while they are missing. `wait` (the default) blocks until they appear, so you can
+start the container and create the records afterwards; `print` lists them and
+continues without checking; `webhook` POSTs them to `DNS_WEBHOOK_URL` for an
+operator service to create automatically.
 
 ## Evidence & Attestation
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
@@ -247,6 +248,15 @@ class DNSProvider(ABC):
         )
         return self.create_dns_record(new_record)
 
+    def zone_is_resolvable(self, name: str) -> bool:
+        """Whether the provider can find a zone that owns this name.
+
+        Lets callers tell "nothing there" apart from "could not look". The base
+        answer is optimistic so providers that do not model zones keep their
+        current behaviour; override where the distinction is knowable.
+        """
+        return True
+
     def unset_txt_record(self, name: str) -> bool:
         """Delete all TXT records for a name.
 
@@ -259,8 +269,20 @@ class DNSProvider(ABC):
         Returns:
             True if all matching records were removed (or none existed).
         """
+        # get_dns_records returns [] both for "this name has no TXT records" and
+        # for "the zone could not be resolved", so an empty list on its own would
+        # report a failed cleanup as a success. Ask whether the zone resolves
+        # before believing the emptiness.
+        records = self.get_dns_records(name, RecordType.TXT)
+        if not records and not self.zone_is_resolvable(name):
+            print(
+                f"Error: cannot delete TXT records for {name}: zone lookup failed",
+                file=sys.stderr,
+            )
+            return False
+
         ok = True
-        for record in self.get_dns_records(name, RecordType.TXT):
+        for record in records:
             if not record.id:
                 print(f"Warning: TXT record for {name} has no id; cannot delete")
                 ok = False

@@ -119,6 +119,63 @@ class TestCaaCheckDeduplication(unittest.TestCase):
         self.assertEqual(reason.count("excludes tls-alpn-01"), 1, reason)
 
 
+class TestDelegationRecord(unittest.TestCase):
+    """The _acme-challenge CNAME that makes challenge delegation work."""
+
+    def _args(self, domain, alias):
+        import argparse
+        return argparse.Namespace(
+            domain=domain, alias_target="gw.example.net",
+            txt_name="_dstack-app-address." + domain.lstrip("*."),
+            txt_value="appid:443", caa_name="", caa_tag="issue", caa_value="",
+            account_uri="", challenge="dns-01", challenge_alias=alias,
+            include="challenge-cname",
+        )
+
+    def test_points_at_the_delegation_zone(self):
+        rec = dnsguide.build_records(self._args("svc.example.com", "deleg.example.net"))[0]
+        self.assertEqual(rec.name, "_acme-challenge.svc.example.com")
+        self.assertEqual(rec.value, "_acme-challenge.svc.example.com.deleg.example.net")
+        self.assertTrue(rec.exact, "a delegation CNAME has no address to fall back to")
+
+    def test_wildcard_validates_at_the_base_name(self):
+        rec = dnsguide.build_records(self._args("*.example.com", "deleg.example.net"))[0]
+        self.assertEqual(rec.name, "_acme-challenge.example.com")
+
+    def test_absent_without_a_delegation_zone(self):
+        self.assertEqual(dnsguide.build_records(self._args("svc.example.com", "")), [])
+
+
+class TestExactCnameCheck(unittest.TestCase):
+    """check_alias falls back to comparing addresses; a delegation target has none."""
+
+    REC = dnsguide.Record(type="CNAME", name="_acme-challenge.svc.example.com",
+                          value="_acme-challenge.svc.example.com.deleg.example.net",
+                          exact=True)
+
+    def _with(self, cnames):
+        saved = dnsguide.query_union
+        dnsguide.query_union = lambda name, rr, r: cnames if rr == dnsguide.RR_CNAME else []
+        self.addCleanup(lambda: setattr(dnsguide, "query_union", saved))
+
+    def test_accepts_the_exact_target(self):
+        self._with(["_acme-challenge.svc.example.com.deleg.example.net."])
+        ok, _ = dnsguide.check_cname_exact(self.REC, "r")
+        self.assertTrue(ok)
+
+    def test_rejects_a_different_target(self):
+        self._with(["somewhere.else.example.net."])
+        ok, why = dnsguide.check_cname_exact(self.REC, "r")
+        self.assertFalse(ok)
+        self.assertIn("expected", why)
+
+    def test_reports_absence_without_claiming_it_does_not_resolve(self):
+        self._with([])
+        ok, why = dnsguide.check_cname_exact(self.REC, "r")
+        self.assertFalse(ok)
+        self.assertIn("no CNAME record found", why)
+
+
 class TestTxtNormalisation(unittest.TestCase):
     def test_strips_quotes(self):
         self.assertEqual(dnsguide._unquote_txt('"abc:443"'), "abc:443")
