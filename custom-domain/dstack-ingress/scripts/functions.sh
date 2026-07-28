@@ -166,7 +166,8 @@ get_letsencrypt_account_path() {
     local base_path="/etc/letsencrypt/accounts"
     local api_endpoint="acme-v02.api.letsencrypt.org"
 
-    if [[ "$CERTBOT_STAGING" == "true" ]]; then
+    # entrypoint.sh normalises CERTBOT_STAGING into ACME_STAGING.
+    if [[ "$ACME_STAGING" == "true" ]]; then
         api_endpoint="acme-staging-v02.api.letsencrypt.org"
     fi
 
@@ -186,4 +187,37 @@ get_letsencrypt_account_file() {
     fi
 
     echo "${account_files[0]}"
+}
+
+txt_record_name() {
+    local domain="$1"
+    if [[ "$domain" == \*.* ]]; then
+        # Wildcard domain: *.myapp.com → _dstack-app-address-wildcard.myapp.com
+        echo "${TXT_PREFIX}-wildcard.${domain#\*.}"
+    else
+        echo "${TXT_PREFIX}.${domain}"
+    fi
+}
+
+caa_tag_for() {
+    if [[ "$1" == \*.* ]]; then echo "issuewild"; else echo "issue"; fi
+}
+
+# Query the guest agent once for this app's identity.
+load_dstack_identity() {
+    local info
+    if [[ -S /var/run/dstack.sock ]]; then
+        info=$(curl -s --unix-socket /var/run/dstack.sock http://localhost/Info)
+    else
+        info=$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info)
+    fi
+
+    DSTACK_APP_ID=$(echo "$info" | jq -j .app_id)
+    DSTACK_INSTANCE_ID=$(echo "$info" | jq -j .instance_id)
+    export DSTACK_APP_ID DSTACK_INSTANCE_ID
+
+    if [ -z "$DSTACK_APP_ID" ] || [ "$DSTACK_APP_ID" = "null" ]; then
+        echo "Error: could not read app_id from the dstack guest agent" >&2
+        exit 1
+    fi
 }

@@ -3,6 +3,7 @@
 from dns_providers import DNSProviderFactory
 import argparse
 import os
+import re
 import subprocess
 import sys
 import pkg_resources
@@ -10,6 +11,17 @@ from typing import List, Optional, Tuple
 
 # Add script directory to path to import dns_providers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+
+def staging_enabled() -> bool:
+    """Whether to use Let's Encrypt staging.
+
+    entrypoint.sh normalises the two names, but certman.py is also runnable on
+    its own, so accept both here as well. ACME_STAGING wins: the setting is
+    about the ACME server, not about certbot.
+    """
+    value = os.environ.get("ACME_STAGING") or os.environ.get("CERTBOT_STAGING", "false")
+    return value == "true"
 
 
 class CertManager:
@@ -281,12 +293,17 @@ class CertManager:
                     f"--manual-auth-hook={hook} auth",
                     f"--manual-cleanup-hook={hook} cleanup",
                     "--agree-tos", "--no-eff-email",
-                    "--email", email, "-d", domain,
                 ])
+                # Same optional-contact handling as the plugin path below.
+                if email:
+                    base_cmd.extend(["--email", email])
+                else:
+                    base_cmd.append("--register-unsafely-without-email")
+                base_cmd.extend(["-d", domain])
             # For `renew`, certbot reuses the authenticator + hooks saved in the
             # renewal config from the initial `certonly`, so we don't re-specify
             # them here (and must not fall back to the DNS plugin).
-            if os.environ.get("CERTBOT_STAGING", "false") == "true":
+            if staging_enabled():
                 base_cmd.append("--staging")
             masked = [a if not (i > 0 and base_cmd[i - 1] == "--email") else "<email>"
                       for i, a in enumerate(base_cmd)]
@@ -313,9 +330,19 @@ class CertManager:
                     f"Credentials file does not exist: {credentials_file}")
 
         if action == "certonly":
-            base_cmd.extend(["--agree-tos", "--no-eff-email",
-                            "--email", email, "-d", domain])
-        if os.environ.get("CERTBOT_STAGING", "false") == "true":
+            base_cmd.extend(["--agree-tos", "--no-eff-email"])
+            # The ACME contact address is optional (RFC 8555 section 7.3), and
+            # it is published: the account document is served as attestation
+            # evidence, so an address set here is readable by anyone who
+            # fetches it. certbot will not simply omit the flag, so ask for a
+            # contactless account explicitly. Its "unsafely" naming predates
+            # Let's Encrypt dropping expiry notification mail in 2025.
+            if email:
+                base_cmd.extend(["--email", email])
+            else:
+                base_cmd.append("--register-unsafely-without-email")
+            base_cmd.extend(["-d", domain])
+        if staging_enabled():
             base_cmd.extend(["--staging"])
 
         if getattr(self.provider, 'CERTBOT_PROPAGATION_SECONDS'):
@@ -404,6 +431,7 @@ class CertManager:
             print(f"Failed to install plugin for renewal", file=sys.stderr)
             return False, False
 
+        self.apply_renewal_window(domain)
         cmd = self._build_certbot_command("renew", domain, "")
 
         try:
@@ -449,6 +477,73 @@ class CertManager:
         cert_path = f"/etc/letsencrypt/live/{domain}/fullchain.pem"
         return os.path.isfile(cert_path)
 
+    @staticmethod
+    def _lineage_name(domain: str) -> str:
+        """certbot stores a wildcard lineage under the bare name."""
+        return domain[2:] if domain.startswith("*.") else domain
+
+    def apply_renewal_window(self, domain: str) -> None:
+        """Make RENEW_DAYS_BEFORE mean the same thing here as it does for lego.
+
+        lego takes the renewal window as a flag (`--renew-days`). certbot has no
+        equivalent: it reads `renew_before_expiry` out of the lineage's renewal
+        config, so the setting has to be written there before `certbot renew`
+        runs. Without this the variable is silently tls-alpn-01 only, which also
+        left the dns-01 renewal branch with no way to be exercised on demand.
+
+        Leaving it unset keeps certbot's own default (30 days).
+        """
+        days = os.environ.get("RENEW_DAYS_BEFORE", "").strip()
+        if not days:
+            return
+        if not days.isdigit() or int(days) < 1:
+            print(
+                f"Warning: ignoring invalid RENEW_DAYS_BEFORE={days!r} "
+                f"(expected a positive number of days)",
+                file=sys.stderr,
+            )
+            return
+
+        path = f"/etc/letsencrypt/renewal/{self._lineage_name(domain)}.conf"
+        if not os.path.isfile(path):
+            # No lineage yet: the first issuance has not happened, and certbot
+            # writes this file itself. Nothing to do.
+            return
+
+        setting = f"renew_before_expiry = {days} days"
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError as exc:
+            print(f"Warning: cannot read {path}: {exc}", file=sys.stderr)
+            return
+
+        out, replaced = [], False
+        for line in lines:
+            # The key ships commented out, so match both forms.
+            if re.match(r"\s*#?\s*renew_before_expiry\s*=", line):
+                if not replaced:
+                    out.append(setting)
+                    replaced = True
+                continue
+            out.append(line)
+
+        if not replaced:
+            # Must land before the first section header; the key is top-level.
+            insert_at = next(
+                (i for i, line in enumerate(out) if line.strip().startswith("[")),
+                len(out),
+            )
+            out.insert(insert_at, setting)
+
+        try:
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(out) + "\n")
+        except OSError as exc:
+            print(f"Warning: cannot write {path}: {exc}", file=sys.stderr)
+            return
+        print(f"Renewal window for {domain} set to {days} days before expiry")
+
     def acme_account_exists(self) -> bool:
         """Check if an ACME account exists for the current server (staging or production).
 
@@ -461,7 +556,7 @@ class CertManager:
         """
         import glob
         api_endpoint = "acme-v02.api.letsencrypt.org"
-        if os.environ.get("CERTBOT_STAGING", "false") == "true":
+        if staging_enabled():
             api_endpoint = "acme-staging-v02.api.letsencrypt.org"
         pattern = f"/etc/letsencrypt/accounts/{api_endpoint}/directory/*/regr.json"
         return len(glob.glob(pattern)) > 0
@@ -528,15 +623,11 @@ def main():
             )
             sys.exit(1)
 
-        # Email is required for obtain and auto actions
-        if args.action in ["obtain", "auto"] and not args.email:
-            if not os.environ.get("CERTBOT_EMAIL"):
-                print(
-                    "Error: --email is required or set CERTBOT_EMAIL environment variable",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
-            args.email = os.environ["CERTBOT_EMAIL"]
+        # The contact address is optional; see _build_certbot_command.
+        if not args.email:
+            args.email = os.environ.get("ACME_EMAIL") or os.environ.get(
+                "CERTBOT_EMAIL", ""
+            )
 
         success, needs_evidence = manager.run_action(
             args.domain, args.email, args.action
