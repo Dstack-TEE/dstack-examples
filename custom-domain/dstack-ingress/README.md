@@ -205,6 +205,12 @@ served name lives under a shared production zone (e.g. `svc.example.com` under
 `example.com`), that token can edit every record in the zone, which may be more
 privilege than you want.
 
+> **Renamed.** This was `ACME_CHALLENGE_ALIAS`, from when the challenge was the
+> only thing delegated. The old name is **not** accepted — a deployment still
+> setting it silently leaves delegation mode and starts writing to the served
+> domain's zone, which is what delegation exists to avoid. Rename it when
+> upgrading.
+
 Set `DELEGATION_ZONE=<delegation-zone>` to move every name this deployment
 needs into a zone your token controls. You create three CNAMEs in the served
 domain's zone **once, before deploying**, and then never touch DNS again — not

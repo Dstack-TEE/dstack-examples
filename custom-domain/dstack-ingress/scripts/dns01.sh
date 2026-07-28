@@ -148,9 +148,17 @@ delegation_publish() {
     local domain="$1" target txt_name
     target=$(delegated_name "$domain")
 
+    # The set_* helpers only look at the type they are about to write, so a
+    # leftover record of the other type stays and blocks the new one -- DNS
+    # forbids a CNAME beside anything else. Clear it first, so switching
+    # DELEGATION_GATEWAY_RECORD either way actually takes effect.
     case "$(delegation_gateway_record)" in
         cname)
-            dnsman.py set_alias --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
+            dnsman.py unset --domain "$target" --type A >/dev/null 2>&1 || true
+            # set_cname, not set_alias: some providers redefine "alias" to mean
+            # an address record (Linode does, precisely to dodge the CAA/CNAME
+            # conflict), and this branch has to mean what it says.
+            dnsman.py set_cname --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
             ;;
         a)
             # For providers that refuse a CAA beside a CNAME. Costs the
@@ -163,6 +171,7 @@ delegation_publish() {
                 return 1
             fi
             addr=$(echo "$addrs" | head -1)
+            dnsman.py unset --domain "$target" --type CNAME >/dev/null 2>&1 || true
             dnsman.py set_a --domain "$target" --content "$addr" || return 1
             ;;
         *)

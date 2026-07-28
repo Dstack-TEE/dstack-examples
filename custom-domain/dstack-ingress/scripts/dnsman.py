@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 from dns_providers import DNSProviderFactory
+from dns_providers.base import RecordType
 import argparse
 import os
 import sys
@@ -14,10 +15,11 @@ def main():
     )
     parser.add_argument(
         "action",
-        choices=["provider", "set_cname", "set_alias", "set_a", "set_txt", "unset_txt", "set_caa"],
+        choices=["provider", "set_cname", "set_alias", "set_a", "set_txt", "unset_txt", "unset", "set_caa"],
         help="Action to perform",
     )
     parser.add_argument("--domain", default="", help="Domain name")
+    parser.add_argument("--type", default="", help="Record type, for unset")
     parser.add_argument("--provider", help="DNS provider (cloudflare, linode)")
     # Zone ID is now handled internally by each provider
     parser.add_argument(
@@ -82,6 +84,16 @@ def main():
                 print(f"Failed to set A record for {args.domain}", file=sys.stderr)
                 sys.exit(1)
             print(f"Successfully set A record for {args.domain}")
+
+        elif args.action == "unset":
+            if not args.type:
+                print("Error: --type is required for unset", file=sys.stderr)
+                sys.exit(1)
+            success = provider.unset_records(args.domain, RecordType[args.type.upper()])
+            if not success:
+                print(f"Failed to unset {args.type} records for {args.domain}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Successfully unset {args.type} records for {args.domain}")
 
         elif args.action == "unset_txt":
             success = provider.unset_txt_record(args.domain)

@@ -257,26 +257,30 @@ class DNSProvider(ABC):
         """
         return True
 
-    def unset_txt_record(self, name: str) -> bool:
-        """Delete all TXT records for a name.
+    def unset_records(self, name: str, record_type: RecordType) -> bool:
+        """Delete every record of one type at a name.
 
-        Used to clean up ACME DNS-01 challenge records (e.g. from a certbot
-        --manual cleanup hook). Missing records are treated as success.
+        Used to clean up an ACME challenge, and to clear a record type before
+        publishing a different one at the same name -- the set_* helpers only
+        look at the type they are about to write, so a leftover CNAME would
+        otherwise block an A record and vice versa.
 
         Args:
             name: The record name
+            record_type: Which type to remove
 
         Returns:
             True if all matching records were removed (or none existed).
         """
-        # get_dns_records returns [] both for "this name has no TXT records" and
-        # for "the zone could not be resolved", so an empty list on its own would
-        # report a failed cleanup as a success. Ask whether the zone resolves
-        # before believing the emptiness.
-        records = self.get_dns_records(name, RecordType.TXT)
+        # get_dns_records returns [] both for "this name has no such records"
+        # and for "the zone could not be resolved", so an empty list on its own
+        # would report a failed cleanup as a success. Ask whether the zone
+        # resolves before believing the emptiness.
+        records = self.get_dns_records(name, record_type)
         if not records and not self.zone_is_resolvable(name):
             print(
-                f"Error: cannot delete TXT records for {name}: zone lookup failed",
+                f"Error: cannot delete {record_type.value} records for {name}: "
+                f"zone lookup failed",
                 file=sys.stderr,
             )
             return False
@@ -284,12 +288,16 @@ class DNSProvider(ABC):
         ok = True
         for record in records:
             if not record.id:
-                print(f"Warning: TXT record for {name} has no id; cannot delete")
+                print(f"Warning: {record_type.value} record for {name} has no id; cannot delete")
                 ok = False
                 continue
             if not self.delete_dns_record(record.id, name):
                 ok = False
         return ok
+
+    def unset_txt_record(self, name: str) -> bool:
+        """Delete all TXT records for a name."""
+        return self.unset_records(name, RecordType.TXT)
 
     def set_caa_record(
         self,
