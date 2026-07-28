@@ -15,14 +15,14 @@ source /scripts/evidence-lib.sh
 # ACME account settings. CERTBOT_EMAIL / CERTBOT_STAGING are the historical
 # names, kept working for anyone migrating a compose file from dns-01, but there
 # is no certbot on this path -- the ACME client here is lego.
+#
+# The contact address is optional. RFC 8555 makes it optional, Let's Encrypt
+# stopped sending expiry notifications in 2025, and it does not stay private:
+# the account document is published at /evidences/acme-account.json, so an
+# address set here is readable by anyone who fetches the evidence.
 ACME_EMAIL=${ACME_EMAIL:-${CERTBOT_EMAIL:-}}
 ACME_STAGING=${ACME_STAGING:-${CERTBOT_STAGING:-false}}
 export ACME_EMAIL ACME_STAGING
-
-if [ -z "$ACME_EMAIL" ]; then
-    echo "Error: ACME_EMAIL must be set (CERTBOT_EMAIL is accepted as an alias)" >&2
-    exit 1
-fi
 
 LEGO_BIN=${LEGO_BIN:-/usr/local/bin/lego}
 LEGO_PATH=${LEGO_PATH:-/etc/letsencrypt/lego}
@@ -194,13 +194,13 @@ process_domain() {
     # Register the ACME account first so the CAA record we print can already
     # pin accounturi. Without this the operator would have to add CAA in a
     # second pass, after the account exists.
-    if ! legoman.py register --email "$ACME_EMAIL"; then
+    if ! legoman.py register ${ACME_EMAIL:+--email "$ACME_EMAIL"}; then
         echo "Error: failed to register the ACME account" >&2
         exit 1
     fi
 
     local account_uri caa_value
-    account_uri=$(legoman.py account-uri --email "$ACME_EMAIL" 2>/dev/null || true)
+    account_uri=$(legoman.py account-uri 2>/dev/null || true)
     if [ -n "$account_uri" ]; then
         caa_value="letsencrypt.org;validationmethods=tls-alpn-01;accounturi=$account_uri"
     else
@@ -244,7 +244,7 @@ process_domain() {
         sleep "${DNS_SETTLE_SECONDS}"
     fi
 
-    legoman.py auto --domain "$domain" --email "$ACME_EMAIL"
+    legoman.py auto --domain "$domain" ${ACME_EMAIL:+--email "$ACME_EMAIL"}
 }
 
 # One pass over every domain: make sure the records exist, then issue or renew.

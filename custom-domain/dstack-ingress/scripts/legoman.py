@@ -25,6 +25,7 @@ The dns-01 path still runs certbot via certman.py; nothing here touches it.
 """
 
 import argparse
+import glob
 import json
 import os
 import subprocess
@@ -60,13 +61,20 @@ def server_dir() -> str:
     return f"{host}_{parsed.port}" if parsed.port else host
 
 
-def account_file(email: str) -> Optional[str]:
-    path = os.path.join(LEGO_PATH, "accounts", server_dir(), email, "account.json")
-    return path if os.path.isfile(path) else None
+def account_file() -> Optional[str]:
+    """Find the account document by globbing rather than by building the path.
+
+    lego names the directory after the account email, and after a placeholder of
+    its own choosing when there is no email. Globbing means we neither have to
+    know that placeholder nor track it across lego versions.
+    """
+    pattern = os.path.join(LEGO_PATH, "accounts", server_dir(), "*", "account.json")
+    matches = sorted(glob.glob(pattern))
+    return matches[0] if matches else None
 
 
-def account_uri(email: str) -> Optional[str]:
-    path = account_file(email)
+def account_uri() -> Optional[str]:
+    path = account_file()
     if not path:
         return None
     try:
@@ -96,15 +104,14 @@ def _renewed_marker(domain: str) -> str:
 
 
 def _common_flags(email: str) -> List[str]:
-    return [
-        "--path",
-        LEGO_PATH,
-        "--server",
-        acme_server(),
-        "--email",
-        email,
-        "--accept-tos",
-    ]
+    flags = ["--path", LEGO_PATH, "--server", acme_server(), "--accept-tos"]
+    # The ACME contact address is optional (RFC 8555 §7.3), and Let's Encrypt
+    # stopped sending expiry notifications in 2025, so it buys little. It is
+    # also published: the account document is served as evidence, so an address
+    # set here becomes public. Omit it unless the operator wants it.
+    if email:
+        flags += ["--email", email]
+    return flags
 
 
 def _run(cmd: List[str], timeout: int = RUN_TIMEOUT) -> Tuple[int, str]:
@@ -126,7 +133,7 @@ def _run(cmd: List[str], timeout: int = RUN_TIMEOUT) -> Tuple[int, str]:
 
 def register(email: str) -> int:
     """Create the ACME account without issuing anything."""
-    if account_file(email):
+    if account_file():
         print("ACME account already exists")
         return EXIT_UNCHANGED
 
@@ -135,7 +142,7 @@ def register(email: str) -> int:
         [LEGO_BIN, "accounts", "register"] + _common_flags(email),
         timeout=REGISTER_TIMEOUT,
     )
-    if code == 0 and account_file(email):
+    if code == 0 and account_file():
         print("✓ ACME account registered")
         return EXIT_CHANGED
     print(f"✗ ACME account registration failed (exit code {code})", file=sys.stderr)
@@ -214,10 +221,7 @@ def main() -> int:
     email = args.email or os.environ.get("ACME_EMAIL") or os.environ.get("CERTBOT_EMAIL", "")
 
     if args.action == "account-uri":
-        if not email:
-            print("Error: --email or ACME_EMAIL is required", file=sys.stderr)
-            return EXIT_ERROR
-        uri = account_uri(email)
+        uri = account_uri()
         if not uri:
             return EXIT_ERROR
         print(uri)
@@ -231,9 +235,6 @@ def main() -> int:
         print(f"{crt} {key}")
         return EXIT_CHANGED
 
-    if not email:
-        print("Error: --email or ACME_EMAIL is required", file=sys.stderr)
-        return EXIT_ERROR
     if not os.path.isfile(LEGO_BIN):
         print(f"Error: lego binary not found at {LEGO_BIN}", file=sys.stderr)
         return EXIT_ERROR
