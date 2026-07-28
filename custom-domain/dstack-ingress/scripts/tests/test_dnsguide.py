@@ -176,6 +176,48 @@ class TestExactCnameCheck(unittest.TestCase):
         self.assertIn("no CNAME record found", why)
 
 
+class TestCaaRequiredForDelegation(unittest.TestCase):
+    """Delegation inverts the usual CAA question.
+
+    Normally we ask "does anything forbid us from issuing", and no CAA at all
+    means no. Under challenge delegation the record is the only thing stopping
+    someone else who can satisfy the delegated challenge, and we cannot create
+    it, so its absence has to block.
+    """
+
+    def _no_caa(self):
+        saved = dnsguide.query_union
+        dnsguide.query_union = lambda name, rr, r: []
+        self.addCleanup(lambda: setattr(dnsguide, "query_union", saved))
+
+    def test_absent_caa_passes_by_default(self):
+        self._no_caa()
+        ok, why = dnsguide.check_caa("app.example.com", "issue", "dns-01", "", "r")
+        self.assertTrue(ok)
+        self.assertIn("unrestricted", why)
+
+    def test_absent_caa_blocks_when_required(self):
+        self._no_caa()
+        ok, why = dnsguide.check_caa(
+            "app.example.com", "issue", "dns-01", "", "r", require_present=True
+        )
+        self.assertFalse(ok)
+        self.assertIn("no CAA record set", why)
+
+    def test_present_and_matching_passes_when_required(self):
+        saved = dnsguide.query_union
+        dnsguide.query_union = lambda name, rr, r: (
+            ['0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=https://acme/1"']
+            if name == "app.example.com" else []
+        )
+        self.addCleanup(lambda: setattr(dnsguide, "query_union", saved))
+        ok, _ = dnsguide.check_caa(
+            "app.example.com", "issue", "dns-01", "https://acme/1", "r",
+            require_present=True,
+        )
+        self.assertTrue(ok)
+
+
 class TestTxtNormalisation(unittest.TestCase):
     def test_strips_quotes(self):
         self.assertEqual(dnsguide._unquote_txt('"abc:443"'), "abc:443")

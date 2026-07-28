@@ -269,12 +269,24 @@ def _caa_permits(value: str, tag: str, want_method: str, account_uri: str) -> Tu
 
 
 def check_caa(
-    domain: str, want_tag: str, want_method: str, account_uri: str, resolvers: str
+    domain: str,
+    want_tag: str,
+    want_method: str,
+    account_uri: str,
+    resolvers: str,
+    require_present: bool = False,
 ) -> Tuple[bool, str]:
     """Check CAA for domain, walking up to the closest ancestor that has one.
 
     An absent CAA record set means every CA may issue (RFC 8659), so "no CAA
-    anywhere" is a pass, not a failure.
+    anywhere" is normally a pass: we are asking whether *we* may issue, and
+    nothing forbids it.
+
+    `require_present` inverts that for challenge delegation, where the question
+    is different. There the record is not a formality but the only thing stopping
+    someone else who can satisfy the delegated challenge from getting a
+    certificate for this name, and we hold no token to create it ourselves. An
+    unrestricted name is exactly the state that must block.
     """
     labels = _fqdn(domain).split(".")
     for i in range(len(labels) - 1):
@@ -308,6 +320,11 @@ def check_caa(
             reasons.append(reason)
         return False, f"CAA at {candidate} does not permit issuance: {'; '.join(reasons)}"
 
+    if require_present:
+        return False, (
+            "no CAA record set, so any account that can satisfy the delegated "
+            "challenge could obtain a certificate for this name"
+        )
     return True, "ok (no CAA record set; issuance is unrestricted)"
 
 
@@ -341,6 +358,7 @@ def verify_once(
     account_uri: str,
     resolvers: str,
     caa_advisory: bool = False,
+    caa_required: bool = False,
 ) -> List[Tuple[str, bool, str]]:
     results = []
     for rec in records:
@@ -353,7 +371,9 @@ def verify_once(
             else:
                 ok, why = check_alias(rec, resolvers)
             results.append((f"CNAME {rec.name}", ok, why))
-    ok, why = check_caa(domain, caa_tag, caa_method, account_uri, resolvers)
+    ok, why = check_caa(
+        domain, caa_tag, caa_method, account_uri, resolvers, caa_required
+    )
     if not ok and caa_advisory:
         results.append((f"CAA {domain}", True, f"WARNING: {why} (continuing: CAA is advisory)"))
     else:
@@ -429,6 +449,12 @@ def main() -> int:
         help="delegation zone for the _acme-challenge CNAME (dns-01 delegation)",
     )
     parser.add_argument(
+        "--caa-required",
+        action="store_true",
+        help="treat an absent CAA record set as a failure (challenge delegation: "
+             "the record is the only protection and we cannot create it)",
+    )
+    parser.add_argument(
         "--caa-advisory",
         action="store_true",
         help="report a failing CAA check as a warning instead of blocking",
@@ -484,6 +510,7 @@ def main() -> int:
             results = verify_once(
                 records, args.domain.lstrip("*."), args.caa_tag, args.challenge,
                 args.account_uri, args.resolver, args.caa_advisory,
+                args.caa_required,
             )
         except ResolveError as exc:
             print(f"[dns-check #{attempt}] resolver problem: {exc}", flush=True)

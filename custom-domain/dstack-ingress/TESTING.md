@@ -199,6 +199,51 @@ first issuance.
   payload, and a TDX quote whose `report_data` is `sha256(payload)`. Verify both:
   the HMAC proves the shared secret, the quote proves the enclave.
 
+### Challenge delegation (dns-01)
+
+`ACME_CHALLENGE_ALIAS` answers the DNS-01 challenge in a zone the container's
+token controls, so the token needs no access to the served domain's own zone.
+Testing it looks like it needs a second registrar account. It does not.
+
+Any name under a zone you already control works as the delegation zone, because
+the provider resolves a zone by longest-suffix match on the record name. With
+`ACME_CHALLENGE_ALIAS=deleg.example.com` and a served domain of
+`svc.example.com`, the challenge record is
+`_acme-challenge.svc.example.com.deleg.example.com`, which lands in
+`example.com` — the same zone, but through the delegation code path.
+
+Play the operator and create the three static records the container prints:
+
+```
+svc.example.com                    CNAME  <GATEWAY_DOMAIN>
+_dstack-app-address.svc.example.com  TXT  "<app-id>:443"
+_acme-challenge.svc.example.com    CNAME  _acme-challenge.svc.example.com.deleg.example.com
+```
+
+Then start the container with a real provider token and `ACME_STAGING=true`, and
+watch for: the three records verifying, `Executing (challenge-delegation):` with
+`--manual` and both hooks, the certificate arriving, and the challenge TXT being
+cleaned up afterwards (query `_acme-challenge.<domain>.<alias>` at the
+authoritative nameserver — it should be gone).
+
+The CAA step comes last, once the ACME account exists and its URI is known. It
+blocks until you create the record it prints. Cloudflare's API wants CAA as
+structured fields rather than one string, so most quick DNS scripts cannot write
+it; the image's own `dnsman.py set_caa` can, and running it in a one-off
+container is the easiest way to play the operator here:
+
+```bash
+docker run --rm --env-file .env --entrypoint dnsman.py <image> \
+  set_caa --domain svc.example.com --caa-tag issue \
+  --caa-value 'letsencrypt.org;validationmethods=dns-01;accounturi=<uri>'
+```
+
+**What this does not test.** The whole point of delegation is that a token scoped
+to *only* the delegation zone is enough. Sharing one zone exercises every line of
+the mechanism but leaves that property unverified — the token still has access to
+the served zone, so a bug that quietly writes there would not show up. Confirming
+the scoping needs a genuinely separate zone with a separate token.
+
 ### Negative paths
 
 These fail fast and are cheap, so run them on every change:
@@ -206,6 +251,7 @@ These fail fast and are cheap, so run them on every change:
 | Scenario | Expected |
 |---|---|
 | tls-alpn-01 + a wildcard domain | Refused before any ACME call, citing RFC 8737 |
+| Delegation with no CAA record at all | Blocked — unlike normal issuance, where "no CAA" means unrestricted and passes |
 | A CAA record with `validationmethods=dns-01`, mode tls-alpn-01 | Blocked with the restriction quoted back |
 | TXT holding the wrong value | Reported as `want <x>, saw <y>`, not "missing" |
 | An instance ID the gateway does not know | The CA reports a connection error — the gateway will not route to it |
