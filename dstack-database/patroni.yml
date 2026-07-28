@@ -1,0 +1,49 @@
+scope: postgres-cluster
+namespace: /db/
+name: #{NODE_NAME}
+
+restapi:
+  listen: 0.0.0.0:8008
+  connect_address: #{NODE_IP}:8008
+
+zookeeper:
+  hosts: node1:2181,node2:2181,node3:2181
+  session_timeout: 30
+  reconnect_timeout: 10
+
+bootstrap:
+  dcs:
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        max_connections: 100
+        shared_buffers: 256MB
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+        wal_keep_segments: 8
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: #{NODE_IP}:5432
+  data_dir: /data/postgres
+  bin_dir: /usr/lib/postgresql/14/bin
+  pgpass: /tmp/pgpass
+  authentication:
+    replication:
+      username: replicator
+      password: replpass
+    superuser:
+      username: postgres
+      password: secretpassword
+  parameters:
+    unix_socket_directories: '/var/run/postgresql'
+    
+  pg_hba:
+    - host replication replicator all md5
+    - host all all all md5
