@@ -14,10 +14,10 @@ def main():
     )
     parser.add_argument(
         "action",
-        choices=["set_cname", "set_alias", "set_txt", "unset_txt", "set_caa"],
+        choices=["provider", "set_cname", "set_alias", "set_a", "set_txt", "unset_txt", "set_caa"],
         help="Action to perform",
     )
-    parser.add_argument("--domain", required=True, help="Domain name")
+    parser.add_argument("--domain", default="", help="Domain name")
     parser.add_argument("--provider", help="DNS provider (cloudflare, linode)")
     # Zone ID is now handled internally by each provider
     parser.add_argument(
@@ -29,6 +29,15 @@ def main():
     parser.add_argument("--caa-value", help="CAA record value")
 
     args = parser.parse_args()
+
+    if args.action == "provider":
+        # Which provider is in use, so callers can adapt to what it allows.
+        print(DNSProviderFactory._detect_provider_type())
+        return
+
+    if not args.domain:
+        print("Error: --domain is required", file=sys.stderr)
+        sys.exit(1)
 
     try:
         # Create DNS provider instance
@@ -66,6 +75,13 @@ def main():
                 print(f"Failed to set TXT record for {args.domain}", file=sys.stderr)
                 sys.exit(1)
             print(f"Successfully set TXT record for {args.domain}")
+
+        elif args.action == "set_a":
+            success = provider.set_a_record(args.domain, args.content)
+            if not success:
+                print(f"Failed to set A record for {args.domain}", file=sys.stderr)
+                sys.exit(1)
+            print(f"Successfully set A record for {args.domain}")
 
         elif args.action == "unset_txt":
             success = provider.unset_txt_record(args.domain)

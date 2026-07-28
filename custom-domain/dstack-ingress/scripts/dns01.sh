@@ -11,6 +11,10 @@ source /scripts/functions.sh
 source /scripts/haproxy-lib.sh
 source /scripts/evidence-lib.sh
 
+# The zone this container writes into, and the switch that turns delegation on.
+DELEGATION_ZONE=${DELEGATION_ZONE:-}
+export DELEGATION_ZONE
+
 # ACME_EMAIL / ACME_STAGING are normalised by entrypoint.sh and exported. The
 # contact address is optional; certman.py asks for a contactless account when
 # none is given.
@@ -105,6 +109,90 @@ set_txt_record() {
     fi
 }
 
+# --- Full delegation --------------------------------------------------------
+#
+# The operator aliases three names into a zone this container can write, once,
+# before deploying. Everything those names resolve to is published here, so DNS
+# never needs touching again -- not when the app id changes with the compose,
+# not when the ACME account is recreated, not when the gateway moves.
+#
+# How the delegated name points at the gateway.
+#
+# A CNAME is better -- a gateway that moves is followed automatically -- but the
+# same name also has to carry the CAA, and RFC 1034 says a CNAME excludes every
+# other type at its name. Cloudflare allows the pair anyway, and Let's Encrypt
+# honours the CAA it finds there (verified against the staging CA). Providers
+# that enforce the standard reject it, so they get an address record instead:
+# A and CAA coexist legally, at the cost of re-resolving GATEWAY_DOMAIN once a
+# pass rather than letting DNS follow it.
+#
+# Default per provider, since only Cloudflare is known to allow the pair.
+# DELEGATION_GATEWAY_RECORD overrides it either way.
+delegation_gateway_record() {
+    if [ -n "${DELEGATION_GATEWAY_RECORD:-}" ]; then
+        echo "$DELEGATION_GATEWAY_RECORD"
+        return
+    fi
+    case "$(dnsman.py provider 2>/dev/null)" in
+        cloudflare) echo cname ;;
+        *) echo a ;;
+    esac
+}
+
+delegated_name() {
+    local domain="${1#\*.}"
+    echo "${domain}.${DELEGATION_ZONE}"
+}
+
+delegation_publish() {
+    local domain="$1" target txt_name
+    target=$(delegated_name "$domain")
+
+    case "$(delegation_gateway_record)" in
+        cname)
+            dnsman.py set_alias --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
+            ;;
+        a)
+            # For providers that refuse a CAA beside a CNAME. Costs the
+            # automatic following of a gateway that moves: the address is
+            # re-resolved once per pass instead.
+            local addrs addr
+            addrs=$(dnsguide.py --resolve "$GATEWAY_DOMAIN" 2>/dev/null)
+            if [ -z "$addrs" ]; then
+                echo "Error: could not resolve $GATEWAY_DOMAIN to any address" >&2
+                return 1
+            fi
+            addr=$(echo "$addrs" | head -1)
+            dnsman.py set_a --domain "$target" --content "$addr" || return 1
+            ;;
+        *)
+            echo "Error: invalid DELEGATION_GATEWAY_RECORD (expected cname or a)" >&2
+            return 1
+            ;;
+    esac
+
+    txt_name="$(txt_record_name "$domain").${DELEGATION_ZONE}"
+    dnsman.py set_txt --domain "$txt_name" --content "$(txt_record_value)" || return 1
+}
+
+# The accounturi CAA goes on the delegated name, beside the address record.
+#
+# Not for a wildcard: RFC 8659 evaluates `*.example.com` at `example.com`, which
+# is the operator's own name and cannot be aliased away. Wildcards keep the
+# operator-managed CAA.
+delegation_publish_caa() {
+    local domain="$1" account_file account_uri
+    if [[ "$domain" == \*.* ]]; then
+        return 2
+    fi
+    account_file=$(get_letsencrypt_account_file) || return 1
+    account_uri=$(jq -j '.uri' "$account_file")
+    dnsman.py set_caa \
+        --domain "$(delegated_name "$domain")" \
+        --caa-tag issue \
+        --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri"
+}
+
 # Challenge delegation: this container holds no token for the served domain's
 # zone, so the operator creates those records. dnsguide.py is what prints and
 # verifies operator-managed records everywhere else in this image, so use it
@@ -127,7 +215,7 @@ delegation_guide() {
         --caa-name "$caa_domain" \
         --caa-tag "$caa_tag" \
         --challenge dns-01 \
-        --challenge-alias "$ACME_CHALLENGE_ALIAS" \
+        --challenge-alias "$DELEGATION_ZONE" \
         --mode "${DNS_SETUP_MODE:-wait}" \
         --include "$include" \
         "$@"
@@ -160,12 +248,21 @@ delegation_verify_caa() {
 set_caa_record() {
     local domain="$1"
 
-    # Delegation is handled separately and is deliberately NOT gated by
-    # SET_CAA: there we cannot write the record, so verifying it is the only
-    # protection left.
-    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
-        delegation_verify_caa "$domain" || exit 1
-        return
+    # Delegation is deliberately NOT gated by SET_CAA: this record is the only
+    # thing stopping anyone else who can satisfy the delegated challenge, so it
+    # is not optional here.
+    if [ -n "${DELEGATION_ZONE:-}" ]; then
+        delegation_publish_caa "$domain"
+        case $? in
+            0) return ;;
+            2) # Wildcard: RFC 8659 evaluates *.example.com at example.com,
+               # which is the operator's own name and cannot be aliased away,
+               # so ask for it instead of publishing it.
+               delegation_verify_caa "$domain" || exit 1
+               return ;;
+            *) echo "Error: could not publish the CAA record for $domain" >&2
+               exit 1 ;;
+        esac
     fi
 
     if [ "$SET_CAA" != "true" ]; then
@@ -203,11 +300,31 @@ set_caa_record() {
 process_domain() {
     local domain="$1" first status
 
-    if [ -n "${ACME_CHALLENGE_ALIAS:-}" ]; then
-        # Delegation: the operator owns these. Verify them before spending an
-        # ACME attempt that would fail on records nobody has created yet. CAA
-        # is checked after the first issuance, once the account URI exists.
-        if ! delegation_guide "$domain" cname,txt,challenge-cname; then
+    if [ -n "${DELEGATION_ZONE:-}" ]; then
+        # Delegation: the operator created three CNAMEs once, before deploying.
+        # Everything they point at is published here. Which of them block
+        # depends on the pass.
+        #
+        # Only the _acme-challenge alias is needed to issue: under dns-01 the CA
+        # reads a TXT record and never connects here, so the gateway CNAME and
+        # the app-address TXT are about serving, not about issuance. Blocking a
+        # renewal on them would turn a routing problem -- fixable at any time --
+        # into an expired certificate, which is not. Renewal wins.
+        #
+        # The first pass still checks all three, because that is setup: the
+        # operator has just been handed a list of records to create and wants to
+        # know whether they got them right.
+        # Publish first: the aliases the operator created point at names that
+        # have to exist before checking them proves anything.
+        if ! delegation_publish "$domain"; then
+            echo "Error: could not publish $domain into $DELEGATION_ZONE" >&2
+            return 1
+        fi
+        local want=challenge-cname
+        if [ "$FIRST_PASS" = "true" ]; then
+            want=delegated
+        fi
+        if ! delegation_guide "$domain" "$want"; then
             echo "Error: required DNS records for $domain are not in place" >&2
             return 1
         fi
@@ -278,6 +395,11 @@ collect_evidence() {
     evidence_finalize
 }
 
+# True until the first pass finishes. The first pass is setup and checks more
+# than issuance strictly needs; later passes check only what would stop a
+# renewal.
+FIRST_PASS=true
+
 # Set when certificates have been renewed but not yet applied to haproxy.
 # Survives across passes, so a failed apply is retried on the next one.
 APPLY_PENDING=false
@@ -319,6 +441,7 @@ run_pass() {
             echo "[$(date)] Certificate apply incomplete; retrying on the next pass" >&2
         fi
     fi
+    FIRST_PASS=false
     [ "$failed" -eq 0 ]
 }
 

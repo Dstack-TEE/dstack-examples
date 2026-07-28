@@ -402,6 +402,31 @@ def build_records(args: argparse.Namespace) -> List[Record]:
                 note="tells the gateway which instance to route this hostname to",
             )
         )
+    if "delegated" in include and args.challenge_alias:
+        # Full delegation: every name this deployment needs is aliased into a
+        # zone the container can write, so the operator creates these three once
+        # and never touches DNS again -- not when the app id changes, not when
+        # the ACME account changes, not when the gateway moves.
+        #
+        # Each is exact: the target holds only what we put there, so there is no
+        # address to fall back to and a wrong target must be reported as wrong
+        # rather than as "does not resolve".
+        base = args.domain[2:] if args.domain.startswith("*.") else args.domain
+        alias = args.challenge_alias
+        for name, note in (
+            (args.domain, "routes traffic for this hostname into the delegated zone"),
+            (args.txt_name, "lets the container publish the gateway routing target"),
+            (f"_acme-challenge.{base}", "delegates the ACME challenge"),
+        ):
+            records.append(
+                Record(
+                    type="CNAME",
+                    name=name,
+                    value=f"{name}.{alias}" if name != args.domain else f"{base}.{alias}",
+                    note=note,
+                    exact=True,
+                )
+            )
     if "challenge-cname" in include and args.challenge_alias:
         # Challenge delegation: the CA follows this CNAME when it looks for
         # _acme-challenge, so the TXT can live in a zone whose token we hold and
@@ -434,10 +459,10 @@ def build_records(args: argparse.Namespace) -> List[Record]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--domain", required=True)
-    parser.add_argument("--alias-target", required=True, help="gateway domain")
-    parser.add_argument("--txt-name", required=True)
-    parser.add_argument("--txt-value", required=True)
+    parser.add_argument("--domain", default="")
+    parser.add_argument("--alias-target", default="", help="gateway domain")
+    parser.add_argument("--txt-name", default="")
+    parser.add_argument("--txt-value", default="")
     parser.add_argument("--caa-name", default="")
     parser.add_argument("--caa-tag", default="issue", choices=["issue", "issuewild"])
     parser.add_argument("--caa-value", default="")
@@ -445,7 +470,7 @@ def main() -> int:
     parser.add_argument("--challenge", default="tls-alpn-01")
     parser.add_argument(
         "--challenge-alias",
-        default=os.environ.get("ACME_CHALLENGE_ALIAS", ""),
+        default=os.environ.get("DELEGATION_ZONE", ""),
         help="delegation zone for the _acme-challenge CNAME (dns-01 delegation)",
     )
     parser.add_argument(
@@ -471,14 +496,35 @@ def main() -> int:
         default=os.environ.get("DOH_RESOLVERS", os.environ.get("DOH_RESOLVER", DEFAULT_DOH)),
         help="comma-separated DoH endpoints",
     )
+    parser.add_argument(
+        "--resolve",
+        default="",
+        help="print the A records for a name and exit (used to publish the "
+             "gateway address into a delegated zone)",
+    )
     parser.add_argument("--json", action="store_true", help="also emit the records as JSON")
     parser.add_argument(
         "--include",
         default="cname,txt,caa",
         help="comma-separated subset of records to handle "
-             "(cname,txt,caa,challenge-cname)",
+             "(cname,txt,caa,challenge-cname,delegated)",
     )
     args = parser.parse_args()
+
+    if not args.resolve:
+        missing = [n for n, v in (("--domain", args.domain),
+                                  ("--alias-target", args.alias_target),
+                                  ("--txt-name", args.txt_name),
+                                  ("--txt-value", args.txt_value)) if not v]
+        if missing:
+            parser.error(f"{', '.join(missing)} required unless --resolve is given")
+
+    if args.resolve:
+        # Address lookup for callers that need to publish an A record rather
+        # than a CNAME. Same resolvers, same union semantics as everything else.
+        for addr in query_union(args.resolve, RR_A, args.resolver):
+            print(addr)
+        return 0
 
     if not args.caa_name:
         args.caa_name = args.domain.lstrip("*.")

@@ -191,8 +191,9 @@ environment:
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
-| `ACME_CHALLENGE_ALIAS` | | Delegate the ACME DNS-01 challenge to this zone (see below) so the DNS token needs no access to the served domain's own zone |
-| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `30` | Wait after writing the delegated challenge TXT before validation (only with `ACME_CHALLENGE_ALIAS`). Keep well under ~250s — certbot is killed after a 300s per-run timeout |
+| `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below). `ACME_CHALLENGE_ALIAS` is the original name and still works |
+| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. Keep well under ~250s — certbot is killed after a 300s per-run timeout |
+| `DELEGATION_GATEWAY_RECORD` | per provider | How the delegated name points at the gateway: `cname` (Cloudflare default; follows a gateway that moves) or `a` (default elsewhere, for providers that refuse a CAA beside a CNAME) |
 | `ALLOW_MISSING_CAA` | `false` | In delegation mode, treat an unconfirmed `accounturi` CAA as a warning instead of a blocker. Default fails closed (see below) |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
@@ -205,18 +206,54 @@ served name lives under a shared production zone (e.g. `svc.example.com` under
 `example.com`), that token can edit every record in the zone, which may be more
 privilege than you want.
 
-Set `ACME_CHALLENGE_ALIAS=<delegation-zone>` to answer the DNS-01 challenge in a
-separate zone that your token controls, so the token never touches the served
-domain's zone. In this mode dstack-ingress **only** manages the challenge TXT in
-the delegation zone; you set the following records **once, statically**, in the
-served domain's production zone (the container prints the exact values on start):
+Set `DELEGATION_ZONE=<delegation-zone>` to move every name this deployment
+needs into a zone your token controls. You create three CNAMEs in the served
+domain's zone **once, before deploying**, and then never touch DNS again — not
+when the app id changes with the compose, not when the ACME account is
+recreated, not when the gateway moves:
 
 ```
-svc.example.com                       CNAME  <GATEWAY_DOMAIN>
-_dstack-app-address.svc.example.com   TXT    "<app-id>:<port>"
-_acme-challenge.svc.example.com       CNAME  _acme-challenge.svc.example.com.<delegation-zone>
-svc.example.com                       CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=<account-uri>"
+svc.example.com                      CNAME  svc.example.com.deleg.example.net
+_dstack-app-address.svc.example.com  CNAME  _dstack-app-address.svc.example.com.deleg.example.net
+_acme-challenge.svc.example.com      CNAME  _acme-challenge.svc.example.com.deleg.example.net
 ```
+
+dstack-ingress publishes what they point at, in the delegation zone:
+
+```
+svc.example.com.deleg.example.net                      CNAME  <GATEWAY_DOMAIN>
+svc.example.com.deleg.example.net                      CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=…"
+_dstack-app-address.svc.example.com.deleg.example.net  TXT    "<app-id>:<port>"
+_acme-challenge.svc.example.com.deleg.example.net      TXT    <challenge>   (transient)
+```
+
+The gateway pointer and the CAA share a name, which RFC 1034 does not allow —
+a CNAME excludes every other type at its name. **Cloudflare allows the pair
+anyway**, and Let's Encrypt honours the CAA it finds there: with a CAA that
+forbids it, the staging CA refuses with `While processing CAA for
+svc.example.com: CAA record for svc.example.com prevents issuance`.
+
+Providers that enforce the standard will reject the CAA beside the CNAME, so
+they get an address record instead — `A` and `CAA` coexist legally. The default
+follows the provider:
+
+| Provider | Gateway pointer | Gateway that moves |
+|---|---|---|
+| `cloudflare` | `CNAME` to `GATEWAY_DOMAIN` | followed by DNS, immediately |
+| everything else | `A`, re-resolved each pass | picked up within `RENEW_INTERVAL` |
+
+`DELEGATION_GATEWAY_RECORD=cname\|a` overrides it. Only Cloudflare has been
+tested; if another provider accepts a CAA beside a CNAME, setting `cname` there
+gets the better behaviour.
+
+A wildcard and its base name share a delegated target: both `*.example.com` and
+`example.com` map to `example.com.<delegation-zone>`. One deployment serving both
+is fine, since it publishes the same values twice. Two deployments pointing at
+different gateways are not — give them separate delegation zones.
+
+**Wildcards keep an operator-managed CAA.** RFC 8659 evaluates `*.example.com`
+at `example.com`, which is your own name and cannot be aliased away, so for a
+wildcard the container prints the CAA and verifies it rather than publishing it.
 
 > **Security note.** The `accounturi` CAA restricts issuance to this enclave's
 > ACME account and is the control that prevents forged certificates. In
@@ -236,7 +273,14 @@ svc.example.com                       CAA    0 issue "letsencrypt.org;validation
 
 The records above are checked the same way tls-alpn-01 checks its own: two DoH
 resolvers, both CAA wire formats, and `DNS_SETUP_MODE` deciding what happens
-while they are missing. `wait` (the default) blocks until they appear, so you can
+while they are missing.
+
+Only the `_acme-challenge` CNAME is checked on later passes. Under dns-01 the CA
+reads a TXT record and never connects here, so the other two records are about
+serving rather than issuance, and a renewal is not blocked on them — a routing
+problem can be fixed at any time, an expired certificate cannot. They are still
+checked on the first pass, where the point is to tell you whether you created
+them correctly. `wait` (the default) blocks until they appear, so you can
 start the container and create the records afterwards; `print` lists them and
 continues without checking; `webhook` POSTs them to `DNS_WEBHOOK_URL` for an
 operator service to create automatically.

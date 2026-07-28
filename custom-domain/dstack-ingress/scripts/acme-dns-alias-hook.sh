@@ -3,10 +3,10 @@
 #
 # Instead of writing the `_acme-challenge` TXT into the served domain's own
 # zone (which requires a DNS token for that zone), this writes it into a
-# delegated zone that our token controls (ACME_CHALLENGE_ALIAS). The served
+# delegated zone that our token controls (DELEGATION_ZONE). The served
 # domain's zone only needs one static, operator-managed CNAME:
 #
-#   _acme-challenge.<domain>  CNAME  _acme-challenge.<domain>.<ACME_CHALLENGE_ALIAS>
+#   _acme-challenge.<domain>  CNAME  _acme-challenge.<domain>.<DELEGATION_ZONE>
 #
 # Let's Encrypt follows that CNAME during validation and reads the TXT from the
 # delegated zone, so the enclave's token never needs access to the served
@@ -18,8 +18,9 @@ set -euo pipefail
 
 action="${1:-}"
 
-if [ -z "${ACME_CHALLENGE_ALIAS:-}" ]; then
-    echo "acme-dns-alias-hook: ACME_CHALLENGE_ALIAS is not set" >&2
+zone="${DELEGATION_ZONE:-}"
+if [ -z "$zone" ]; then
+    echo "acme-dns-alias-hook: DELEGATION_ZONE is not set" >&2
     exit 1
 fi
 if [ -z "${CERTBOT_DOMAIN:-}" ]; then
@@ -28,7 +29,7 @@ if [ -z "${CERTBOT_DOMAIN:-}" ]; then
 fi
 
 # certbot always passes the base domain (no leading "*.") in CERTBOT_DOMAIN.
-record="_acme-challenge.${CERTBOT_DOMAIN}.${ACME_CHALLENGE_ALIAS}"
+record="_acme-challenge.${CERTBOT_DOMAIN}.${zone}"
 
 case "$action" in
     auth)
@@ -36,9 +37,16 @@ case "$action" in
         echo "acme-dns-alias-hook: writing challenge TXT to delegated record $record"
         dnsman.py set_txt --domain "$record" --content "$CERTBOT_VALIDATION"
         # certbot asks Let's Encrypt to validate immediately after this hook
-        # returns, so wait for the record to propagate on the delegated zone's
-        # authoritative servers before returning.
-        sleep "${ACME_CHALLENGE_PROPAGATION_SECONDS:-30}"
+        # returns, so wait for the record to propagate before returning.
+        #
+        # This has to outlast the record's own TTL, not just the time the write
+        # takes. dnsman.py publishes TXT with a 60s TTL, so a resolver that saw
+        # the *previous* challenge value keeps serving it for up to that long --
+        # which is exactly the situation on the second of the two issuance
+        # attempts. At 30s Let's Encrypt's multi-perspective check fails with
+        # "During secondary validation: Incorrect TXT record found". The dns-01
+        # plugin path waits 120s for the same reason.
+        sleep "${ACME_CHALLENGE_PROPAGATION_SECONDS:-120}"
         ;;
     cleanup)
         echo "acme-dns-alias-hook: removing challenge TXT $record"
