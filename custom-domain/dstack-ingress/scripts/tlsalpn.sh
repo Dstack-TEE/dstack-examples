@@ -262,6 +262,10 @@ process_domain() {
     legoman.py auto --domain "$domain" ${ACME_EMAIL:+--email "$ACME_EMAIL"}
 }
 
+# Set when certificates have been renewed but not yet applied to haproxy.
+# Survives across passes, so a failed apply is retried on the next one.
+APPLY_PENDING=false
+
 # One pass over every domain: make sure the records exist, then issue or renew.
 # Idempotent, so the first pass and every later one are the same code. There is
 # deliberately only one of these -- an earlier split between a one-shot
@@ -285,9 +289,24 @@ run_pass() {
     done <<<"$(get-all-domains.sh)"
 
     if [ "$changed" -eq 1 ]; then
-        collect_evidence || echo "Evidence generation failed" >&2
-        build_combined_pems || echo "Combined PEM build failed" >&2
-        haproxy_reload || true
+        APPLY_PENDING=true
+    fi
+
+    # Applying is separate from renewing, and retried until it sticks. A
+    # renewal that reaches disk but not haproxy is invisible: the next pass
+    # sees a fresh certificate, reports "nothing to renew", and never reloads
+    # again -- so haproxy would serve the pre-renewal certificate until it
+    # expires, which is soon, because being near expiry is why it renewed.
+    if [ "$APPLY_PENDING" = true ]; then
+        local applied=true
+        collect_evidence || { echo "Evidence generation failed" >&2; applied=false; }
+        build_combined_pems || { echo "Combined PEM build failed" >&2; applied=false; }
+        haproxy_reload || applied=false
+        if [ "$applied" = true ]; then
+            APPLY_PENDING=false
+        else
+            echo "[$(date)] Certificate apply incomplete; retrying on the next pass" >&2
+        fi
     fi
     FIRST_PASS=false
     [ "$failed" -eq 0 ]
