@@ -1,6 +1,18 @@
 #!/bin/bash
 
 while true; do
+    # Never run concurrently with the initial bootstrap. Under tls-alpn-01 the
+    # proxy has to be listening before the first certificate can be issued, so
+    # bootstrap runs in the background while this daemon is already up. Two
+    # ACME clients at once fight over the challenge port ("bind: Address
+    # already in use") and, worse, the loser still spends one of Let's
+    # Encrypt's five failed validations per hostname per hour.
+    if [ ! -f /.bootstrapped ]; then
+        echo "[$(date)] Waiting for bootstrap to finish before checking renewals"
+        sleep 30
+        continue
+    fi
+
     echo "[$(date)] Checking for certificate renewal"
 
     all_domains=$(get-all-domains.sh)

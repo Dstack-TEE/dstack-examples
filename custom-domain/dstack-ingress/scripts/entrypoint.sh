@@ -613,6 +613,18 @@ process_domain_tlsalpn() {
         exit 1
     fi
 
+    # Public DNS being correct is not the same as the gateway acting on it. The
+    # gateway resolves the app-address TXT itself and caches the answer for the
+    # record's TTL, so right after the value changes -- which is every time the
+    # CVM instance is replaced, since the record names the instance -- it can
+    # still route the challenge to the previous target. Observed exactly that:
+    # dnsguide passed, then the CA got "Error getting validation data" because
+    # the gateway was still sending it to the old instance.
+    if [ "${DNS_SETTLE_SECONDS:-30}" -gt 0 ]; then
+        echo "Waiting ${DNS_SETTLE_SECONDS:-30}s for the gateway's DNS cache to expire"
+        sleep "${DNS_SETTLE_SECONDS:-30}"
+    fi
+
     renew-certificate.sh "$domain"
 }
 
@@ -676,18 +688,30 @@ ensure_placeholder_certs() {
 
 # Obtain certificates once the proxy is already serving, then swap them in.
 bootstrap_and_reload() {
-    # Nested subshell so an `exit 1` from a process_domain helper is reported as
-    # a failed condition here rather than silently killing this background job.
-    if ( bootstrap ); then
-        build-combined-pems.sh || echo "Combined PEM build failed" >&2
-        if [ -f /var/run/haproxy/haproxy.pid ]; then
-            kill -USR2 "$(cat /var/run/haproxy/haproxy.pid)" &&
-                echo "Certificates installed and HAProxy reloaded"
+    local attempt=0 delay
+    while true; do
+        attempt=$((attempt + 1))
+        # Nested subshell so an `exit 1` from a process_domain helper is
+        # reported as a failed condition here rather than silently killing
+        # this background job.
+        if ( bootstrap ); then
+            build-combined-pems.sh || echo "Combined PEM build failed" >&2
+            if [ -f /var/run/haproxy/haproxy.pid ]; then
+                kill -USR2 "$(cat /var/run/haproxy/haproxy.pid)" &&
+                    echo "Certificates installed and HAProxy reloaded"
+            fi
+            return 0
         fi
-    else
-        echo "Bootstrap failed; the proxy keeps serving the placeholder certificate." >&2
-        echo "Fix the DNS records above; the renewal daemon retries every 12 hours." >&2
-    fi
+
+        # Falling through to the 12-hour renewal daemon would be a terrible
+        # retry interval for a flow whose normal state is "waiting for the
+        # operator to create a DNS record". Back off, but keep trying.
+        delay=$((60 * attempt))
+        [ "$delay" -gt 1800 ] && delay=1800
+        echo "Bootstrap attempt ${attempt} failed; the proxy keeps serving the" >&2
+        echo "placeholder certificate. Retrying in ${delay}s." >&2
+        sleep "$delay"
+    done
 }
 
 # Credentials are now handled by certman.py setup
