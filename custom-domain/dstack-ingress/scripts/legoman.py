@@ -90,6 +90,10 @@ def certificate_exists(domain: str) -> bool:
     return os.path.isfile(crt) and os.path.isfile(key)
 
 
+def _renewed_marker(domain: str) -> str:
+    return os.path.join(LEGO_PATH, f".renewed-{domain}")
+
+
 def _common_flags(email: str) -> List[str]:
     return [
         "--path",
@@ -153,19 +157,33 @@ def run_cert(domain: str, email: str) -> int:
         )
         return EXIT_ERROR
 
-    existed = certificate_exists(domain)
+    # Let lego decide whether a renewal is due: it consults the CA's ARI
+    # endpoint (RFC 9773) as well as the local window, and the CA can ask for
+    # early renewal during an incident. Deciding here from notAfter would
+    # override that.
+    #
+    # We only need to know whether it acted, and lego says so itself:
+    # --deploy-hook runs "in cases where a certificate is successfully
+    # created/renewed" and stays silent otherwise. That beats inferring it --
+    # matching log text is not stable (4.x wrote "no renewal", 5.x writes
+    # "Skip renewal"), and the exit code is 0 either way.
+    marker = _renewed_marker(domain)
+    if os.path.exists(marker):
+        os.remove(marker)
+
     cmd = (
         [LEGO_BIN, "run"]
         + _common_flags(email)
         + ["--domains", domain]
         + _challenge_flags()
+        + ["--deploy-hook", f"touch {marker}"]
     )
     renew_days = os.environ.get("RENEW_DAYS_BEFORE", "")
     if renew_days:
         cmd += ["--renew-days", renew_days]
 
-    print(f"{'Renewing' if existed else 'Obtaining'} certificate for {domain} via tls-alpn-01")
-    code, output = _run(cmd)
+    print(f"{'Renewing' if certificate_exists(domain) else 'Obtaining'} certificate for {domain} via tls-alpn-01")
+    code, _ = _run(cmd)
     if code != 0:
         print(f"✗ lego failed for {domain} (exit code {code})", file=sys.stderr)
         return EXIT_ERROR
@@ -173,12 +191,10 @@ def run_cert(domain: str, email: str) -> int:
         print(f"✗ lego reported success but no certificate for {domain}", file=sys.stderr)
         return EXIT_ERROR
 
-    # lego exits 0 whether or not it actually replaced anything, so the log line
-    # is the only signal that a renewal was skipped.
-    lowered = output.lower()
-    if existed and ("no renewal" in lowered or "not yet due for renewal" in lowered):
-        print("No certificates need renewal")
+    if not os.path.exists(marker):
+        print(f"Certificate for {domain} is still current; nothing to do")
         return EXIT_UNCHANGED
+    os.remove(marker)
 
     print(f"✓ Certificate ready for {domain}")
     return EXIT_CHANGED
