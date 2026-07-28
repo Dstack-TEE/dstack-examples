@@ -491,12 +491,6 @@ def main() -> int:
         default=os.environ.get("DOH_RESOLVERS", os.environ.get("DOH_RESOLVER", DEFAULT_DOH)),
         help="comma-separated DoH endpoints",
     )
-    parser.add_argument(
-        "--resolve",
-        default="",
-        help="print the A records for a name and exit (used to publish the "
-             "gateway address into a delegated zone)",
-    )
     parser.add_argument("--json", action="store_true", help="also emit the records as JSON")
     parser.add_argument(
         "--include",
@@ -506,20 +500,12 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not args.resolve:
-        missing = [n for n, v in (("--domain", args.domain),
-                                  ("--alias-target", args.alias_target),
-                                  ("--txt-name", args.txt_name),
-                                  ("--txt-value", args.txt_value)) if not v]
-        if missing:
-            parser.error(f"{', '.join(missing)} required unless --resolve is given")
-
-    if args.resolve:
-        # Address lookup for callers that need to publish an A record rather
-        # than a CNAME. Same resolvers, same union semantics as everything else.
-        for addr in query_union(args.resolve, RR_A, args.resolver):
-            print(addr)
-        return 0
+    missing = [n for n, v in (("--domain", args.domain),
+                              ("--alias-target", args.alias_target),
+                              ("--txt-name", args.txt_name),
+                              ("--txt-value", args.txt_value)) if not v]
+    if missing:
+        parser.error(f"{', '.join(missing)} are required")
 
     if not args.caa_name:
         args.caa_name = args.domain.lstrip("*.")

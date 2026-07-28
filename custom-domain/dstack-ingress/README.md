@@ -193,7 +193,6 @@ environment:
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
 | `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below) |
 | `DELEGATION_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. Keep well under ~250s — certbot is killed after a 300s per-run timeout |
-| `DELEGATION_GATEWAY_RECORD` | per provider | How the delegated name points at the gateway: `cname` (Cloudflare default; follows a gateway that moves) or `a` (default elsewhere, for providers that refuse a CAA beside a CNAME) |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
@@ -232,29 +231,12 @@ _dstack-app-address.svc.example.com.deleg.example.net  TXT    "<app-id>:<port>"
 _acme-challenge.svc.example.com.deleg.example.net      TXT    <challenge>   (transient)
 ```
 
-The gateway pointer and the CAA share a name, which RFC 1034 does not allow —
-a CNAME excludes every other type at its name. **Cloudflare allows the pair
-anyway**, and Let's Encrypt honours the CAA it finds there: with a CAA that
-forbids it, the staging CA refuses with `While processing CAA for
-svc.example.com: CAA record for svc.example.com prevents issuance`.
-
-Providers that enforce the standard will reject the CAA beside the CNAME, so
-they get an address record instead — `A` and `CAA` coexist legally. The default
-follows the provider:
-
-| Provider | Gateway pointer | Gateway that moves |
-|---|---|---|
-| `cloudflare` | `CNAME` to `GATEWAY_DOMAIN` | followed by DNS, immediately |
-| everything else | `A`, re-resolved each pass | picked up within `RENEW_INTERVAL` |
-
-`DELEGATION_GATEWAY_RECORD=cname\|a` overrides it. Only Cloudflare has been
-tested; if another provider accepts a CAA beside a CNAME, setting `cname` there
-gets the better behaviour.
-
-A wildcard and its base name share a delegated target: both `*.example.com` and
-`example.com` map to `example.com.<delegation-zone>`. One deployment serving both
-is fine, since it publishes the same values twice. Two deployments pointing at
-different gateways are not — give them separate delegation zones.
+The gateway pointer and the CAA share a name, which DNS does not allow for a
+CNAME. Which form works is a property of the provider — Cloudflare tolerates the
+pair, Linode publishes an address record instead — and `set_alias_record` in the
+provider layer is where that choice is made. Delegation asks for an alias and
+takes what it gets. A provider that needs a form other than CNAME overrides that
+method, as Linode does.
 
 **A wildcard needs a fourth CNAME.** RFC 8659 evaluates `*.app.example.com` at
 `app.example.com`, so the base gets its own alias and the container publishes an

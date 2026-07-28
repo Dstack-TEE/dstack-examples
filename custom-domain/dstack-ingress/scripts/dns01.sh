@@ -116,29 +116,10 @@ set_txt_record() {
 # never needs touching again -- not when the app id changes with the compose,
 # not when the ACME account is recreated, not when the gateway moves.
 #
-# How the delegated name points at the gateway.
-#
-# A CNAME is better -- a gateway that moves is followed automatically -- but the
-# same name also has to carry the CAA, and RFC 1034 says a CNAME excludes every
-# other type at its name. Cloudflare allows the pair anyway, and Let's Encrypt
-# honours the CAA it finds there (verified against the staging CA). Providers
-# that enforce the standard reject it, so they get an address record instead:
-# A and CAA coexist legally, at the cost of re-resolving GATEWAY_DOMAIN once a
-# pass rather than letting DNS follow it.
-#
-# Default per provider, since only Cloudflare is known to allow the pair.
-# DELEGATION_GATEWAY_RECORD overrides it either way.
-delegation_gateway_record() {
-    if [ -n "${DELEGATION_GATEWAY_RECORD:-}" ]; then
-        echo "$DELEGATION_GATEWAY_RECORD"
-        return
-    fi
-    case "$(dnsman.py provider 2>/dev/null)" in
-        cloudflare) echo cname ;;
-        *) echo a ;;
-    esac
-}
-
+# The gateway pointer and the CAA end up on one name, which DNS does not allow
+# for a CNAME. Which form works is a provider property -- Cloudflare tolerates
+# the pair, Linode publishes an address record instead -- and set_alias_record
+# is where that knowledge lives, so ask for an alias and let the provider pick.
 delegated_name() {
     local domain="${1#\*.}"
     echo "${domain}.${DELEGATION_ZONE}"
@@ -148,37 +129,7 @@ delegation_publish() {
     local domain="$1" target txt_name
     target=$(delegated_name "$domain")
 
-    # The set_* helpers only look at the type they are about to write, so a
-    # leftover record of the other type stays and blocks the new one -- DNS
-    # forbids a CNAME beside anything else. Clear it first, so switching
-    # DELEGATION_GATEWAY_RECORD either way actually takes effect.
-    case "$(delegation_gateway_record)" in
-        cname)
-            dnsman.py unset --domain "$target" --type A >/dev/null 2>&1 || true
-            # set_cname, not set_alias: some providers redefine "alias" to mean
-            # an address record (Linode does, precisely to dodge the CAA/CNAME
-            # conflict), and this branch has to mean what it says.
-            dnsman.py set_cname --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
-            ;;
-        a)
-            # For providers that refuse a CAA beside a CNAME. Costs the
-            # automatic following of a gateway that moves: the address is
-            # re-resolved once per pass instead.
-            local addrs addr
-            addrs=$(dnsguide.py --resolve "$GATEWAY_DOMAIN" 2>/dev/null)
-            if [ -z "$addrs" ]; then
-                echo "Error: could not resolve $GATEWAY_DOMAIN to any address" >&2
-                return 1
-            fi
-            addr=$(echo "$addrs" | head -1)
-            dnsman.py unset --domain "$target" --type CNAME >/dev/null 2>&1 || true
-            dnsman.py set_a --domain "$target" --content "$addr" || return 1
-            ;;
-        *)
-            echo "Error: invalid DELEGATION_GATEWAY_RECORD (expected cname or a)" >&2
-            return 1
-            ;;
-    esac
+    dnsman.py set_alias --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
 
     txt_name="$(txt_record_name "$domain").${DELEGATION_ZONE}"
     dnsman.py set_txt --domain "$txt_name" --content "$(txt_record_value)" || return 1

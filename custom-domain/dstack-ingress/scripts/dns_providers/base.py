@@ -160,6 +160,23 @@ class DNSProvider(ABC):
         )
         return self.create_dns_record(new_record)
 
+    def clear_conflicting_alias(self, name: str, keep: "RecordType") -> None:
+        """Remove address/alias records at `name` other than `keep`.
+
+        DNS forbids a CNAME beside anything else, and the set_* helpers only
+        look at the type they are about to write, so a name that already holds
+        the other form blocks the write. That happens whenever the form changes
+        -- a provider gaining an override, or a deployment moving between
+        providers -- and the failure looks like a permissions problem rather
+        than a leftover record.
+        """
+        for record_type in (RecordType.CNAME, RecordType.A, RecordType.AAAA):
+            if record_type == keep:
+                continue
+            for record in self.get_dns_records(name, record_type):
+                if record.id:
+                    self.delete_dns_record(record.id, name)
+
     def set_alias_record(
         self,
         name: str,
@@ -167,20 +184,16 @@ class DNSProvider(ABC):
         ttl: int = 60,
         proxied: bool = False,
     ) -> bool:
-        """Set an alias record (delete existing and create new).
+        """Point `name` at `content`, in whatever form this provider allows.
 
-        Creates a CNAME record by default. Some providers may override this
-        to use A records instead (e.g., Linode to avoid CAA conflicts).
+        A CNAME by default. Providers override this where a CNAME will not do
+        -- Linode publishes an address record instead, because it refuses a CAA
+        beside a CNAME, and delegation needs both on one name.
 
-        Args:
-            name: The record name
-            content: The alias target (domain name)
-            ttl: Time to live
-            proxied: Whether to proxy through provider (if supported)
-
-        Returns:
-            True if successful, False otherwise
+        Callers should not second-guess the form: which one works is a property
+        of the provider, and this is where that knowledge lives.
         """
+        self.clear_conflicting_alias(name, RecordType.CNAME)
         return self.set_cname_record(name, content, ttl, proxied)
 
     def set_cname_record(
