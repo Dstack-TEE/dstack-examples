@@ -161,8 +161,13 @@ build_combined_pems() {
             cat "$fullchain" "$privkey" > "$combined"
             chmod 600 "$combined"
             echo "Combined PEM created: ${combined}"
+        elif [ -f "$combined" ]; then
+            # Expected on a first run: ensure_placeholder_certs has already put a
+            # self-signed certificate here so haproxy can bind and forward
+            # acme-tls/1, and the real one does not exist yet. Leave it alone.
+            echo "No certificate for ${domain} yet; serving the placeholder"
         else
-            echo "Warning: Cert files missing for ${domain}, skipping"
+            echo "Warning: no certificate or placeholder for ${domain}, skipping"
         fi
     done <<<"$(get-all-domains.sh)"
 }
