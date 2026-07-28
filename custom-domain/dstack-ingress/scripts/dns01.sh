@@ -234,9 +234,17 @@ run_pass() {
     [ "$failed" -eq 0 ]
 }
 
+# $1: seconds to wait before the first pass. dns-01 issues before it serves, so
+# the caller has already run a pass by the time we get here; without this the
+# loop would immediately repeat it -- two full passes, and for a single domain
+# four certbot invocations plus a duplicate round of DNS writes, on every start.
 cert_loop() {
-    local attempt=0 delay
+    local attempt=0 delay="${1:-0}"
     while true; do
+        if [ "$delay" -gt 0 ]; then
+            echo "[$(date)] Next certificate check in ${delay}s"
+            sleep "$delay"
+        fi
         if run_pass; then
             attempt=0
             delay=${RENEW_INTERVAL:-43200}
@@ -244,10 +252,8 @@ cert_loop() {
             attempt=$((attempt + 1))
             delay=$((60 * attempt))
             [ "$delay" -gt 1800 ] && delay=1800
-            echo "[$(date)] Pass failed (attempt ${attempt}); retrying in ${delay}s"
+            echo "[$(date)] Pass failed (attempt ${attempt}); retrying" >&2
         fi
-        echo "[$(date)] Next certificate check in ${delay}s"
-        sleep "$delay"
     done
 }
 
@@ -265,6 +271,6 @@ haproxy_emit_tls_frontend ":${PORT}"
 haproxy_emit_backends
 
 evidence_start_server
-cert_loop &
+cert_loop "${RENEW_INTERVAL:-43200}" &
 
 exec "$@"

@@ -84,6 +84,41 @@ class TestCaaPermits(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestCaaCheckDeduplication(unittest.TestCase):
+    """One record seen twice, in two wire formats, must be reported once.
+
+    Resolvers disagree on CAA presentation: Cloudflare hands back RFC 3597
+    generic hex, Google the human-readable form. The union is taken over raw
+    rdata, so the same record arrives as two different strings.
+    """
+
+    PRESENTATION = '0 issue "letsencrypt.org;validationmethods=dns-01"'
+    # The same record, generic-encoded: flags=0, tag len 5, "issue", value.
+    GENERIC = (
+        r"\# 44 00 05 69 73 73 75 65 6c 65 74 73 65 6e 63 72 79 70 74 2e 6f 72 67 "
+        r"3b 76 61 6c 69 64 61 74 69 6f 6e 6d 65 74 68 6f 64 73 3d 64 6e 73 2d 30 31"
+    )
+
+    def setUp(self):
+        self._saved = dnsguide.query_union
+        dnsguide.query_union = lambda name, rr, resolvers: (
+            [self.GENERIC, self.PRESENTATION] if name == "app.example.com" else []
+        )
+        self.addCleanup(lambda: setattr(dnsguide, "query_union", self._saved))
+
+    def test_both_encodings_parse_to_the_same_record(self):
+        self.assertEqual(
+            dnsguide._parse_caa(self.GENERIC), dnsguide._parse_caa(self.PRESENTATION)
+        )
+
+    def test_reason_is_not_repeated(self):
+        ok, reason = dnsguide.check_caa(
+            "app.example.com", "issue", "tls-alpn-01", "", "r1,r2"
+        )
+        self.assertFalse(ok)
+        self.assertEqual(reason.count("excludes tls-alpn-01"), 1, reason)
+
+
 class TestTxtNormalisation(unittest.TestCase):
     def test_strips_quotes(self):
         self.assertEqual(dnsguide._unquote_txt('"abc:443"'), "abc:443")

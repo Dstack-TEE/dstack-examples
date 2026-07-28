@@ -265,7 +265,15 @@ def check_caa(
         candidate = ".".join(labels[i:])
         # Union: one resolver seeing a restriction is enough to honour it.
         rdatas = query_union(candidate, RR_CAA, resolvers)
-        parsed = [p for p in (_parse_caa(r) for r in rdatas) if p is not None]
+        # Deduplicate after parsing, not before: resolvers disagree on the wire
+        # format (one returns presentation form, another RFC 3597 generic hex),
+        # so the same record arrives as two distinct strings and would otherwise
+        # be reported, and counted, twice.
+        parsed = []
+        for rdata in rdatas:
+            record = _parse_caa(rdata)
+            if record is not None and record not in parsed:
+                parsed.append(record)
         relevant = [p for p in parsed if p[1] == want_tag]
         if not parsed:
             continue  # keep climbing; this level has no CAA record set
