@@ -166,7 +166,8 @@ get_letsencrypt_account_path() {
     local base_path="/etc/letsencrypt/accounts"
     local api_endpoint="acme-v02.api.letsencrypt.org"
 
-    if [[ "$CERTBOT_STAGING" == "true" ]]; then
+    # entrypoint.sh normalises CERTBOT_STAGING into ACME_STAGING.
+    if [[ "$ACME_STAGING" == "true" ]]; then
         api_endpoint="acme-staging-v02.api.letsencrypt.org"
     fi
 

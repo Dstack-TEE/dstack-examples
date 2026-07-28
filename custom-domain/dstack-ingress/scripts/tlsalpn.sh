@@ -12,17 +12,13 @@ source /scripts/functions.sh
 source /scripts/haproxy-lib.sh
 source /scripts/evidence-lib.sh
 
-# ACME account settings. CERTBOT_EMAIL / CERTBOT_STAGING are the historical
-# names, kept working for anyone migrating a compose file from dns-01, but there
-# is no certbot on this path -- the ACME client here is lego.
+# ACME_EMAIL / ACME_STAGING are normalised by entrypoint.sh and exported, so
+# they are already correct here whichever name the operator used.
 #
 # The contact address is optional. RFC 8555 makes it optional, Let's Encrypt
 # stopped sending expiry notifications in 2025, and it does not stay private:
 # the account document is published at /evidences/acme-account.json, so an
 # address set here is readable by anyone who fetches the evidence.
-ACME_EMAIL=${ACME_EMAIL:-${CERTBOT_EMAIL:-}}
-ACME_STAGING=${ACME_STAGING:-${CERTBOT_STAGING:-false}}
-export ACME_EMAIL ACME_STAGING
 
 LEGO_BIN=${LEGO_BIN:-/usr/local/bin/lego}
 LEGO_PATH=${LEGO_PATH:-/etc/letsencrypt/lego}
@@ -148,10 +144,6 @@ EOF
 # haproxy refuses to start when the crt directory has no PEM in it, and here it
 # has to be listening before the first certificate can exist -- it is what
 # forwards the challenge to lego. Seed a placeholder the real cert overwrites.
-# haproxy refuses to start when the crt directory has no PEM in it. In
-# tls-alpn-01 mode the proxy has to be listening *before* the first certificate
-# exists, because it is what forwards the ACME challenge to certbot, so seed a
-# self-signed placeholder that the real certificate overwrites later.
 ensure_placeholder_certs() {
     local all_domains domain pem
     all_domains=$(get-all-domains.sh)

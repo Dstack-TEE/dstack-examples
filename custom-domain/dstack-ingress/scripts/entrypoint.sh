@@ -22,6 +22,19 @@ EVIDENCE_PORT=${EVIDENCE_PORT:-80}
 ALPN=${ALPN:-}
 CHALLENGE_TYPE=${CHALLENGE_TYPE:-dns-01}
 
+# ACME account settings, normalised once for both modes. What you are
+# configuring is an ACME account, not a particular client -- which client
+# implements a mode is an implementation detail, and this image already changed
+# it once (certbot for dns-01, lego for tls-alpn-01). So ACME_EMAIL and
+# ACME_STAGING are the names; CERTBOT_EMAIL and CERTBOT_STAGING are the
+# historical ones and keep working.
+#
+# Normalising here rather than per mode is what fixes the real bug: ACME_STAGING
+# used to be read only on the tls-alpn-01 path, so setting it under dns-01
+# silently issued *production* certificates.
+ACME_EMAIL=${ACME_EMAIL:-${CERTBOT_EMAIL:-}}
+ACME_STAGING=${ACME_STAGING:-${CERTBOT_STAGING:-false}}
+
 case "$CHALLENGE_TYPE" in
     dns-01|tls-alpn-01) ;;
     *)
@@ -72,6 +85,7 @@ done
 # the helpers it invokes see the sanitized values.
 export PORT DOMAIN DOMAINS TARGET_ENDPOINT ROUTING_MAP TXT_PREFIX MAXCONN
 export TIMEOUT_CONNECT TIMEOUT_CLIENT TIMEOUT_SERVER EVIDENCE_SERVER EVIDENCE_PORT ALPN
+export ACME_EMAIL ACME_STAGING
 
 case "$CHALLENGE_TYPE" in
     dns-01)

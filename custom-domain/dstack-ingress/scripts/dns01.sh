@@ -11,11 +11,9 @@ source /scripts/functions.sh
 source /scripts/haproxy-lib.sh
 source /scripts/evidence-lib.sh
 
-# ACME contact address. CERTBOT_EMAIL is the documented name on this path --
-# certbot really is the client here -- and ACME_EMAIL is accepted too so one
-# variable works in either mode. Optional either way.
-ACME_EMAIL=${ACME_EMAIL:-${CERTBOT_EMAIL:-}}
-export ACME_EMAIL
+# ACME_EMAIL / ACME_STAGING are normalised by entrypoint.sh and exported. The
+# contact address is optional; certman.py asks for a contactless account when
+# none is given.
 
 # certbot stores certificates under /etc/letsencrypt/live/<domain>/.
 cert_fullchain_path() { echo "/etc/letsencrypt/live/$(cert_dir_name "$1")/fullchain.pem"; }

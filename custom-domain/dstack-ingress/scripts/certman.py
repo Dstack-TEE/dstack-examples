@@ -13,6 +13,17 @@ from typing import List, Optional, Tuple
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
+def staging_enabled() -> bool:
+    """Whether to use Let's Encrypt staging.
+
+    entrypoint.sh normalises the two names, but certman.py is also runnable on
+    its own, so accept both here as well. ACME_STAGING wins: the setting is
+    about the ACME server, not about certbot.
+    """
+    value = os.environ.get("ACME_STAGING") or os.environ.get("CERTBOT_STAGING", "false")
+    return value == "true"
+
+
 class CertManager:
     """Certificate management using DNS provider infrastructure."""
 
@@ -326,7 +337,7 @@ class CertManager:
             else:
                 base_cmd.append("--register-unsafely-without-email")
             base_cmd.extend(["-d", domain])
-        if os.environ.get("CERTBOT_STAGING", "false") == "true":
+        if staging_enabled():
             base_cmd.extend(["--staging"])
 
         if getattr(self.provider, 'CERTBOT_PROPAGATION_SECONDS'):
@@ -540,7 +551,7 @@ class CertManager:
         """
         import glob
         api_endpoint = "acme-v02.api.letsencrypt.org"
-        if os.environ.get("CERTBOT_STAGING", "false") == "true":
+        if staging_enabled():
             api_endpoint = "acme-staging-v02.api.letsencrypt.org"
         pattern = f"/etc/letsencrypt/accounts/{api_endpoint}/directory/*/regr.json"
         return len(glob.glob(pattern)) > 0
