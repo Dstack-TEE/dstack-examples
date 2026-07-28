@@ -37,7 +37,7 @@ LEGO_PATH = os.environ.get("LEGO_PATH", "/etc/letsencrypt/lego")
 ACME_PROD = "https://acme-v02.api.letsencrypt.org/directory"
 ACME_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
 
-# Exit codes, matching the protocol renew-certificate.sh expects.
+# Exit codes: 0 changed, 2 nothing to do, 1 failed. The caller reloads on 0.
 EXIT_CHANGED = 0
 EXIT_ERROR = 1
 EXIT_UNCHANGED = 2

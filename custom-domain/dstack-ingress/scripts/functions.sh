@@ -188,64 +188,35 @@ get_letsencrypt_account_file() {
     echo "${account_files[0]}"
 }
 
-# --- ACME client layout ------------------------------------------------------
-#
-# The two challenge types use different clients, and they lay their state out
-# differently:
-#
-#   certbot (dns-01)     /etc/letsencrypt/live/<domain>/{fullchain,privkey}.pem
-#                        /etc/letsencrypt/accounts/<server>/directory/*/regr.json
-#   lego    (tls-alpn-01) $LEGO_PATH/certificates/<domain>.{crt,key}
-#                        $LEGO_PATH/accounts/<server>/<email>/account.json
-#
-# Everything downstream (combined PEMs, evidence) goes through these helpers so
-# it does not have to care which client produced the files.
-
-lego_path() {
-    echo "${LEGO_PATH:-/etc/letsencrypt/lego}"
-}
-
-using_lego() {
-    [[ "${CHALLENGE_TYPE:-dns-01}" == "tls-alpn-01" ]]
-}
-
-# lego writes the full chain into the .crt file.
-cert_fullchain_path() {
+txt_record_name() {
     local domain="$1"
-    if using_lego; then
-        echo "$(lego_path)/certificates/${domain}.crt"
+    if [[ "$domain" == \*.* ]]; then
+        # Wildcard domain: *.myapp.com → _dstack-app-address-wildcard.myapp.com
+        echo "${TXT_PREFIX}-wildcard.${domain#\*.}"
     else
-        echo "/etc/letsencrypt/live/$(cert_dir_name "$domain")/fullchain.pem"
+        echo "${TXT_PREFIX}.${domain}"
     fi
 }
 
-cert_privkey_path() {
-    local domain="$1"
-    if using_lego; then
-        echo "$(lego_path)/certificates/${domain}.key"
-    else
-        echo "/etc/letsencrypt/live/$(cert_dir_name "$domain")/privkey.pem"
-    fi
+caa_tag_for() {
+    if [[ "$1" == \*.* ]]; then echo "issuewild"; else echo "issue"; fi
 }
 
-get_lego_account_file() {
-    local pattern account_files
-    pattern="$(lego_path)/accounts/*/*/account.json"
-    account_files=( $pattern )
-
-    if [[ ! -f "${account_files[0]}" ]]; then
-        echo "Error: lego account file not found at $pattern" >&2
-        return 1
+# Query the guest agent once for this app's identity.
+load_dstack_identity() {
+    local info
+    if [[ -S /var/run/dstack.sock ]]; then
+        info=$(curl -s --unix-socket /var/run/dstack.sock http://localhost/Info)
+    else
+        info=$(curl -s --unix-socket /var/run/tappd.sock http://localhost/prpc/Tappd.Info)
     fi
 
-    echo "${account_files[0]}"
-}
+    DSTACK_APP_ID=$(echo "$info" | jq -j .app_id)
+    DSTACK_INSTANCE_ID=$(echo "$info" | jq -j .instance_id)
+    export DSTACK_APP_ID DSTACK_INSTANCE_ID
 
-# Account registration document, whichever client produced it.
-acme_account_file() {
-    if using_lego; then
-        get_lego_account_file
-    else
-        get_letsencrypt_account_file
+    if [ -z "$DSTACK_APP_ID" ] || [ "$DSTACK_APP_ID" = "null" ]; then
+        echo "Error: could not read app_id from the dstack guest agent" >&2
+        exit 1
     fi
 }
