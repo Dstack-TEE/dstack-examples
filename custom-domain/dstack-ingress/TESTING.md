@@ -229,16 +229,26 @@ watch for: the three records verifying, `Executing (challenge-delegation):` with
 cleaned up afterwards (query `_acme-challenge.<domain>.<alias>` at the
 authoritative nameserver — it should be gone).
 
-The CAA step comes last, once the ACME account exists and its URI is known. It
-blocks until you create the record it prints. Cloudflare's API wants CAA as
-structured fields rather than one string, so most quick DNS scripts cannot write
-it; the image's own `dnsman.py set_caa` can, and running it in a one-off
-container is the easiest way to play the operator here:
+The CAA comes last and needs nothing from you: it names the ACME account, so the
+account has to exist first, and the container publishes it into the delegation
+zone itself once it does. Expect `Adding CAA record for <domain>.<zone> with tag
+issue` on the first pass — `issuewild` for a wildcard, on the base name. Confirm
+it at the authoritative nameserver, and confirm it resolves *through* the
+operator's CNAME, since that is what the CA follows:
+
+```bash
+dig +short CAA <domain> @<authoritative-ns>
+```
+
+To plant a CAA by hand — for the negative case below, or to check that the
+container replaces it — note that Cloudflare's API wants CAA as structured
+fields rather than one string, so most quick DNS scripts cannot write it. The
+image's own `dnsman.py set_caa` can, in a one-off container:
 
 ```bash
 docker run --rm --env-file .env --entrypoint dnsman.py <image> \
-  set_caa --domain svc.example.com --caa-tag issue \
-  --caa-value 'letsencrypt.org;validationmethods=dns-01;accounturi=<uri>'
+  set_caa --domain svc.example.com.deleg.example.com --caa-tag issue \
+  --caa-value 'example.com'
 ```
 
 **What this does not test.** The whole point of delegation is that a token scoped
@@ -255,7 +265,7 @@ These fail fast and are cheap, so run them on every change:
 |---|---|
 | tls-alpn-01 + a wildcard domain | Refused before any ACME call, citing RFC 8737 |
 | Delegation, CAA in the delegated zone changed to forbid the CA | Blocked before any ACME attempt — proves the published CAA is reachable through the CNAME |
-| Delegation with no CAA record at all | Blocked — unlike normal issuance, where "no CAA" means unrestricted and passes |
+| Delegation with no CAA record at all | Proceeds, reporting `no CAA record set; issuance is unrestricted` — see below |
 | Delegation, later pass, gateway CNAME broken | Renewal proceeds — that record is for serving, and dns-01 does not use it |
 | A CAA record with `validationmethods=dns-01`, mode tls-alpn-01 | Blocked with the restriction quoted back |
 | TXT holding the wrong value | Reported as `want <x>, saw <y>`, not "missing" |
@@ -263,6 +273,26 @@ These fail fast and are cheap, so run them on every change:
 
 The last one is worth keeping: it is the cross-tenant impersonation defence, and
 it is observable rather than merely argued.
+
+**Why "no CAA at all" is not a blocking case.** It used to be. When the operator
+had to create the CAA record, its absence was the state that mattered: nothing
+then stopped anyone else who could satisfy the delegated challenge, and the
+container held no token to create it. Once the container began publishing the
+delegated CAA itself, absence stopped meaning that — it means "not published
+yet", and the next pass fixes it — so the gate was removed along with
+`ALLOW_MISSING_CAA` and dnsguide's `--caa-required`. `check_caa` now follows
+RFC 8659 for delegation as it always did elsewhere: an absent CAA record set
+forbids nothing.
+
+The neighbouring row still holds, and it is the one that carries the weight: a
+CAA in the delegated zone that forbids the CA **does** block, before any ACME
+attempt, which is what proves the published record is reachable through the
+operator's CNAME. Expect the reason quoted back, e.g. `issue allows
+'example.com', not letsencrypt.org`.
+
+Note also that the first pass on a fresh deployment necessarily runs before any
+CAA exists: the record names the ACME account, so the account has to exist
+first. `process_domain` issues, writes the CAA, then issues again.
 
 ## Traps
 
