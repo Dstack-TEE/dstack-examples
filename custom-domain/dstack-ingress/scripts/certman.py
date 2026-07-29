@@ -482,6 +482,10 @@ class CertManager:
         """certbot stores a wildcard lineage under the bare name."""
         return domain[2:] if domain.startswith("*.") else domain
 
+    def _renewal_conf_path(self, domain: str) -> str:
+        """Where certbot keeps this lineage's renewal config."""
+        return f"/etc/letsencrypt/renewal/{self._lineage_name(domain)}.conf"
+
     def apply_renewal_window(self, domain: str) -> None:
         """Make RENEW_DAYS_BEFORE mean the same thing here as it does for lego.
 
@@ -491,12 +495,14 @@ class CertManager:
         runs. Without this the variable is silently tls-alpn-01 only, which also
         left the dns-01 renewal branch with no way to be exercised on demand.
 
-        Leaving it unset keeps certbot's own default (30 days).
+        Unsetting it has to remove the setting again, not merely stop writing
+        it: the lineage config lives in the certificate volume and outlives the
+        container, so a value written once would otherwise be permanent, and
+        the documented way to leave the renewal window -- unset the variable --
+        would do nothing while the certificate stayed permanently due.
         """
         days = os.environ.get("RENEW_DAYS_BEFORE", "").strip()
-        if not days:
-            return
-        if not days.isdigit() or int(days) < 1:
+        if days and (not days.isdigit() or int(days) < 1):
             print(
                 f"Warning: ignoring invalid RENEW_DAYS_BEFORE={days!r} "
                 f"(expected a positive number of days)",
@@ -504,13 +510,13 @@ class CertManager:
             )
             return
 
-        path = f"/etc/letsencrypt/renewal/{self._lineage_name(domain)}.conf"
+        path = self._renewal_conf_path(domain)
         if not os.path.isfile(path):
             # No lineage yet: the first issuance has not happened, and certbot
             # writes this file itself. Nothing to do.
             return
 
-        setting = f"renew_before_expiry = {days} days"
+        setting = f"renew_before_expiry = {days} days" if days else None
         try:
             with open(path, encoding="utf-8") as fh:
                 lines = fh.read().splitlines()
@@ -518,29 +524,50 @@ class CertManager:
             print(f"Warning: cannot read {path}: {exc}", file=sys.stderr)
             return
 
-        out, replaced = [], False
+        out, replaced, removed = [], False, False
         for line in lines:
-            # The key ships commented out, so match both forms.
-            if re.match(r"\s*#?\s*renew_before_expiry\s*=", line):
+            # The key ships commented out, so match both forms when writing.
+            # When clearing, drop only the active setting: the commented
+            # template is certbot's own and carries no value.
+            active = re.match(r"\s*renew_before_expiry\s*=", line)
+            if setting is not None and re.match(
+                r"\s*#?\s*renew_before_expiry\s*=", line
+            ):
                 if not replaced:
                     out.append(setting)
                     replaced = True
                 continue
+            if setting is None and active:
+                removed = True
+                continue
             out.append(line)
 
-        if not replaced:
+        if setting is not None and not replaced:
             # Must land before the first section header; the key is top-level.
             insert_at = next(
                 (i for i, line in enumerate(out) if line.strip().startswith("[")),
                 len(out),
             )
             out.insert(insert_at, setting)
+            replaced = True
+
+        if out == lines:
+            # Nothing to do: already correct, or already absent. Rewriting the
+            # file every pass would only add noise and a chance to corrupt it.
+            return
 
         try:
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(out) + "\n")
         except OSError as exc:
             print(f"Warning: cannot write {path}: {exc}", file=sys.stderr)
+            return
+
+        if removed:
+            print(
+                f"Renewal window for {domain} cleared; "
+                f"certbot's default applies again"
+            )
             return
         print(f"Renewal window for {domain} set to {days} days before expiry")
 
