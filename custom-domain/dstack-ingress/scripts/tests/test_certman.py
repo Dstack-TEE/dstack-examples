@@ -226,8 +226,8 @@ class CertbotTimeoutTest(EnvTestCase):
 
     def test_timeout_covers_the_propagation_wait(self):
         self.assertEqual(
-            _command_manager(propagation=120)._certbot_timeout(),
-            120 + certman.CERTBOT_TIMEOUT_HEADROOM,
+            _command_manager(propagation=400)._certbot_timeout(),
+            400 + certman.CERTBOT_TIMEOUT_HEADROOM,
         )
 
     def test_linode_default_propagation_fits(self):
@@ -238,17 +238,18 @@ class CertbotTimeoutTest(EnvTestCase):
 
     def test_delegation_uses_its_own_propagation_setting(self):
         os.environ["DELEGATION_ZONE"] = "deleg.example.net"
-        os.environ["DELEGATION_PROPAGATION_SECONDS"] = "200"
+        os.environ["DELEGATION_PROPAGATION_SECONDS"] = "240"
         self.assertEqual(
             _command_manager()._certbot_timeout(),
-            200 + certman.CERTBOT_TIMEOUT_HEADROOM,
+            240 + certman.CERTBOT_TIMEOUT_HEADROOM,
         )
 
     def test_delegation_falls_back_to_the_hook_default(self):
         os.environ["DELEGATION_ZONE"] = "deleg.example.net"
         self.assertEqual(
             _command_manager()._certbot_timeout(),
-            120 + certman.CERTBOT_TIMEOUT_HEADROOM,
+            max(certman.CERTBOT_TIMEOUT_FLOOR,
+                120 + certman.CERTBOT_TIMEOUT_HEADROOM),
         )
 
     def test_explicit_override_wins(self):
@@ -259,17 +260,33 @@ class CertbotTimeoutTest(EnvTestCase):
         for bad in ("0", "-5", "soon", ""):
             os.environ["CERTBOT_TIMEOUT"] = bad
             self.assertEqual(
-                _command_manager(propagation=120)._certbot_timeout(),
-                120 + certman.CERTBOT_TIMEOUT_HEADROOM,
+                _command_manager(propagation=400)._certbot_timeout(),
+                400 + certman.CERTBOT_TIMEOUT_HEADROOM,
                 f"{bad!r} should be ignored",
             )
 
-    def test_provider_without_propagation_still_gets_headroom(self):
-        # route53 sets CERTBOT_PROPAGATION_SECONDS = None.
+    def test_an_override_below_the_floor_is_still_honoured(self):
+        os.environ["CERTBOT_TIMEOUT"] = "60"
+        self.assertEqual(_command_manager(propagation=300)._certbot_timeout(), 60)
+
+    def test_provider_without_propagation_keeps_the_old_budget(self):
+        """route53 declares no propagation wait.
+
+        Sizing purely from the wait would cut it from 300s to 180s and fail
+        renewals that used to fit -- a regression introduced by the fix.
+        """
         self.assertEqual(
             _command_manager(propagation=None)._certbot_timeout(),
-            certman.CERTBOT_TIMEOUT_HEADROOM,
+            certman.CERTBOT_TIMEOUT_FLOOR,
         )
+
+    def test_no_provider_ends_up_below_the_previous_fixed_cap(self):
+        for propagation in (None, 0, 30, 120, 300):
+            self.assertGreaterEqual(
+                _command_manager(propagation=propagation)._certbot_timeout(),
+                300,
+                f"propagation={propagation} shortened the budget",
+            )
 
 
 class NoDuplicateDefinitionsTest(unittest.TestCase):

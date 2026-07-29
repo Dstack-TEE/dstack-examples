@@ -28,6 +28,12 @@ def staging_enabled() -> bool:
 # trips, plugin setup, the cleanup hook, and certbot's own bookkeeping.
 CERTBOT_TIMEOUT_HEADROOM = 180
 
+# Never allow less than the cap this replaced. route53 declares no propagation
+# wait at all, so sizing purely from the wait would cut its budget from 300s to
+# 180s and fail renewals that used to fit. The sizing exists to raise the cap
+# where a provider needs more, not to lower it anywhere.
+CERTBOT_TIMEOUT_FLOOR = 300
+
 
 class CertManager:
     """Certificate management using DNS provider infrastructure."""
@@ -520,6 +526,10 @@ class CertManager:
         linode timed out every time, on issuance as well as renewal.
 
         Size the cap from the wait instead, and let a deployment override it.
+        Never below CERTBOT_TIMEOUT_FLOOR: a provider that declares no
+        propagation wait (route53) still spends time on ACME round trips, and
+        this change should not shorten anyone's budget. An explicit
+        CERTBOT_TIMEOUT is taken literally -- that one is the operator's call.
         """
         override = os.environ.get("CERTBOT_TIMEOUT", "").strip()
         if override.isdigit() and int(override) > 0:
@@ -533,7 +543,7 @@ class CertManager:
             propagation = getattr(
                 self.provider, "CERTBOT_PROPAGATION_SECONDS", None) or 0
 
-        return propagation + CERTBOT_TIMEOUT_HEADROOM
+        return max(CERTBOT_TIMEOUT_FLOOR, propagation + CERTBOT_TIMEOUT_HEADROOM)
 
     def apply_renewal_window(self, domain: str) -> None:
         """Make RENEW_DAYS_BEFORE mean the same thing here as it does for lego.

@@ -193,7 +193,7 @@ environment:
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
 | `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below) |
 | `DELEGATION_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. The certbot run timeout is sized from this, so raising it is safe |
-| `CERTBOT_TIMEOUT` | propagation wait + 180s | Seconds a single certbot run may take. The default is derived from the provider's propagation wait (or `DELEGATION_PROPAGATION_SECONDS`), which is what dominates it; set this only if a run needs longer still |
+| `CERTBOT_TIMEOUT` | propagation wait + 180s, never below 300s | Seconds a single certbot run may take. The default is derived from the provider's propagation wait (or `DELEGATION_PROPAGATION_SECONDS`), which is what dominates it. Set this only if a run needs longer still; an explicit value is used as given, floor included |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
