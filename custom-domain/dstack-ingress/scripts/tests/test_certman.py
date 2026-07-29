@@ -5,6 +5,7 @@ Run: python3 scripts/tests/test_certman.py
 """
 
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -40,12 +41,15 @@ def _manager(path: str) -> certman.CertManager:
 class RenewalWindowTest(unittest.TestCase):
     def setUp(self):
         self._saved = os.environ.get("RENEW_DAYS_BEFORE")
-        fd, self.path = tempfile.mkstemp(suffix=".conf")
-        os.close(fd)
+        # Its own directory, so a test may make the directory unwritable
+        # without touching anything it does not own.
+        self.dir = tempfile.mkdtemp()
+        self.path = os.path.join(self.dir, "example.com.conf")
         self.write(CERTBOT_CONF)
 
     def tearDown(self):
-        os.unlink(self.path)
+        os.chmod(self.dir, 0o700)
+        shutil.rmtree(self.dir, ignore_errors=True)
         if self._saved is None:
             os.environ.pop("RENEW_DAYS_BEFORE", None)
         else:
@@ -112,7 +116,29 @@ class RenewalWindowTest(unittest.TestCase):
         os.unlink(self.path)
         self.apply("365")
         self.assertFalse(os.path.exists(self.path))
-        open(self.path, "w").close()  # tearDown unlinks it
+
+    def test_write_is_atomic_and_leaves_no_scratch_file(self):
+        """The live config is renamed into place, never truncated in place.
+
+        Opening it with "w" would empty it before the replacement was written,
+        and a lineage config certbot cannot parse is one it cannot renew.
+        """
+        self.apply("365")
+        self.assertFalse(
+            os.path.exists(self.path + ".dstack-tmp"),
+            "temporary file left behind",
+        )
+        self.assertTrue(self.read().endswith("\n"))
+        self.assertIn("[renewalparams]", self.read())
+
+    def test_a_failed_write_leaves_the_original_intact(self):
+        original = self.read()
+        os.chmod(self.dir, 0o500)  # cannot create the temp file
+        try:
+            self.apply("365")
+        finally:
+            os.chmod(self.dir, 0o700)
+        self.assertEqual(self.read(), original)
 
     def test_wildcard_uses_the_bare_lineage_name(self):
         self.assertEqual(

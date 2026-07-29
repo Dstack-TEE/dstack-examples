@@ -500,6 +500,13 @@ class CertManager:
         container, so a value written once would otherwise be permanent, and
         the documented way to leave the renewal window -- unset the variable --
         would do nothing while the certificate stayed permanently due.
+
+        This assumes the container owns the lineage config: clearing removes
+        any active renew_before_expiry, including one a human put there, since
+        nothing distinguishes the two. That holds for the volume this image
+        manages. Mounting a certbot directory maintained elsewhere is out of
+        scope -- set RENEW_DAYS_BEFORE to the value you want in that case,
+        rather than leaving it unset and expecting the file to be left alone.
         """
         days = os.environ.get("RENEW_DAYS_BEFORE", "").strip()
         if days and (not days.isdigit() or int(days) < 1):
@@ -556,11 +563,25 @@ class CertManager:
             # file every pass would only add noise and a chance to corrupt it.
             return
 
+        # Write through a temporary file and rename over the original. Opening
+        # the live config with "w" truncates it before anything is written, so
+        # a crash or a full disk mid-write would leave certbot with a truncated
+        # lineage config -- and a lineage certbot cannot parse is one it cannot
+        # renew. os.replace is atomic, so a reader sees the old file or the new
+        # one, never a half-written one.
+        tmp = f"{path}.dstack-tmp"
         try:
-            with open(path, "w", encoding="utf-8") as fh:
+            with open(tmp, "w", encoding="utf-8") as fh:
                 fh.write("\n".join(out) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp, path)
         except OSError as exc:
             print(f"Warning: cannot write {path}: {exc}", file=sys.stderr)
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
             return
 
         if removed:
