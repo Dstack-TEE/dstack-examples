@@ -1,6 +1,6 @@
 services:
   ingress:
-    image: dstacktee/dstack-ingress:2.3
+    image: dstacktee/dstack-ingress:2.3@sha256:527c53523b9226782a11dbd800a3ff55e8a1f0b88e6224e8f7e4db7419769fbe
     ports:
       - "443:443"
     environment:
