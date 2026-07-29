@@ -17,7 +17,7 @@ def main():
         choices=["set_cname", "set_alias", "set_txt", "unset_txt", "set_caa"],
         help="Action to perform",
     )
-    parser.add_argument("--domain", required=True, help="Domain name")
+    parser.add_argument("--domain", default="", help="Domain name")
     parser.add_argument("--provider", help="DNS provider (cloudflare, linode)")
     # Zone ID is now handled internally by each provider
     parser.add_argument(
@@ -29,6 +29,10 @@ def main():
     parser.add_argument("--caa-value", help="CAA record value")
 
     args = parser.parse_args()
+
+    if not args.domain:
+        print("Error: --domain is required", file=sys.stderr)
+        sys.exit(1)
 
     try:
         # Create DNS provider instance

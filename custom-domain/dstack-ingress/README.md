@@ -191,9 +191,8 @@ environment:
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
-| `ACME_CHALLENGE_ALIAS` | | Delegate the ACME DNS-01 challenge to this zone (see below) so the DNS token needs no access to the served domain's own zone |
-| `ACME_CHALLENGE_PROPAGATION_SECONDS` | `30` | Wait after writing the delegated challenge TXT before validation (only with `ACME_CHALLENGE_ALIAS`). Keep well under ~250s — certbot is killed after a 300s per-run timeout |
-| `ALLOW_MISSING_CAA` | `false` | In delegation mode, treat an unconfirmed `accounturi` CAA as a warning instead of a blocker. Default fails closed (see below) |
+| `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below) |
+| `DELEGATION_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. Keep well under ~250s — certbot is killed after a 300s per-run timeout |
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
@@ -205,38 +204,66 @@ served name lives under a shared production zone (e.g. `svc.example.com` under
 `example.com`), that token can edit every record in the zone, which may be more
 privilege than you want.
 
-Set `ACME_CHALLENGE_ALIAS=<delegation-zone>` to answer the DNS-01 challenge in a
-separate zone that your token controls, so the token never touches the served
-domain's zone. In this mode dstack-ingress **only** manages the challenge TXT in
-the delegation zone; you set the following records **once, statically**, in the
-served domain's production zone (the container prints the exact values on start):
+> **Renamed.** This was `ACME_CHALLENGE_ALIAS`, from when the challenge was the
+> only thing delegated. The old name is **not** accepted — a deployment still
+> setting it silently leaves delegation mode and starts writing to the served
+> domain's zone, which is what delegation exists to avoid. Rename it when
+> upgrading.
+
+Set `DELEGATION_ZONE=<delegation-zone>` to move every name this deployment
+needs into a zone your token controls. You create three CNAMEs in the served
+domain's zone **once, before deploying**, and then never touch DNS again — not
+when the app id moves, not when the ACME account is recreated, not when the
+gateway moves:
 
 ```
-svc.example.com                       CNAME  <GATEWAY_DOMAIN>
-_dstack-app-address.svc.example.com   TXT    "<app-id>:<port>"
-_acme-challenge.svc.example.com       CNAME  _acme-challenge.svc.example.com.<delegation-zone>
-svc.example.com                       CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=<account-uri>"
+svc.example.com                      CNAME  svc.example.com.deleg.example.net
+_dstack-app-address.svc.example.com  CNAME  _dstack-app-address.svc.example.com.deleg.example.net
+_acme-challenge.svc.example.com      CNAME  _acme-challenge.svc.example.com.deleg.example.net
 ```
 
-> **Security note.** The `accounturi` CAA restricts issuance to this enclave's
-> ACME account and is the control that prevents forged certificates. In
-> delegation mode dstack-ingress cannot set it for you (no token for the served
-> zone), so it prints the record and verifies it. **A CAA that is confirmed
-> absent stops issuance** — set `ALLOW_MISSING_CAA=true` to downgrade that to a
-> warning. Without this CAA, anyone who can satisfy the delegated challenge
-> could obtain a certificate for the domain.
->
-> Use a **dedicated** delegation zone and scope the token to only that zone — a
-> zone shared with other tenants lets anyone with write access to it complete
-> the challenge. `SET_CAA` does not affect delegation mode (this CAA path always
-> runs). If a certificate was previously issued with the standard DNS-plugin
-> authenticator, delete `/etc/letsencrypt/renewal/<domain>.conf` before enabling
-> delegation, otherwise `certbot renew` reuses the old plugin (which needs the
-> production-zone token this mode avoids).
+dstack-ingress publishes what they point at, in the delegation zone:
+
+```
+svc.example.com.deleg.example.net                      CNAME  <GATEWAY_DOMAIN>
+svc.example.com.deleg.example.net                      CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=…"
+_dstack-app-address.svc.example.com.deleg.example.net  TXT    "<app-id>:<port>"
+_acme-challenge.svc.example.com.deleg.example.net      TXT    <challenge>   (transient)
+```
+
+The gateway pointer and the CAA share a name, which DNS does not allow for a
+CNAME. Which form works is a property of the provider — Cloudflare tolerates the
+pair, Linode publishes an address record instead — and `set_alias_record` in the
+provider layer is where that choice is made. Delegation asks for an alias and
+takes what it gets. A provider that needs a form other than CNAME overrides that
+method, as Linode does.
+
+**A wildcard needs a fourth CNAME.** RFC 8659 evaluates `*.app.example.com` at
+`app.example.com`, so the base gets its own alias and the container publishes an
+`issuewild` CAA behind it:
+
+```
+*.app.example.com                            CNAME  app.example.com.deleg.example.net
+app.example.com                              CNAME  app.example.com.deleg.example.net
+_dstack-app-address-wildcard.app.example.com CNAME  _dstack-app-address-wildcard.app.example.com.deleg.example.net
+_acme-challenge.app.example.com              CNAME  _acme-challenge.app.example.com.deleg.example.net
+```
+
+The base has to be a name you can alias, which rules out a zone apex — an apex
+carries SOA and NS records and a CNAME excludes them. `*.example.com` served
+straight off the `example.com` zone is therefore not a fit for delegation; a
+label down, `*.app.example.com`, is.
 
 The records above are checked the same way tls-alpn-01 checks its own: two DoH
 resolvers, both CAA wire formats, and `DNS_SETUP_MODE` deciding what happens
-while they are missing. `wait` (the default) blocks until they appear, so you can
+while they are missing.
+
+Only the `_acme-challenge` CNAME is checked on later passes. Under dns-01 the CA
+reads a TXT record and never connects here, so the other two records are about
+serving rather than issuance, and a renewal is not blocked on them — a routing
+problem can be fixed at any time, an expired certificate cannot. They are still
+checked on the first pass, where the point is to tell you whether you created
+them correctly. `wait` (the default) blocks until they appear, so you can
 start the container and create the records afterwards; `print` lists them and
 continues without checking; `webhook` POSTs them to `DNS_WEBHOOK_URL` for an
 operator service to create automatically.

@@ -201,24 +201,27 @@ first issuance.
 
 ### Challenge delegation (dns-01)
 
-`ACME_CHALLENGE_ALIAS` answers the DNS-01 challenge in a zone the container's
+`DELEGATION_ZONE` answers the DNS-01 challenge in a zone the container's
 token controls, so the token needs no access to the served domain's own zone.
 Testing it looks like it needs a second registrar account. It does not.
 
 Any name under a zone you already control works as the delegation zone, because
 the provider resolves a zone by longest-suffix match on the record name. With
-`ACME_CHALLENGE_ALIAS=deleg.example.com` and a served domain of
+`DELEGATION_ZONE=deleg.example.com` and a served domain of
 `svc.example.com`, the challenge record is
 `_acme-challenge.svc.example.com.deleg.example.com`, which lands in
 `example.com` — the same zone, but through the delegation code path.
 
-Play the operator and create the three static records the container prints:
+Play the operator and create the three CNAMEs the container prints:
 
 ```
-svc.example.com                    CNAME  <GATEWAY_DOMAIN>
-_dstack-app-address.svc.example.com  TXT  "<app-id>:443"
-_acme-challenge.svc.example.com    CNAME  _acme-challenge.svc.example.com.deleg.example.com
+svc.example.com                      CNAME  svc.example.com.deleg.example.com
+_dstack-app-address.svc.example.com  CNAME  _dstack-app-address.svc.example.com.deleg.example.com
+_acme-challenge.svc.example.com      CNAME  _acme-challenge.svc.example.com.deleg.example.com
 ```
+
+Everything they point at is published by the container, so this is the whole of
+the operator's job — the app id can change afterwards and no DNS edit follows.
 
 Then start the container with a real provider token and `ACME_STAGING=true`, and
 watch for: the three records verifying, `Executing (challenge-delegation):` with
@@ -251,7 +254,9 @@ These fail fast and are cheap, so run them on every change:
 | Scenario | Expected |
 |---|---|
 | tls-alpn-01 + a wildcard domain | Refused before any ACME call, citing RFC 8737 |
+| Delegation, CAA in the delegated zone changed to forbid the CA | Blocked before any ACME attempt — proves the published CAA is reachable through the CNAME |
 | Delegation with no CAA record at all | Blocked — unlike normal issuance, where "no CAA" means unrestricted and passes |
+| Delegation, later pass, gateway CNAME broken | Renewal proceeds — that record is for serving, and dns-01 does not use it |
 | A CAA record with `validationmethods=dns-01`, mode tls-alpn-01 | Blocked with the restriction quoted back |
 | TXT holding the wrong value | Reported as `want <x>, saw <y>`, not "missing" |
 | An instance ID the gateway does not know | The CA reports a connection error — the gateway will not route to it |

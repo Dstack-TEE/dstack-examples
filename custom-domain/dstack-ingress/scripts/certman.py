@@ -279,11 +279,11 @@ class CertManager:
         """Build certbot command using provider configuration."""
         certbot_cmd = self._get_certbot_command()
 
-        # Challenge-delegation mode: when ACME_CHALLENGE_ALIAS is set, answer the
+        # Challenge-delegation mode: when DELEGATION_ZONE is set, answer the
         # DNS-01 challenge in a delegated zone via a manual hook instead of the
         # provider's certbot plugin, so our DNS token never needs access to the
         # served domain's own zone. See scripts/acme-dns-alias-hook.sh.
-        if os.environ.get("ACME_CHALLENGE_ALIAS", "").strip():
+        if os.environ.get("DELEGATION_ZONE", "").strip():
             hook = "/scripts/acme-dns-alias-hook.sh"
             base_cmd = certbot_cmd + [action, "--non-interactive", "-v"]
             if action == "certonly":

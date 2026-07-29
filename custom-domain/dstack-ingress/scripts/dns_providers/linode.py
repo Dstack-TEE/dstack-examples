@@ -292,6 +292,7 @@ class LinodeDNSProvider(DNSProvider):
         """
         # Resolve domain to IP
         domain = content
+        self.clear_conflicting_alias(name, RecordType.A)
         print(f"Trying to resolve: {domain}")
         ip_address = socket.gethostbyname(domain)
         print(f"✅ Resolved {domain} to IP: {ip_address}")
