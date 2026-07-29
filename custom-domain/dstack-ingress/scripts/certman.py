@@ -580,8 +580,11 @@ class CertManager:
             print(f"Warning: cannot write {path}: {exc}", file=sys.stderr)
             try:
                 os.unlink(tmp)
-            except OSError:
-                pass
+            except OSError as cleanup_exc:
+                print(
+                    f"Warning: cleanup failed for temporary file {tmp}: {cleanup_exc}",
+                    file=sys.stderr,
+                )
             return
 
         if removed:
