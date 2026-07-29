@@ -24,6 +24,11 @@ def staging_enabled() -> bool:
     return value == "true"
 
 
+# Time a certbot run needs on top of the DNS propagation wait: ACME round
+# trips, plugin setup, the cleanup hook, and certbot's own bookkeeping.
+CERTBOT_TIMEOUT_HEADROOM = 180
+
+
 class CertManager:
     """Certificate management using DNS provider infrastructure."""
 
@@ -303,6 +308,8 @@ class CertManager:
             # For `renew`, certbot reuses the authenticator + hooks saved in the
             # renewal config from the initial `certonly`, so we don't re-specify
             # them here (and must not fall back to the DNS plugin).
+            if action == "renew":
+                base_cmd.extend(["--cert-name", self._lineage_name(domain)])
             if staging_enabled():
                 base_cmd.append("--staging")
             masked = [a if not (i > 0 and base_cmd[i - 1] == "--email") else "<email>"
@@ -342,6 +349,12 @@ class CertManager:
             else:
                 base_cmd.append("--register-unsafely-without-email")
             base_cmd.extend(["-d", domain])
+        if action == "renew":
+            # Without this, `certbot renew` renews *every* lineage in
+            # /etc/letsencrypt/renewal. run_pass calls this once per domain, so
+            # N domains meant N passes over all N lineages, and the result was
+            # then reported against whichever domain happened to ask.
+            base_cmd.extend(["--cert-name", self._lineage_name(domain)])
         if staging_enabled():
             base_cmd.extend(["--staging"])
 
@@ -380,10 +393,11 @@ class CertManager:
             return False
 
         cmd = self._build_certbot_command("certonly", domain, email)
+        timeout = self._certbot_timeout()
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300)
+                cmd, capture_output=True, text=True, timeout=timeout)
 
             if result.returncode == 0:
                 print(f"✓ Certificate obtained successfully for {domain}")
@@ -412,7 +426,8 @@ class CertManager:
                 return False
 
         except subprocess.TimeoutExpired:
-            print(f"Certbot command timed out after 300 seconds", file=sys.stderr)
+            print(f"Certbot command timed out after {timeout} seconds",
+                  file=sys.stderr)
             return False
         except Exception as e:
             print(f"Error running certbot: {e}", file=sys.stderr)
@@ -433,10 +448,11 @@ class CertManager:
 
         self.apply_renewal_window(domain)
         cmd = self._build_certbot_command("renew", domain, "")
+        timeout = self._certbot_timeout()
 
         try:
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300)
+                cmd, capture_output=True, text=True, timeout=timeout)
 
             stdout_output = result.stdout.strip() if result.stdout else ""
             error_output = result.stderr.strip() if result.stderr else ""
@@ -468,6 +484,14 @@ class CertManager:
 
                 return False, False
 
+        except subprocess.TimeoutExpired:
+            print(
+                f"Certbot renew for {domain} timed out after {timeout} seconds. "
+                f"If this provider needs a longer DNS propagation wait, raise "
+                f"CERTBOT_TIMEOUT.",
+                file=sys.stderr,
+            )
+            return False, False
         except Exception as e:
             print(f"Error running certbot: {e}", file=sys.stderr)
             return False, False
@@ -485,6 +509,31 @@ class CertManager:
     def _renewal_conf_path(self, domain: str) -> str:
         """Where certbot keeps this lineage's renewal config."""
         return f"/etc/letsencrypt/renewal/{self._lineage_name(domain)}.conf"
+
+    def _certbot_timeout(self) -> int:
+        """How long one certbot run may take.
+
+        The dominant term is the DNS propagation wait, which the plugin -- or,
+        under delegation, the auth hook -- sleeps through inside the process.
+        A single fixed cap cannot fit every provider: linode's own default
+        propagation is 300s, so a 300s cap could never be met and dns-01 on
+        linode timed out every time, on issuance as well as renewal.
+
+        Size the cap from the wait instead, and let a deployment override it.
+        """
+        override = os.environ.get("CERTBOT_TIMEOUT", "").strip()
+        if override.isdigit() and int(override) > 0:
+            return int(override)
+
+        if os.environ.get("DELEGATION_ZONE", "").strip():
+            # Kept in step with acme-dns-alias-hook.sh, which does the sleeping.
+            wait = os.environ.get("DELEGATION_PROPAGATION_SECONDS", "").strip()
+            propagation = int(wait) if wait.isdigit() else 120
+        else:
+            propagation = getattr(
+                self.provider, "CERTBOT_PROPAGATION_SECONDS", None) or 0
+
+        return propagation + CERTBOT_TIMEOUT_HEADROOM
 
     def apply_renewal_window(self, domain: str) -> None:
         """Make RENEW_DAYS_BEFORE mean the same thing here as it does for lego.

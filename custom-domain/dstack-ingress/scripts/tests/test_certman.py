@@ -149,6 +149,129 @@ class RenewalWindowTest(unittest.TestCase):
         )
 
 
+class FakeProvider:
+    CERTBOT_PLUGIN = "dns-cloudflare"
+    CERTBOT_CREDENTIALS_FILE = None
+    CERTBOT_PROPAGATION_SECONDS = 120
+
+
+def _command_manager(propagation=120) -> certman.CertManager:
+    """A CertManager that can build commands without a real provider or venv."""
+    mgr = object.__new__(certman.CertManager)
+    provider = FakeProvider()
+    provider.CERTBOT_PROPAGATION_SECONDS = propagation
+    mgr.provider = provider
+    mgr.provider_type = "cloudflare"
+    mgr._get_certbot_command = lambda: ["certbot"]  # noqa: SLF001
+    return mgr
+
+
+class EnvTestCase(unittest.TestCase):
+    """Restore every environment variable a test touches."""
+
+    VARS = (
+        "CERTBOT_TIMEOUT",
+        "DELEGATION_ZONE",
+        "DELEGATION_PROPAGATION_SECONDS",
+        "ACME_STAGING",
+        "CERTBOT_STAGING",
+    )
+
+    def setUp(self):
+        self._saved = {v: os.environ.get(v) for v in self.VARS}
+        for v in self.VARS:
+            os.environ.pop(v, None)
+
+    def tearDown(self):
+        for v, old in self._saved.items():
+            if old is None:
+                os.environ.pop(v, None)
+            else:
+                os.environ[v] = old
+
+
+class RenewScopeTest(EnvTestCase):
+    """`certbot renew` renews every lineage unless told otherwise.
+
+    run_pass calls this once per domain, so without --cert-name N domains meant
+    N runs over all N lineages, and each run's result was reported against
+    whichever domain happened to ask for it.
+    """
+
+    def test_renew_is_scoped_to_one_lineage(self):
+        cmd = _command_manager()._build_certbot_command("renew", "a.example.com", "")
+        self.assertIn("--cert-name", cmd)
+        self.assertEqual(cmd[cmd.index("--cert-name") + 1], "a.example.com")
+
+    def test_renew_uses_the_bare_name_for_a_wildcard(self):
+        cmd = _command_manager()._build_certbot_command("renew", "*.example.com", "")
+        self.assertEqual(cmd[cmd.index("--cert-name") + 1], "example.com")
+
+    def test_certonly_is_scoped_by_d_not_cert_name(self):
+        cmd = _command_manager()._build_certbot_command(
+            "certonly", "a.example.com", "")
+        self.assertNotIn("--cert-name", cmd)
+        self.assertIn("-d", cmd)
+
+    def test_delegation_renew_is_scoped_too(self):
+        os.environ["DELEGATION_ZONE"] = "deleg.example.net"
+        cmd = _command_manager()._build_certbot_command("renew", "a.example.com", "")
+        self.assertEqual(cmd[cmd.index("--cert-name") + 1], "a.example.com")
+        # renew must not re-specify the authenticator; it is in the lineage.
+        self.assertNotIn("--manual", cmd)
+
+
+class CertbotTimeoutTest(EnvTestCase):
+    """A fixed 300s cap could not fit every provider's own propagation wait."""
+
+    def test_timeout_covers_the_propagation_wait(self):
+        self.assertEqual(
+            _command_manager(propagation=120)._certbot_timeout(),
+            120 + certman.CERTBOT_TIMEOUT_HEADROOM,
+        )
+
+    def test_linode_default_propagation_fits(self):
+        # linode's CERTBOT_PROPAGATION_SECONDS is 300, so the old 300s cap could
+        # never be met: issuance and renewal timed out every time.
+        timeout = _command_manager(propagation=300)._certbot_timeout()
+        self.assertGreater(timeout, 300)
+
+    def test_delegation_uses_its_own_propagation_setting(self):
+        os.environ["DELEGATION_ZONE"] = "deleg.example.net"
+        os.environ["DELEGATION_PROPAGATION_SECONDS"] = "200"
+        self.assertEqual(
+            _command_manager()._certbot_timeout(),
+            200 + certman.CERTBOT_TIMEOUT_HEADROOM,
+        )
+
+    def test_delegation_falls_back_to_the_hook_default(self):
+        os.environ["DELEGATION_ZONE"] = "deleg.example.net"
+        self.assertEqual(
+            _command_manager()._certbot_timeout(),
+            120 + certman.CERTBOT_TIMEOUT_HEADROOM,
+        )
+
+    def test_explicit_override_wins(self):
+        os.environ["CERTBOT_TIMEOUT"] = "900"
+        self.assertEqual(_command_manager(propagation=300)._certbot_timeout(), 900)
+
+    def test_invalid_override_is_ignored(self):
+        for bad in ("0", "-5", "soon", ""):
+            os.environ["CERTBOT_TIMEOUT"] = bad
+            self.assertEqual(
+                _command_manager(propagation=120)._certbot_timeout(),
+                120 + certman.CERTBOT_TIMEOUT_HEADROOM,
+                f"{bad!r} should be ignored",
+            )
+
+    def test_provider_without_propagation_still_gets_headroom(self):
+        # route53 sets CERTBOT_PROPAGATION_SECONDS = None.
+        self.assertEqual(
+            _command_manager(propagation=None)._certbot_timeout(),
+            certman.CERTBOT_TIMEOUT_HEADROOM,
+        )
+
+
 class NoDuplicateDefinitionsTest(unittest.TestCase):
     """Python shadows a repeated class or method silently; unittest counts the
     later one and the total still goes up, so a duplicated block looks like
