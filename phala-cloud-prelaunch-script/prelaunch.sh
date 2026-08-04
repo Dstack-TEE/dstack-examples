@@ -155,6 +155,7 @@ perform_cleanup
 #
 if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
     COMPOSE_IMAGES=$(grep 'image:' /dstack/docker-compose.yaml 2>/dev/null | awk '{print $2}' | tr -d '"'"'" || true)
+    HEADER="Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
     for img in $COMPOSE_IMAGES; do
         [[ "$img" != ghcr.io/* ]] && continue
         ref="${img#ghcr.io/}"
@@ -175,7 +176,7 @@ if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && 
             notify_host_hoot_error "GHCR token exchange failed: $img"
             exit 1
         fi
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json" "https://ghcr.io/v2/${repo}/manifests/${reference}")
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" -H "$HEADER" "https://ghcr.io/v2/${repo}/manifests/${reference}")
         if [[ "$http_code" != "200" ]]; then
             echo "ERROR: GHCR pull access denied for $img (HTTP $http_code)"
             notify_host_hoot_error "GHCR pull access denied: $img (HTTP $http_code)"
