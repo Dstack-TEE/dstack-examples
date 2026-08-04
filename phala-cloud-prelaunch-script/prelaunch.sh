@@ -250,9 +250,7 @@ else
 
         if [ -n "$DSTACK_ROOT_PASSWORD" ]; then
             echo "Setting root password from user.."
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null                 || printf '%s
-%s
-' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
+            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null || printf '%s\n%s\n' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
             unset DSTACK_ROOT_PASSWORD
             echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
@@ -260,9 +258,7 @@ else
             DSTACK_ROOT_PASSWORD=$(
                 LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
             )
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null                 || printf '%s
-%s
-' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
+            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null || printf '%s\n%s\n' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
             unset DSTACK_ROOT_PASSWORD
             echo "Root password set (random auto-init)"
         else
