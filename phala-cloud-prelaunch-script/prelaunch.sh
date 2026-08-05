@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.15"
+echo "Running Phala Cloud Pre-Launch Script v0.0.17"
 echo "----------------------------------------------"
 set -e
 
@@ -69,18 +69,17 @@ if [[ -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
         echo "Logging in to Docker registry: $DOCKER_REGISTRY_TARGET"
         # Login without exposing password in process list
         if [[ -n "$DSTACK_DOCKER_REGISTRY" ]]; then
-            echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin "$DSTACK_DOCKER_REGISTRY"
-        else
-            echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin
-        fi
-
-        if [ $? -eq 0 ]; then
-            echo "Docker login successful: $DOCKER_REGISTRY_TARGET"
-        else
+            if ! echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin "$DSTACK_DOCKER_REGISTRY"; then
+                echo "Docker login failed: $DOCKER_REGISTRY_TARGET"
+                notify_host_hoot_error "docker login failed"
+                exit 1
+            fi
+        elif ! echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin; then
             echo "Docker login failed: $DOCKER_REGISTRY_TARGET"
             notify_host_hoot_error "docker login failed"
             exit 1
         fi
+        echo "Docker login successful: $DOCKER_REGISTRY_TARGET"
     fi
 # Check if AWS ECR credentials exist
 elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && -n "$DSTACK_AWS_REGION" && -n "$DSTACK_AWS_ECR_REGISTRY" ]]; then
@@ -90,9 +89,12 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     if [ ! -f "./aws/dist/aws" ]; then
         notify_host_hoot_info "awscli not installed, installing..."
         echo "AWS CLI not installed, installing..."
-        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.24.14.zip" -o "awscliv2.zip"
-        echo "6ff031a26df7daebbfa3ccddc9af1450 awscliv2.zip" | md5sum -c
-        if [ $? -ne 0 ]; then
+        if ! curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-2.24.14.zip" -o "awscliv2.zip"; then
+            echo "AWS CLI download failed"
+            notify_host_hoot_error "awscli install failed"
+            exit 1
+        fi
+        if ! echo "6ff031a26df7daebbfa3ccddc9af1450 awscliv2.zip" | md5sum -c; then
             echo "MD5 checksum failed"
             notify_host_hoot_error "awscli install failed"
             exit 1
@@ -129,8 +131,7 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
         fi
     else
         echo "Logging in to AWS ECR..."
-        ./aws/dist/aws ecr get-login-password --region $DSTACK_AWS_REGION | docker login --username AWS --password-stdin "$DSTACK_AWS_ECR_REGISTRY"
-        if [ $? -eq 0 ]; then
+        if ./aws/dist/aws ecr get-login-password --region "$DSTACK_AWS_REGION" | docker login --username AWS --password-stdin "$DSTACK_AWS_ECR_REGISTRY"; then
             echo "AWS ECR login successful"
             notify_host_hoot_info "AWS ECR login successful"
         else
@@ -154,18 +155,28 @@ perform_cleanup
 #
 if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
     COMPOSE_IMAGES=$(grep 'image:' /dstack/docker-compose.yaml 2>/dev/null | awk '{print $2}' | tr -d '"'"'" || true)
+    HEADER="Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
     for img in $COMPOSE_IMAGES; do
         [[ "$img" != ghcr.io/* ]] && continue
-        repo="${img#ghcr.io/}"; repo="${repo%%:*}"
-        tag="${img##*:}"; [[ "$tag" == "$img" || "$tag" == "$repo" ]] && tag="latest"
+        ref="${img#ghcr.io/}"
+        # Digest-pinned refs (repo@sha256:...) use the digest as the manifest
+        # reference; tag refs (repo:tag) use the tag, defaulting to latest.
+        if [[ "$ref" == *@* ]]; then
+            repo="${ref%%@*}"
+            reference="${ref#*@}"
+        else
+            repo="${ref%%:*}"
+            reference="${ref##*:}"
+            [[ "$reference" == "$ref" ]] && reference="latest"
+        fi
         echo "Verifying GHCR pull access: $img"
-        token=$(curl -sf -u "$DSTACK_DOCKER_USERNAME:$DSTACK_DOCKER_PASSWORD"             "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" | jq -r '.token // empty' || true)
+        token=$(curl -sf -u "$DSTACK_DOCKER_USERNAME:$DSTACK_DOCKER_PASSWORD" "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" | jq -r '.token // empty' || true)
         if [[ -z "$token" ]]; then
             echo "ERROR: GHCR token exchange failed for $img"
             notify_host_hoot_error "GHCR token exchange failed: $img"
             exit 1
         fi
-        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token"             -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"             "https://ghcr.io/v2/${repo}/manifests/${tag}")
+        http_code=$(curl -s -o /dev/null -w "%{http_code}" -H "Authorization: Bearer $token" -H "$HEADER" "https://ghcr.io/v2/${repo}/manifests/${reference}")
         if [[ "$http_code" != "200" ]]; then
             echo "ERROR: GHCR pull access denied for $img (HTTP $http_code)"
             notify_host_hoot_error "GHCR pull access denied: $img (HTTP $http_code)"
@@ -225,8 +236,9 @@ else
             echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
             echo "Setting random root password.."
+            # head -c closes after 32 bytes; without pipefail, pipeline status is head's.
             DSTACK_ROOT_PASSWORD=$(
-                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
+                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 32
             )
             echo "root:$DSTACK_ROOT_PASSWORD" | chpasswd
             unset DSTACK_ROOT_PASSWORD
@@ -235,25 +247,28 @@ else
             echo "Root password already set; no changes."
         fi
     else
+        # No chpasswd: do not pipe into interactive passwd(1). It often reads
+        # /dev/tty and fails with "password for root is unchanged" during boot.
         echo "Using passwd method"
 
         if [ -n "$DSTACK_ROOT_PASSWORD" ]; then
             echo "Setting root password from user.."
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null                 || printf '%s
-%s
-' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
-            unset DSTACK_ROOT_PASSWORD
-            echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
+            if command -v passwd >/dev/null 2>&1 && passwd --help 2>&1 | grep -q -- '--stdin'; then
+                echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root
+                unset DSTACK_ROOT_PASSWORD
+                echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
+            else
+                echo "Error: cannot set DSTACK_ROOT_PASSWORD non-interactively"
+                echo "Need chpasswd or passwd --stdin"
+                exit 1
+            fi
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
-            echo "Setting random root password.."
-            DSTACK_ROOT_PASSWORD=$(
-                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
-            )
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null                 || printf '%s
-%s
-' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
-            unset DSTACK_ROOT_PASSWORD
-            echo "Root password set (random auto-init)"
+            # Random password was only used to avoid an empty root password and
+            # was discarded immediately. Locking achieves the same goal without
+            # driving interactive passwd.
+            echo "Locking empty root password.."
+            passwd -l root
+            echo "Root password locked (empty password disabled)"
         else
             echo "Root password already set; no changes."
         fi
@@ -266,12 +281,12 @@ fi
 if mkdir -p /home/root/.ssh 2>/dev/null; then
     if [[ -n "$DSTACK_ROOT_PUBLIC_KEY" ]]; then
         echo "$DSTACK_ROOT_PUBLIC_KEY" > /home/root/.ssh/authorized_keys
-        unset $DSTACK_ROOT_PUBLIC_KEY
+        unset DSTACK_ROOT_PUBLIC_KEY
         echo "Root public key set"
     fi
     if [[ -n "$DSTACK_AUTHORIZED_KEYS" ]]; then
         echo "$DSTACK_AUTHORIZED_KEYS" > /home/root/.ssh/authorized_keys
-        unset $DSTACK_AUTHORIZED_KEYS
+        unset DSTACK_AUTHORIZED_KEYS
         echo "Root authorized_keys set"
     fi
 
