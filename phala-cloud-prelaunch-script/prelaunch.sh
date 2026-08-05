@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.16"
+echo "Running Phala Cloud Pre-Launch Script v0.0.17"
 echo "----------------------------------------------"
 set -e
 
@@ -236,8 +236,9 @@ else
             echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
             echo "Setting random root password.."
+            # head -c closes after 32 bytes; without pipefail, pipeline status is head's.
             DSTACK_ROOT_PASSWORD=$(
-                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
+                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 32
             )
             echo "root:$DSTACK_ROOT_PASSWORD" | chpasswd
             unset DSTACK_ROOT_PASSWORD
@@ -246,21 +247,28 @@ else
             echo "Root password already set; no changes."
         fi
     else
+        # No chpasswd: do not pipe into interactive passwd(1). It often reads
+        # /dev/tty and fails with "password for root is unchanged" during boot.
         echo "Using passwd method"
 
         if [ -n "$DSTACK_ROOT_PASSWORD" ]; then
             echo "Setting root password from user.."
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null || printf '%s\n%s\n' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
-            unset DSTACK_ROOT_PASSWORD
-            echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
+            if command -v passwd >/dev/null 2>&1 && passwd --help 2>&1 | grep -q -- '--stdin'; then
+                echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root
+                unset DSTACK_ROOT_PASSWORD
+                echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
+            else
+                echo "Error: cannot set DSTACK_ROOT_PASSWORD non-interactively"
+                echo "Need chpasswd or passwd --stdin"
+                exit 1
+            fi
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
-            echo "Setting random root password.."
-            DSTACK_ROOT_PASSWORD=$(
-                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
-            )
-            echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root 2>/dev/null || printf '%s\n%s\n' "$DSTACK_ROOT_PASSWORD" "$DSTACK_ROOT_PASSWORD" | passwd root
-            unset DSTACK_ROOT_PASSWORD
-            echo "Root password set (random auto-init)"
+            # Random password was only used to avoid an empty root password and
+            # was discarded immediately. Locking achieves the same goal without
+            # driving interactive passwd.
+            echo "Locking empty root password.."
+            passwd -l root
+            echo "Root password locked (empty password disabled)"
         else
             echo "Root password already set; no changes."
         fi
