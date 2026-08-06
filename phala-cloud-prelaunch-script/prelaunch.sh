@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.17"
+echo "Running Phala Cloud Pre-Launch Script v0.0.18"
 echo "----------------------------------------------"
 set -e
 
@@ -236,9 +236,10 @@ else
             echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
             echo "Setting random root password.."
-            # head -c closes after 32 bytes; without pipefail, pipeline status is head's.
+            # dstack guest busybox lacks head -c (FANCY_HEAD off); dd is the
+            # last pipeline command, so its 0 status masks tr's SIGPIPE exit.
             DSTACK_ROOT_PASSWORD=$(
-                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom 2>/dev/null | head -c 32
+                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
             )
             echo "root:$DSTACK_ROOT_PASSWORD" | chpasswd
             unset DSTACK_ROOT_PASSWORD
@@ -255,20 +256,36 @@ else
             echo "Setting root password from user.."
             if command -v passwd >/dev/null 2>&1 && passwd --help 2>&1 | grep -q -- '--stdin'; then
                 echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root
-                unset DSTACK_ROOT_PASSWORD
-                echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
+            elif command -v openssl >/dev/null 2>&1; then
+                # busybox passwd has no --stdin; write the SHA-512 crypt hash
+                # into /etc/shadow directly instead of driving interactive passwd.
+                HASHED_ROOT_PASSWORD=$(openssl passwd -6 "$DSTACK_ROOT_PASSWORD")
+                sed -i "s|^root:[^:]*:|root:${HASHED_ROOT_PASSWORD}:|" /etc/shadow
+                unset HASHED_ROOT_PASSWORD
             else
                 echo "Error: cannot set DSTACK_ROOT_PASSWORD non-interactively"
-                echo "Need chpasswd or passwd --stdin"
+                echo "Need chpasswd, passwd --stdin, or openssl"
                 exit 1
             fi
+            unset DSTACK_ROOT_PASSWORD
+            echo "Root password set/updated from DSTACK_ROOT_PASSWORD"
         elif [ -z "$(grep '^root:' /etc/shadow 2>/dev/null | cut -d: -f2)" ]; then
-            # Random password was only used to avoid an empty root password and
-            # was discarded immediately. Locking achieves the same goal without
-            # driving interactive passwd.
-            echo "Locking empty root password.."
-            passwd -l root
-            echo "Root password locked (empty password disabled)"
+            # Never lock the account here: sshd built without PAM (dstack dev
+            # images) treats a locked account as "deny all authentication",
+            # which breaks public-key SSH too. Set a discarded random password
+            # by writing its crypt hash into /etc/shadow directly.
+            if command -v openssl >/dev/null 2>&1; then
+                echo "Setting random root password.."
+                DSTACK_ROOT_PASSWORD=$(
+                    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
+                )
+                HASHED_ROOT_PASSWORD=$(openssl passwd -6 "$DSTACK_ROOT_PASSWORD")
+                sed -i "s|^root:[^:]*:|root:${HASHED_ROOT_PASSWORD}:|" /etc/shadow
+                unset DSTACK_ROOT_PASSWORD HASHED_ROOT_PASSWORD
+                echo "Root password set (random auto-init)"
+            else
+                echo "Warning: no openssl to hash a random password; leaving root password empty"
+            fi
         else
             echo "Root password already set; no changes."
         fi
