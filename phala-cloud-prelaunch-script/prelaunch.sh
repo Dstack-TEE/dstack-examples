@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.18"
+echo "Running Phala Cloud Pre-Launch Script v0.0.19"
 echo "----------------------------------------------"
 set -e
 
@@ -51,6 +51,40 @@ check_docker_login() {
     else
         return 1
     fi
+}
+
+# Function: print the SHA256 fingerprint of every authorized key
+#
+# Output matches `ssh-keygen -lf` and the fingerprints GitHub and Phala Cloud
+# display, so an operator can match the boot log against the account's key list.
+# The guest image ships neither ssh-keygen nor a base64 applet (BusyBox has
+# base32 only), so openssl does both the decode and the digest.
+print_authorized_key_fingerprints() {
+    local file="$1"
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "openssl not available; skipping SSH key fingerprints"
+        return 0
+    fi
+
+    local key_type blob comment decoded_bytes fingerprint
+    # `|| [[ -n "$key_type" ]]` keeps the final line when the file does not end
+    # with a newline; read returns non-zero there but still fills the variables.
+    while read -r key_type blob comment || [[ -n "$key_type" ]]; do
+        if [[ -z "$blob" ]]; then
+            continue
+        fi
+        # openssl exits 0 on undecodable input and emits nothing, which would
+        # otherwise print the SHA256 of the empty string as a real fingerprint.
+        decoded_bytes=$(printf '%s' "$blob" | openssl base64 -d -A 2>/dev/null | wc -c || true)
+        if [[ "$decoded_bytes" -eq 0 ]]; then
+            echo "  $key_type <unreadable key>"
+            continue
+        fi
+        fingerprint=$(
+            printf '%s' "$blob"                 | openssl base64 -d -A 2>/dev/null                 | openssl dgst -sha256 -binary 2>/dev/null                 | openssl base64 -A 2>/dev/null                 | tr -d '='                 || true
+        )
+        echo "  $key_type SHA256:$fingerprint"
+    done < "$file"
 }
 
 # Main logic starts here
@@ -309,13 +343,16 @@ if mkdir -p /home/root/.ssh 2>/dev/null; then
 
     if [[ -f /dstack/user_config ]] && jq empty /dstack/user_config 2>/dev/null; then
         if [[ $(jq 'has("ssh_authorized_keys")' /dstack/user_config 2>/dev/null) == "true" ]]; then
-            jq -j '.ssh_authorized_keys' /dstack/user_config >> /home/root/.ssh/authorized_keys
-            # Remove duplicates if there are multiple keys
-            if [[ $(cat /home/root/.ssh/authorized_keys | wc -l) -gt 1 ]]; then
-                sort -u /home/root/.ssh/authorized_keys > /home/root/.ssh/authorized_keys.tmp
-                mv /home/root/.ssh/authorized_keys.tmp /home/root/.ssh/authorized_keys
-            fi
-            echo "Set root authorized_keys from user preferences, total" $(cat /home/root/.ssh/authorized_keys | wc -l) "keys"
+            # jq -r terminates the value with a newline; jq -j does not, which
+            # both concatenated the next appended key onto the same line and
+            # made line-based counting report one key fewer than the file holds.
+            jq -r '.ssh_authorized_keys' /dstack/user_config >> /home/root/.ssh/authorized_keys
+            # Drop duplicates and the blank line an empty key list produces.
+            sort -u /home/root/.ssh/authorized_keys > /home/root/.ssh/authorized_keys.tmp
+            mv /home/root/.ssh/authorized_keys.tmp /home/root/.ssh/authorized_keys
+            KEY_COUNT=$(grep -c '^[^[:space:]]' /home/root/.ssh/authorized_keys || true)
+            echo "Set root authorized_keys from user preferences, total $KEY_COUNT keys"
+            print_authorized_key_fingerprints /home/root/.ssh/authorized_keys
         fi
     fi
 else
