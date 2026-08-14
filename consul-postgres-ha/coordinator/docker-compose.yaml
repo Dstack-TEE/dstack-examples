@@ -1,0 +1,34 @@
+# Runs on the user-provided public-IP host (NOT a dstack CVM).
+# Provides STUN/TURN for ICE traversal and a tiny signaling broker so
+# CVMs can swap ICE candidates during mesh-conn bootstrap.
+#
+# Image tags pin to `:latest` from GHCR for clarity here; pin to
+# `:sha-<full-sha>` (or a digest) for production deploys — see
+# PUBLISHING.md.
+
+services:
+  coturn:
+    image: coturn/coturn:4.6
+    network_mode: host
+    restart: unless-stopped
+    command:
+      - -n
+      - --realm=dstack-mesh
+      - --listening-port=3478
+      - --tls-listening-port=5349
+      - --min-port=49152
+      - --max-port=49999
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SHARED_SECRET}
+      - --no-cli
+      - --no-multicast-peers
+      - --log-file=stdout
+      - --simple-log
+      - --fingerprint
+
+  signaling:
+    image: ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-signaling:latest
+    restart: unless-stopped
+    command: ["-mode=signaling", "-addr=:7000"]
+    ports:
+      - "7000:7000"
