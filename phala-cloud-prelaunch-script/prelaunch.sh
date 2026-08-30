@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.19"
+echo "Running Phala Cloud Pre-Launch Script v0.0.20"
 echo "----------------------------------------------"
 set -e
 
@@ -33,11 +33,11 @@ perform_cleanup() {
 
 # Function: Check Docker login status without exposing credentials
 check_docker_login() {
-    local registry="$1"
+    local registry="${1-}"
 
     # When registry is specified, check auth entry for that registry in Docker config
     if [[ -n "$registry" ]]; then
-        local docker_config_path="${DOCKER_CONFIG:-$HOME/.docker}/config.json"
+        local docker_config_path="${DOCKER_CONFIG:-${HOME:-}/.docker}/config.json"
         if [[ -f "$docker_config_path" ]] && grep -q "$registry" "$docker_config_path"; then
             return 0
         else
@@ -66,7 +66,9 @@ print_authorized_key_fingerprints() {
         return 0
     fi
 
-    local key_type blob comment decoded_bytes fingerprint
+    # Locals start unset under bash; initialize so set -u (inherited from
+    # dstack app-compose.sh source) does not trip the read loop guard.
+    local key_type="" blob="" comment="" decoded_bytes="" fingerprint=""
     # `|| [[ -n "$key_type" ]]` keeps the final line when the file does not end
     # with a newline; read returns non-zero there but still fills the variables.
     while read -r key_type blob comment || [[ -n "$key_type" ]]; do
@@ -80,9 +82,7 @@ print_authorized_key_fingerprints() {
             echo "  $key_type <unreadable key>"
             continue
         fi
-        fingerprint=$(
-            printf '%s' "$blob"                 | openssl base64 -d -A 2>/dev/null                 | openssl dgst -sha256 -binary 2>/dev/null                 | openssl base64 -A 2>/dev/null                 | tr -d '='                 || true
-        )
+        fingerprint=$(printf '%s' "$blob" | openssl base64 -d -A 2>/dev/null | openssl dgst -sha256 -binary 2>/dev/null | openssl base64 -A 2>/dev/null | tr -d '=' || true)
         echo "  $key_type SHA256:$fingerprint"
     done < "$file"
 }
@@ -90,19 +90,23 @@ print_authorized_key_fingerprints() {
 # Main logic starts here
 echo "Starting login process..."
 
+# Optional env vars below use ${VAR-} / ${VAR:-} so this script stays safe when
+# app-compose.sh sources it under `set -euo pipefail` without registry/SSH/root
+# credentials set. Bare "$VAR" throws "unbound variable" under nounset.
+DOCKER_REGISTRY_TARGET="${DSTACK_DOCKER_REGISTRY:-docker.io}"
+
 # Check if Docker credentials exist
-if [[ -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
+if [[ -n "${DSTACK_DOCKER_USERNAME-}" && -n "${DSTACK_DOCKER_PASSWORD-}" ]]; then
     echo "Docker credentials found"
-    DOCKER_REGISTRY_TARGET="${DSTACK_DOCKER_REGISTRY:-docker.io}"
     echo "Target Docker registry: $DOCKER_REGISTRY_TARGET"
 
     # Check if already logged in
-    if check_docker_login "$DSTACK_DOCKER_REGISTRY"; then
+    if check_docker_login "${DSTACK_DOCKER_REGISTRY-}"; then
         echo "Already logged in to Docker registry: $DOCKER_REGISTRY_TARGET"
     else
         echo "Logging in to Docker registry: $DOCKER_REGISTRY_TARGET"
         # Login without exposing password in process list
-        if [[ -n "$DSTACK_DOCKER_REGISTRY" ]]; then
+        if [[ -n "${DSTACK_DOCKER_REGISTRY-}" ]]; then
             if ! echo "$DSTACK_DOCKER_PASSWORD" | docker login -u "$DSTACK_DOCKER_USERNAME" --password-stdin "$DSTACK_DOCKER_REGISTRY"; then
                 echo "Docker login failed: $DOCKER_REGISTRY_TARGET"
                 notify_host_hoot_error "docker login failed"
@@ -116,7 +120,7 @@ if [[ -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
         echo "Docker login successful: $DOCKER_REGISTRY_TARGET"
     fi
 # Check if AWS ECR credentials exist
-elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && -n "$DSTACK_AWS_REGION" && -n "$DSTACK_AWS_ECR_REGISTRY" ]]; then
+elif [[ -n "${DSTACK_AWS_ACCESS_KEY_ID-}" && -n "${DSTACK_AWS_SECRET_ACCESS_KEY-}" && -n "${DSTACK_AWS_REGION-}" && -n "${DSTACK_AWS_ECR_REGISTRY-}" ]]; then
     echo "AWS ECR credentials found"
 
     # Check if AWS CLI is installed
@@ -144,7 +148,7 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
     export AWS_DEFAULT_REGION="$DSTACK_AWS_REGION"
 
     # Set session token if provided (for temporary credentials)
-    if [[ -n "$DSTACK_AWS_SESSION_TOKEN" ]]; then
+    if [[ -n "${DSTACK_AWS_SESSION_TOKEN-}" ]]; then
         echo "AWS session token found, using temporary credentials"
         export AWS_SESSION_TOKEN="$DSTACK_AWS_SESSION_TOKEN"
     fi
@@ -155,7 +159,7 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
         echo "AWS credentials test failed"
         # For session token credentials, this might be expected if they're expired
         # Log warning but don't fail startup
-        if [[ -n "$DSTACK_AWS_SESSION_TOKEN" ]]; then
+        if [[ -n "${DSTACK_AWS_SESSION_TOKEN-}" ]]; then
             echo "Warning: AWS temporary credentials may have expired, continuing startup"
             notify_host_hoot_info "AWS temporary credentials may have expired"
         else
@@ -171,7 +175,7 @@ elif [[ -n "$DSTACK_AWS_ACCESS_KEY_ID" && -n "$DSTACK_AWS_SECRET_ACCESS_KEY" && 
         else
             echo "AWS ECR login failed"
             # For session token credentials, don't fail startup if login fails
-            if [[ -n "$DSTACK_AWS_SESSION_TOKEN" ]]; then
+            if [[ -n "${DSTACK_AWS_SESSION_TOKEN-}" ]]; then
                 echo "Warning: AWS ECR login failed with temporary credentials, continuing startup"
                 notify_host_hoot_info "AWS ECR login failed with temporary credentials"
             else
@@ -187,8 +191,10 @@ perform_cleanup
 #
 # GHCR image pull access verification (pure HTTP, no docker daemon)
 #
-if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && -n "$DSTACK_DOCKER_PASSWORD" ]]; then
-    COMPOSE_IMAGES=$(grep 'image:' /dstack/docker-compose.yaml 2>/dev/null | awk '{print $2}' | tr -d '"'"'" || true)
+if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "${DSTACK_DOCKER_USERNAME-}" && -n "${DSTACK_DOCKER_PASSWORD-}" ]]; then
+    # Strip surrounding quotes from compose image refs. Two tr calls keep the
+    # intent obvious inside this Python string (no quote-concatenation idiom).
+    COMPOSE_IMAGES=$(grep 'image:' /dstack/docker-compose.yaml 2>/dev/null | awk '{print $2}' | tr -d '"' | tr -d "'" || true)
     HEADER="Accept: application/vnd.oci.image.index.v1+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.docker.distribution.manifest.v2+json"
     for img in $COMPOSE_IMAGES; do
         [[ "$img" != ghcr.io/* ]] && continue
@@ -205,7 +211,7 @@ if [[ "$DOCKER_REGISTRY_TARGET" == "ghcr.io" && -n "$DSTACK_DOCKER_USERNAME" && 
         fi
         echo "Verifying GHCR pull access: $img"
         token=$(curl -sf -u "$DSTACK_DOCKER_USERNAME:$DSTACK_DOCKER_PASSWORD" "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull" | jq -r '.token // empty' || true)
-        if [[ -z "$token" ]]; then
+        if [[ -z "${token-}" ]]; then
             echo "ERROR: GHCR token exchange failed for $img"
             notify_host_hoot_error "GHCR token exchange failed: $img"
             exit 1
@@ -263,7 +269,7 @@ else
     if command -v chpasswd >/dev/null 2>&1; then
         echo "Using chpasswd method"
 
-        if [ -n "$DSTACK_ROOT_PASSWORD" ]; then
+        if [ -n "${DSTACK_ROOT_PASSWORD-}" ]; then
             echo "Setting root password from user.."
             echo "root:$DSTACK_ROOT_PASSWORD" | chpasswd
             unset DSTACK_ROOT_PASSWORD
@@ -272,9 +278,7 @@ else
             echo "Setting random root password.."
             # dstack guest busybox lacks head -c (FANCY_HEAD off); dd is the
             # last pipeline command, so its 0 status masks tr's SIGPIPE exit.
-            DSTACK_ROOT_PASSWORD=$(
-                LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
-            )
+            DSTACK_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null)
             echo "root:$DSTACK_ROOT_PASSWORD" | chpasswd
             unset DSTACK_ROOT_PASSWORD
             echo "Root password set (random auto-init)"
@@ -286,7 +290,7 @@ else
         # /dev/tty and fails with "password for root is unchanged" during boot.
         echo "Using passwd method"
 
-        if [ -n "$DSTACK_ROOT_PASSWORD" ]; then
+        if [ -n "${DSTACK_ROOT_PASSWORD-}" ]; then
             echo "Setting root password from user.."
             if command -v passwd >/dev/null 2>&1 && passwd --help 2>&1 | grep -q -- '--stdin'; then
                 echo "$DSTACK_ROOT_PASSWORD" | passwd --stdin root
@@ -310,9 +314,7 @@ else
             # by writing its crypt hash into /etc/shadow directly.
             if command -v openssl >/dev/null 2>&1; then
                 echo "Setting random root password.."
-                DSTACK_ROOT_PASSWORD=$(
-                    LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null
-                )
+                DSTACK_ROOT_PASSWORD=$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | dd bs=1 count=32 2>/dev/null)
                 HASHED_ROOT_PASSWORD=$(openssl passwd -6 "$DSTACK_ROOT_PASSWORD")
                 sed -i "s|^root:[^:]*:|root:${HASHED_ROOT_PASSWORD}:|" /etc/shadow
                 unset DSTACK_ROOT_PASSWORD HASHED_ROOT_PASSWORD
@@ -330,12 +332,12 @@ fi
 # Set SSH authorized keys
 #
 if mkdir -p /home/root/.ssh 2>/dev/null; then
-    if [[ -n "$DSTACK_ROOT_PUBLIC_KEY" ]]; then
+    if [[ -n "${DSTACK_ROOT_PUBLIC_KEY-}" ]]; then
         echo "$DSTACK_ROOT_PUBLIC_KEY" > /home/root/.ssh/authorized_keys
         unset DSTACK_ROOT_PUBLIC_KEY
         echo "Root public key set"
     fi
-    if [[ -n "$DSTACK_AUTHORIZED_KEYS" ]]; then
+    if [[ -n "${DSTACK_AUTHORIZED_KEYS-}" ]]; then
         echo "$DSTACK_AUTHORIZED_KEYS" > /home/root/.ssh/authorized_keys
         unset DSTACK_AUTHORIZED_KEYS
         echo "Root authorized_keys set"
@@ -367,7 +369,7 @@ elif [[ -S /var/run/tappd.sock ]]; then
 fi
 # Check if DSTACK_GATEWAY_DOMAIN is not set, try to get it from user_config or app-compose.json
 # Priority: user_config > app-compose.json
-if [[ -z "$DSTACK_GATEWAY_DOMAIN" ]]; then
+if [[ -z "${DSTACK_GATEWAY_DOMAIN-}" ]]; then
     # First try to get from /dstack/user_config if it exists and is valid JSON
     if [[ -f /dstack/user_config ]] && jq empty /dstack/user_config 2>/dev/null; then
         if [[ $(jq 'has("default_gateway_domain")' /dstack/user_config 2>/dev/null) == "true" ]]; then
@@ -376,11 +378,11 @@ if [[ -z "$DSTACK_GATEWAY_DOMAIN" ]]; then
     fi
 
     # If still not set, try to get from app-compose.json
-    if [[ -z "$DSTACK_GATEWAY_DOMAIN" ]] && [[ $(jq 'has("default_gateway_domain")' app-compose.json) == "true" ]]; then
+    if [[ -z "${DSTACK_GATEWAY_DOMAIN-}" ]] && [[ -f app-compose.json ]] && [[ $(jq 'has("default_gateway_domain")' app-compose.json) == "true" ]]; then
         export DSTACK_GATEWAY_DOMAIN=$(jq -j '.default_gateway_domain' app-compose.json)
     fi
 fi
-if [[ -n "$DSTACK_GATEWAY_DOMAIN" ]]; then
+if [[ -n "${DSTACK_GATEWAY_DOMAIN-}" && -n "${DSTACK_APP_ID-}" ]]; then
     export DSTACK_APP_DOMAIN=$DSTACK_APP_ID"."$DSTACK_GATEWAY_DOMAIN
 fi
 
