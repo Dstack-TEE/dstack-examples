@@ -55,124 +55,12 @@ class CertManager:
         except ImportError:
             pass  # Plugin not installed, continue with installation
 
-        print(f"Installing certbot plugin: {self.provider.CERTBOT_PACKAGE}")
-
-        # Try multiple installation methods
-        install_methods = []
-
-        # Method 1: Use the same python executable that's running this script
-        install_methods.append(
-            [sys.executable, "-m", "pip", "install", self.provider.CERTBOT_PACKAGE])
-
-        # Method 2: Use virtual environment pip if available
-        if "VIRTUAL_ENV" in os.environ:
-            venv_pip = os.path.join(os.environ["VIRTUAL_ENV"], "bin", "pip")
-            if os.path.exists(venv_pip):
-                install_methods.append(
-                    [venv_pip, "install", self.provider.CERTBOT_PACKAGE])
-
-        # Method 3: Use system pip
-        install_methods.append(
-            ["pip", "install", self.provider.CERTBOT_PACKAGE])
-
-        # Method 4: Use pip3
-        install_methods.append(
-            ["pip3", "install", self.provider.CERTBOT_PACKAGE])
-
-        success = False
-        for i, pip_cmd in enumerate(install_methods):
-            print(f"Trying installation method {i+1}")
-            print(f"Command: {' '.join(pip_cmd)}")
-            try:
-                result = subprocess.run(
-                    pip_cmd, capture_output=True, text=True)
-                if result.returncode == 0:
-                    print(f"Installation method {i+1} succeeded")
-                    success = True
-                    break
-                else:
-                    print(f"Installation method {i+1} failed: {result.stderr}")
-            except Exception as e:
-                print(f"Installation method {i+1} exception: {e}")
-
-        if not success:
-            print(f"All installation methods failed", file=sys.stderr)
-            return False
-
-        print(f"Successfully installed {self.provider.CERTBOT_PACKAGE}")
-
-        # Diagnostic information for troubleshooting
-        try:
-            print(f"Installed to Python: {sys.executable}")
-
-            # Show certbot command
-            certbot_cmd = self._get_certbot_command()
-            print(f"Using certbot: {' '.join(certbot_cmd)}")
-
-            try:
-                dist = pkg_resources.get_distribution(
-                    self.provider.CERTBOT_PACKAGE)
-                print(f"Package version: {dist.version} at {dist.location}")
-            except pkg_resources.DistributionNotFound:
-                print("Warning: Package not found in current environment")
-        except Exception as diag_error:
-            print(f"Diagnostic error: {diag_error}")
-
-        # Verify plugin installation
         try:
             __import__(self.provider.CERTBOT_PLUGIN_MODULE)
-            print(
-                f"Plugin {self.provider.CERTBOT_PLUGIN} successfully imported")
-
-            # Test if plugin is recognized by certbot
-            certbot_cmd = self._get_certbot_command()
-            test_cmd = certbot_cmd + ["plugins"]
-            test_result = subprocess.run(
-                test_cmd, capture_output=True, text=True, timeout=10)
-
-            if test_result.returncode == 0 and self.provider.CERTBOT_PLUGIN in test_result.stdout:
-                print(
-                    f"✓ Plugin {self.provider.CERTBOT_PLUGIN} is available in certbot")
-                return True
-            else:
-                print(
-                    f"Warning: {self.provider.CERTBOT_PLUGIN} plugin not found in certbot plugins list")
-                if test_result.stderr:
-                    print(f"Plugin test stderr: {test_result.stderr}")
-
-                # Debug plugin registration
-                self._debug_plugin_registration()
-
-                # Try force reinstall to fix plugin registration
-                print("Attempting to fix plugin registration...")
-                try:
-                    force_cmd = [sys.executable, "-m", "pip", "install", "--force-reinstall",
-                                 "--no-deps", self.provider.CERTBOT_PACKAGE]
-                    print(f"Running: {' '.join(force_cmd)}")
-                    force_result = subprocess.run(
-                        force_cmd, capture_output=True, text=True)
-
-                    if force_result.returncode == 0:
-                        # Test again after reinstall
-                        retest_cmd = certbot_cmd + ["plugins"]
-                        retest_result = subprocess.run(
-                            retest_cmd, capture_output=True, text=True, timeout=10)
-                        if retest_result.returncode == 0 and self.provider.CERTBOT_PLUGIN in retest_result.stdout:
-                            print(f"✓ Plugin registration fixed after reinstall")
-                            return True
-                        else:
-                            print(f"Plugin still not registered, may work anyway")
-                    else:
-                        print(f"Force reinstall failed: {force_result.stderr}")
-                except Exception as fix_error:
-                    print(f"Plugin fix attempt failed: {fix_error}")
-
-                # Continue anyway - may work in Docker environments
-                return True
-
-        except Exception as e:
-            print(f"Plugin verification warning: {e}")
             return True
+        except ImportError as exc:
+            print(f"Required plugin missing: {exc}", file=sys.stderr)
+            return False
 
     def _ensure_certbot_in_env(self) -> None:
         """Ensure certbot is installed in the current Python environment."""
@@ -182,24 +70,8 @@ class CertManager:
             import certbot
             print(f"✓ Certbot module available in current environment")
             return
-        except ImportError:
-            print(f"Certbot module not found, installing...")
-
-        # Install certbot if not available
-        try:
-            install_cmd = [sys.executable, "-m", "pip", "install", "certbot"]
-            print(f"Running: {' '.join(install_cmd)}")
-            result = subprocess.run(
-                install_cmd, capture_output=True, text=True)
-
-            if result.returncode == 0:
-                print(f"✓ Certbot installed successfully in current environment")
-            else:
-                print(f"Failed to install certbot: {result.stderr}")
-                # Continue anyway - may still work
-        except Exception as e:
-            print(f"Error installing certbot: {e}")
-            # Continue anyway - may still work
+        except ImportError as exc:
+            raise RuntimeError("certbot is missing from the measured image") from exc
 
     def _get_certbot_command(self) -> List[str]:
         """Get the correct certbot command that uses the same Python environment."""

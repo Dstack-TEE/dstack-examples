@@ -33,11 +33,11 @@ setup_py_env() {
     # shellcheck disable=SC1091
     source /opt/app-venv/bin/activate
 
-    if [ ! -f /.venv_bootstrapped ]; then
-        echo "Bootstrapping certbot dependencies"
-        pip install --upgrade pip
-        pip install certbot requests boto3 botocore
-        touch /.venv_bootstrapped
+    # Dependencies are installed and measured in the image at build time.
+    # Never resolve or execute code from PyPI while the CVM is starting.
+    if ! /opt/app-venv/bin/python -c 'import certbot, requests, boto3, botocore'; then
+        echo "error: measured Python environment is incomplete" >&2
+        return 1
     fi
 
     ln -sf /opt/app-venv/bin/certbot /usr/local/bin/certbot
