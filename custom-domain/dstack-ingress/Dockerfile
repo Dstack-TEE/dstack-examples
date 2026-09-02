@@ -62,7 +62,8 @@ RUN mkdir -p \
 # installation from PyPI would leave certbot (which handles TLS private keys)
 # outside the measured image.  Keep versions explicit; update this list only
 # together with a new image build and digest.
-COPY requirements.txt /tmp/requirements.txt
+# Normalize the mode so the image digest does not depend on the checkout umask.
+COPY --chmod=644 requirements.txt /tmp/requirements.txt
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONHASHSEED=0 \
     SOURCE_DATE_EPOCH=0
