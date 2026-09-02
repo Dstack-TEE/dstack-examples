@@ -6,7 +6,7 @@ import os
 import re
 import subprocess
 import sys
-import pkg_resources
+from importlib import metadata
 from typing import List, Optional, Tuple
 
 # Add script directory to path to import dns_providers
@@ -90,7 +90,6 @@ class CertManager:
     def _debug_plugin_registration(self) -> None:
         """Debug why plugin is not being registered by certbot."""
         try:
-            import pkg_resources
             print("=== Plugin Registration Debug ===")
 
             # Show which certbot we're using
@@ -99,11 +98,10 @@ class CertManager:
 
             # Check entry points
             try:
-                entry_points = list(
-                    pkg_resources.iter_entry_points('certbot.plugins'))
+                entry_points = list(metadata.entry_points(group='certbot.plugins'))
                 print(f"Found {len(entry_points)} certbot plugins:")
                 for ep in entry_points:
-                    print(f"  - {ep.name}: {ep.module_name}")
+                    print(f"  - {ep.name}: {ep.value}")
 
                 # Look specifically for our plugin
                 plugin_eps = [ep for ep in entry_points if ep.name ==
@@ -218,6 +216,11 @@ class CertManager:
             base_cmd.extend(["-d", domain])
         if staging_enabled():
             base_cmd.extend(["--staging"])
+        # Allow local ACME test servers (for example Pebble) without changing
+        # the production/staging defaults.
+        acme_server = os.environ.get("ACME_DIRECTORY_URL", "").strip()
+        if acme_server:
+            base_cmd.extend(["--server", acme_server])
 
         if getattr(self.provider, 'CERTBOT_PROPAGATION_SECONDS'):
             propagation_seconds = self.provider.CERTBOT_PROPAGATION_SECONDS
