@@ -37,6 +37,11 @@ class CertManager:
         """Detect provider type (reuse factory logic)."""
         return DNSProviderFactory._detect_provider_type()
 
+    @staticmethod
+    def _cert_name(domain: str) -> str:
+        """Match certbot's stable lineage name for a domain."""
+        return domain.lstrip("*.").replace("*", "wildcard-")
+
     def install_plugin(self) -> bool:
         """Install certbot plugin for the current provider."""
         if not self.provider.CERTBOT_PACKAGE:
@@ -150,6 +155,11 @@ class CertManager:
     def _build_certbot_command(self, action: str, domain: str, email: str) -> List[str]:
         """Build certbot command using provider configuration."""
         certbot_cmd = self._get_certbot_command()
+        deterministic = os.environ.get("DETERMINISTIC_TLS_KEY", "false").lower() == "true"
+        if deterministic and action == "certonly":
+            key_path = f"/etc/letsencrypt/live/{self._cert_name(domain)}/privkey.pem"
+            csr_path = f"/etc/letsencrypt/csr/{self._cert_name(domain)}.csr"
+            subprocess.run(["python3", "/scripts/deterministic_key.py", domain, key_path, csr_path], check=True)
 
         # Challenge-delegation mode: when DELEGATION_ZONE is set, answer the
         # DNS-01 challenge in a delegated zone via a manual hook instead of the
@@ -202,6 +212,8 @@ class CertManager:
                     f"Credentials file does not exist: {credentials_file}")
 
         if action == "certonly":
+            if deterministic:
+                base_cmd.extend(["--csr", csr_path, "--cert-path", f"/etc/letsencrypt/live/{self._cert_name(domain)}/cert.pem", "--fullchain-path", f"/etc/letsencrypt/live/{self._cert_name(domain)}/fullchain.pem", "--chain-path", f"/etc/letsencrypt/live/{self._cert_name(domain)}/chain.pem"])
             base_cmd.extend(["--agree-tos", "--no-eff-email"])
             # The ACME contact address is optional (RFC 8555 section 7.3), and
             # it is published: the account document is served as attestation

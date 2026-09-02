@@ -448,3 +448,10 @@ and renewal therefore never interrupt serving traffic. In this mode haproxy
 starts on a self-signed placeholder certificate — it has to be listening before
 the first certificate can be issued — and reloads onto the real one as soon as
 it arrives.
+
+### Deterministic TLS keys (optional)
+
+Set `DETERMINISTIC_TLS_KEY=true` to derive a stable P-256 TLS key per domain from the
+internal dstack agent `/GetKey` endpoint. The default is `false`; when unset, Certbot
+retains its normal key generation behavior. The derived key is used only to generate the
+CSR and is not represented by the agent's signature chain.
