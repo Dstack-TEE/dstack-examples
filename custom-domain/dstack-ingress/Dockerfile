@@ -58,6 +58,21 @@ RUN mkdir -p \
     /var/lib/haproxy \
     /evidences
 
+# Install the complete Python runtime during the image build.  Runtime
+# installation from PyPI would leave certbot (which handles TLS private keys)
+# outside the measured image.  Keep versions explicit; update this list only
+# together with a new image build and digest.
+COPY requirements.txt /tmp/requirements.txt
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONHASHSEED=0 \
+    SOURCE_DATE_EPOCH=0
+RUN python3 -m venv /opt/app-venv && \
+    /opt/app-venv/bin/pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt && \
+    rm -rf /root/.cache/pip /tmp/requirements.txt && \
+    # Normalize files created by wheel installers for reproducible layers.
+    find /opt/app-venv -type f -exec touch -d @0 {} + && \
+    find /opt/app-venv -type d -exec touch -d @0 {} +
+
 # Install scripts with deterministic permissions via bind mount
 RUN --mount=type=bind,source=scripts,target=/tmp/scripts,ro \
     /bin/bash -o pipefail -c 'set -euo pipefail; \

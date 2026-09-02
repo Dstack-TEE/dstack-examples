@@ -1,0 +1,8 @@
+certbot==5.8.0
+requests==2.32.3
+boto3==1.35.99
+botocore==1.35.99
+certbot-dns-cloudflare==4.0.0
+certbot-dns-route53==5.1.0
+certbot-dns-linode==1.4.0
+certbot-dns-namecheap==1.0.0

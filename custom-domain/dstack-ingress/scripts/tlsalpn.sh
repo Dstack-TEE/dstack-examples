@@ -59,12 +59,9 @@ setup_py_env() {
     # shellcheck disable=SC1091
     source /opt/app-venv/bin/activate
 
-    if [ ! -f /.venv_bootstrapped ]; then
-        # lego handles ACME here, so certbot and the cloud SDKs are dead weight.
-        echo "Bootstrapping python dependencies (no certbot on this path)"
-        pip install --upgrade pip
-        pip install requests
-        touch /.venv_bootstrapped
+    if ! /opt/app-venv/bin/python -c 'import requests'; then
+        echo "error: measured Python environment is incomplete" >&2
+        return 1
     fi
     echo 'source /opt/app-venv/bin/activate' > /etc/profile.d/app-venv.sh
 }
