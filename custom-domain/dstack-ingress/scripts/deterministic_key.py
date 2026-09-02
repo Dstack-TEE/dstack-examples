@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Derive a deterministic P-256 TLS key from the dstack v0 GetKey API."""
-import hashlib, json, os, sys, urllib.parse, urllib.request
+import json, os, sys, urllib.parse, urllib.request
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography import x509

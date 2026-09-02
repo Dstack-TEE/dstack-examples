@@ -48,23 +48,13 @@ class CertManager:
             print(f"No certbot package defined for {self.provider_type}")
             return False
 
-        # First ensure certbot is installed in the current environment
-        self._ensure_certbot_in_env()
-
-        # Check if plugin is already installed
         try:
+            self._ensure_certbot_in_env()
             __import__(self.provider.CERTBOT_PLUGIN_MODULE)
-            print(
-                f"Plugin {self.provider.CERTBOT_PACKAGE} is already installed")
+            print(f"Plugin {self.provider.CERTBOT_PACKAGE} is available")
             return True
-        except ImportError:
-            pass  # Plugin not installed, continue with installation
-
-        try:
-            __import__(self.provider.CERTBOT_PLUGIN_MODULE)
-            return True
-        except ImportError as exc:
-            print(f"Required plugin missing: {exc}", file=sys.stderr)
+        except (ImportError, RuntimeError) as exc:
+            print(f"Required certbot dependency is missing from the measured image: {exc}", file=sys.stderr)
             return False
 
     def _ensure_certbot_in_env(self) -> None:
