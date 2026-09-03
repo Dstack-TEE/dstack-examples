@@ -1,4 +1,4 @@
-FROM haproxy@sha256:49a0a0d6f0b8b7e59c233b06eefab1564f2c8d64f673554d368fd7d2ab4b2c2d
+FROM haproxy@sha256:f8095d0b91414340dbcd53bbe89585e17f333ec1f2a0f60456cb53a90486ece2
 
 # haproxy image runs as non-root (uid 99) by default; we need root for
 # certbot, DNS management, and writing to /etc/haproxy/certs.
@@ -7,8 +7,8 @@ USER root
 RUN --mount=type=bind,source=pinned-packages.txt,target=/tmp/pinned-packages.txt,ro \
     set -e; \
     # Create a sources.list file pointing to a specific snapshot
-    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20250411T024939Z bookworm main' > /etc/apt/sources.list && \
-    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20250411T024939Z bookworm-security main' >> /etc/apt/sources.list && \
+    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian/20260824T000000Z trixie main' > /etc/apt/sources.list && \
+    echo 'deb [check-valid-until=no] https://snapshot.debian.org/archive/debian-security/20260824T000000Z trixie-security main' >> /etc/apt/sources.list && \
     echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/10no-check-valid-until && \
     # Create preferences file to pin all packages
     rm -rf /etc/apt/sources.list.d/debian.sources && \
@@ -26,8 +26,8 @@ RUN --mount=type=bind,source=pinned-packages.txt,target=/tmp/pinned-packages.txt
         bash \
         python3-pip \
         python3-requests \
-        python3.11 \
-        python3.11-venv \
+        python3 \
+        python3-venv \
         curl \
         jq \
         coreutils \
