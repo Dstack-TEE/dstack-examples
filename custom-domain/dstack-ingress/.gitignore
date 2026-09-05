@@ -3,3 +3,4 @@
 /test/
 __pycache__
 /oci.tar
+/.BUILD_INFO

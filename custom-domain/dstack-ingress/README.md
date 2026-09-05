@@ -299,7 +299,29 @@ To disable the built-in evidence endpoint and serve evidence files only through 
 ./build-image.sh --push yourusername/dstack-ingress:tag
 ```
 
-The build script ensures reproducibility via pinned packages, deterministic timestamps, and specific buildkit version.
+The build script ensures reproducibility via pinned packages, deterministic timestamps, and specific buildkit version. Building the same commit from a clean checkout produces the same image digest; CI runs the same script with `--require-clean`.
+
+### Image metadata
+
+Every image records where it came from, using the standard [OCI image annotation keys](https://github.com/opencontainers/image-spec/blob/main/annotations.md). The values are derived from the git checkout only (commit, the `VERSION` file, the Dockerfile base image), so they do not disturb reproducibility. The same key/value set is written to three places:
+
+| Location | How to read it |
+|---|---|
+| Image config labels | `skopeo inspect docker://dstacktee/dstack-ingress:<tag> \| jq .Labels` or `docker inspect --format '{{json .Config.Labels}}' <image>` |
+| Image manifest annotations | `skopeo inspect --raw docker://dstacktee/dstack-ingress:<tag> \| jq .annotations` |
+| `/etc/dstack-ingress/build-info` inside the image | `docker run --rm --entrypoint cat <image> /etc/dstack-ingress/build-info`; also printed as the first line of the container log |
+
+| Key | Value |
+|---|---|
+| `org.opencontainers.image.source` | Repository URL (`SOURCE_URL` env when building from a fork) |
+| `org.opencontainers.image.revision` | Git commit; suffixed with `-dirty` when built from an unclean tree |
+| `org.opencontainers.image.version` | Contents of `VERSION`; the release tag `dstack-ingress-v<version>` must match |
+| `org.opencontainers.image.url` / `.documentation` | This directory / README at that exact commit |
+| `org.opencontainers.image.base.name` / `.base.digest` | The pinned haproxy base image |
+
+To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://docker.io/dstacktee/dstack-ingress:<tag> --owner Dstack-TEE`.
+
+Bumping the version is a source change: update `VERSION`, commit, then tag `dstack-ingress-v<version>`.
 
 ## License
 
