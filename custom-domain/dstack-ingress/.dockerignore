@@ -1,5 +1,5 @@
-# Keep the build context identical to the committed tree, so untracked local
-# artifacts can neither leak into the image nor change its digest.
+# Keep the build context independent of local artifacts, so untracked local
+# files can neither leak into the image nor change its digest.
 .git
 .gitignore
 .dockerignore
