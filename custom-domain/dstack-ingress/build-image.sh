@@ -3,8 +3,8 @@
 # Reproducible image build. The same script runs in CI and on a developer
 # machine, so everything that ends up in the image -- including the OCI
 # labels/annotations that point back to the source -- is derived from the git
-# checkout only. Nothing here may depend on wall-clock time, the CI run, or the
-# build host, or the digest stops being reproducible.
+# checkout only. Nothing that ends up in the image may depend on wall-clock
+# time, the CI run, or the build host, or the digest stops being reproducible.
 
 set -euo pipefail
 
