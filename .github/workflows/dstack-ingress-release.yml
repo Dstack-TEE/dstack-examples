@@ -28,6 +28,13 @@ jobs:
             echo "Unable to parse version from ref: ${GITHUB_REF}" >&2
             exit 1
           fi
+          # The image records its version from the committed VERSION file so a
+          # plain checkout reproduces the digest; the tag must agree with it.
+          FILE_VERSION=$(tr -d '[:space:]' < custom-domain/dstack-ingress/VERSION)
+          if [ "${VERSION}" != "${FILE_VERSION}" ]; then
+            echo "Tag version ${VERSION} does not match custom-domain/dstack-ingress/VERSION (${FILE_VERSION})" >&2
+            exit 1
+          fi
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "IMAGE_REFERENCE=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${VERSION}" >> "$GITHUB_ENV"
           echo "Parsed version: ${VERSION}"
@@ -49,7 +56,7 @@ jobs:
         env:
           IMAGE_REFERENCE: ${{ env.IMAGE_REFERENCE }}
         run: |
-          ./build-image.sh --push "${IMAGE_REFERENCE}"
+          ./build-image.sh --require-clean --push "${IMAGE_REFERENCE}"
 
       - name: Capture image digest
         id: capture-digest
@@ -79,6 +86,7 @@ jobs:
             echo ""
             echo "- Tag: \`${IMAGE_REFERENCE}\`"
             echo "- Digest: \`${IMAGE_DIGEST}\`"
+            echo "- Source: \`${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/tree/${GITHUB_SHA}/custom-domain/dstack-ingress\`"
             echo "- Sigstore: https://search.sigstore.dev/?hash=${IMAGE_DIGEST}"
           } >> "$GITHUB_STEP_SUMMARY"
       
@@ -91,3 +99,24 @@ jobs:
             | Image | Digest | Verification |
             |---|---|---|
             | ${{ env.IMAGE_REFERENCE }} | ${{ steps.capture-digest.outputs.digest }} | [Verify on Sigstore](https://search.sigstore.dev/?hash=${{ steps.capture-digest.outputs.digest }}) |
+
+            ## Source
+
+            Built from [`${{ github.sha }}`](${{ github.server_url }}/${{ github.repository }}/tree/${{ github.sha }}/custom-domain/dstack-ingress). The image records its source repository, commit and version as OCI labels and manifest annotations:
+
+            ```bash
+            skopeo inspect docker://${{ env.IMAGE_REFERENCE }} | jq .Labels
+            skopeo inspect --raw docker://${{ env.IMAGE_REFERENCE }} | jq .annotations
+            ```
+
+            ## Reproducible Build
+
+            ```bash
+            git clone ${{ github.server_url }}/${{ github.repository }}.git
+            cd dstack-examples/custom-domain/dstack-ingress
+            git checkout ${{ github.sha }}
+            ./build-image.sh
+            skopeo inspect oci-archive:./oci.tar | jq -r '.Digest'
+            ```
+
+            Expected digest: `${{ steps.capture-digest.outputs.digest }}`
