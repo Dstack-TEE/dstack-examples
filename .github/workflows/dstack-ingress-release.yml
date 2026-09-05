@@ -122,6 +122,8 @@ jobs:
 
             ## Reproducible Build
 
+            Build on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed:
+
             ```bash
             git clone ${{ github.server_url }}/${{ github.repository }}.git
             cd dstack-examples/custom-domain/dstack-ingress

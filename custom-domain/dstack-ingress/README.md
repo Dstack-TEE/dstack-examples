@@ -319,7 +319,7 @@ Every image records where it came from, using the standard [OCI image annotation
 | `org.opencontainers.image.url` / `.documentation` | This directory / README at that exact commit |
 | `org.opencontainers.image.base.name` / `.base.digest` | The pinned haproxy base image |
 
-To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh`; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://docker.io/dstacktee/dstack-ingress:<tag> --owner Dstack-TEE`.
+To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://docker.io/dstacktee/dstack-ingress:<tag> --owner Dstack-TEE`.
 
 Bumping the version is a source change: update `VERSION`, commit, then tag `dstack-ingress-v<version>`.
 
