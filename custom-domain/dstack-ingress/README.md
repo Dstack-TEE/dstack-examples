@@ -385,7 +385,30 @@ Two consequences:
 
 Use `gateway.<gateway-base-domain>` as the traffic CNAME target. The standalone
 underscore label in the legacy `_.<gateway-base-domain>` target is rejected by
-hostname-validating resolvers such as Android's DnsResolver.
+hostname-validating resolvers such as Android's DnsResolver (`res_hnok` validates
+CNAME targets during host resolution).
+
+### RFC rationale
+
+- [RFC 1034 §3.5](https://www.rfc-editor.org/rfc/rfc1034.html#section-3.5)
+  gives the preferred hostname syntax: ASCII letters, digits, and hyphens,
+  starting with a letter and ending with a letter or digit.
+  [RFC 1123 §2.1](https://www.rfc-editor.org/rfc/rfc1123.html#section-2.1)
+  also permits a leading digit; underscores remain outside this hostname syntax.
+- [RFC 2181 §11](https://www.rfc-editor.org/rfc/rfc2181.html#section-11)
+  permits arbitrary DNS labels within length limits, including underscores and
+  CNAME values, and allows applications to impose their own restrictions.
+  Thus `_.<gateway-base-domain>` is representable in DNS, while the platform's
+  server target uses hostname-compatible `gateway.<gateway-base-domain>` for
+  client interoperability. Protocol verification labels such as
+  `_acme-challenge` and `_dstack-app-address` remain valid for their DNS uses.
+- [RFC 2181 §10.1](https://www.rfc-editor.org/rfc/rfc2181.html#section-10.1)
+  permits only one canonical target per alias. During migration, atomically
+  replace each traffic alias's CNAME target, keeping exactly one target at that
+  owner. Retain old and new gateway address records under their separate names
+  until existing consumers have migrated and their TTLs have elapsed.
+
+### Rollout
 
 `GATEWAY_DOMAIN` is a **complete hostname** and is passed through unchanged to
 DNS provider writes, manual DNS instructions, and webhook records. The Compose
