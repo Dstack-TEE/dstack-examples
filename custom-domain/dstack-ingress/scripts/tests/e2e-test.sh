@@ -11,7 +11,7 @@
 #   CERTBOT_EMAIL       - Email for Let's Encrypt registration
 #
 # Optional env vars:
-#   GATEWAY_DOMAIN      - dstack gateway domain (default: _.dstack-prod5.phala.network)
+#   GATEWAY_DOMAIN      - dstack gateway domain (default: gateway.dstack-prod5.phala.network)
 #   IMAGE               - dstack-ingress image (default: dstacktee/dstack-ingress:latest)
 #   INSTANCE_TYPE       - CVM instance type (default: tdx.small)
 #   CERTBOT_STAGING     - Use LE staging (default: true)
@@ -27,7 +27,7 @@ set -uo pipefail
 : "${DOMAIN:?DOMAIN is required}"
 : "${CLOUDFLARE_API_TOKEN:?CLOUDFLARE_API_TOKEN is required}"
 : "${CERTBOT_EMAIL:?CERTBOT_EMAIL is required}"
-GATEWAY_DOMAIN="${GATEWAY_DOMAIN:-_.dstack-prod5.phala.network}"
+GATEWAY_DOMAIN="${GATEWAY_DOMAIN:-gateway.dstack-prod5.phala.network}"
 IMAGE="${IMAGE:-dstacktee/dstack-ingress:latest}"
 INSTANCE_TYPE="${INSTANCE_TYPE:-tdx.small}"
 CERTBOT_STAGING="${CERTBOT_STAGING:-true}"

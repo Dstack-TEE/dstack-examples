@@ -332,6 +332,7 @@ this before suspecting the proxy.
 
 ```bash
 python3 scripts/tests/test_dnsguide.py     # DNS/CAA parsing and record building
+python3 scripts/tests/test_gateway_target.py # shipped targets, overrides, protocol labels
 bash    scripts/tests/test_sanitizers.sh   # env var validation
 ```
 

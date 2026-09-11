@@ -41,7 +41,7 @@ services:
     environment:
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
       - DOMAIN=*.myapp.com
-      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - GATEWAY_DOMAIN=gateway.dstack-prod5.phala.network
       - CERTBOT_EMAIL=${CERTBOT_EMAIL}
       - SET_CAA=true
       - TARGET_ENDPOINT=http://app:80
@@ -109,7 +109,7 @@ services:
       DNS_PROVIDER: cloudflare
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
       CERTBOT_EMAIL: ${CERTBOT_EMAIL}
-      GATEWAY_DOMAIN: _.dstack-prod5.phala.network
+      GATEWAY_DOMAIN: gateway.dstack-prod5.phala.network
       SET_CAA: true
       DOMAINS: |
         app.example.com
@@ -158,7 +158,7 @@ environment:
 |----------|-------------|
 | `DOMAIN` | Your domain (single-domain mode). Supports wildcards (`*.example.com`) |
 | `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80` |
-| `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `_.dstack-prod5.phala.network`) |
+| `GATEWAY_DOMAIN` | Full gateway CNAME target (e.g. `gateway.dstack-prod5.phala.network`); see migration notes below |
 | `ACME_EMAIL` | *(optional)* ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See below — it is optional, and published |
 | `DNS_PROVIDER` | DNS provider (`cloudflare`, `linode`, `namecheap`) |
 
@@ -330,7 +330,7 @@ services:
       - TARGET_ENDPOINT=http://app:80
       # Printed as the CNAME target, and used to verify that the hostname
       # really resolves to the gateway before issuance starts.
-      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - GATEWAY_DOMAIN=gateway.dstack-prod5.phala.network
       # - ACME_EMAIL=you@example.com   # optional, and published (see below)
       # - DNS_SETUP_MODE=wait          # default; blocks until the records exist
     ports:
@@ -349,7 +349,7 @@ public DNS until they are visible:
   DNS records required for app.example.com
 ==========================================================================
   CNAME  app.example.com
-         -> _.dstack-prod5.phala.network
+         -> gateway.dstack-prod5.phala.network
   TXT    _dstack-app-address.app.example.com
          -> b1ea785543bbbb19ce9de33744321360992bf63b:443
   CAA    app.example.com
@@ -380,6 +380,40 @@ Two consequences:
 - **The TXT record changes when the CVM instance is replaced.** Redeploying
   means updating DNS. `DNS_SETUP_MODE=webhook` exists so this can be automated;
   doing it by hand means downtime on every redeploy.
+
+## Gateway CNAME target migration
+
+Use `gateway.<gateway-base-domain>` as the traffic CNAME target. The standalone
+underscore label in the legacy `_.<gateway-base-domain>` target is rejected by
+hostname-validating resolvers such as Android's DnsResolver.
+
+`GATEWAY_DOMAIN` is a **complete hostname** and is passed through unchanged to
+DNS provider writes, manual DNS instructions, and webhook records. The Compose
+examples and E2E default use the new hostname; an existing deployment keeps its
+configured target until its environment is updated. The generic
+`docker-compose.yaml` reads `GATEWAY_DOMAIN` from your environment. For templates
+using `DSTACK_GATEWAY_DOMAIN`, that variable contains only the gateway base domain.
+
+Roll out in this order:
+
+1. The gateway zone operator publishes `gateway.<gateway-base-domain>` pointing
+   to the same gateway addresses and verifies public resolution. Use A/AAAA
+   records or a hostname-valid CNAME chain; a CNAME back to the legacy underscore
+   hostname retains the resolver problem. Check for an existing `gateway` record
+   and confirm it serves the intended ingress addresses before reusing it.
+2. Update `GATEWAY_DOMAIN` in each deployment. DNS-01 mode reconciles the traffic
+   alias on its next pass, including the alias inside `DELEGATION_ZONE`.
+   TLS-ALPN-01 mode prints or sends the new target for the operator to publish.
+   Providers that flatten aliases resolve the new target to address records.
+3. Verify the full traffic CNAME chain and application access, including an
+   Android client, after DNS caches expire. The guide also accepts matching
+   addresses, so a successful guide check alone does not prove that the old
+   CNAME chain has been replaced.
+
+Keep the legacy gateway record available for existing clients during migration;
+retire it separately after all consumers have moved and their TTLs have elapsed.
+Keep `_acme-challenge`, `_dstack-app-address`, and other protocol TXT/delegation
+labels unchanged. Updating the examples performs no gateway-zone DNS migration.
 
 ## The ACME contact address is optional, and public
 

@@ -24,6 +24,12 @@ jobs:
           # Install yamllint
           pip install yamllint
 
+      - name: Test ingress gateway targets
+        run: |
+          pip install requests
+          python3 custom-domain/dstack-ingress/scripts/tests/test_gateway_target.py
+          python3 custom-domain/dstack-ingress/scripts/tests/test_dnsguide.py
+
       - name: Run all checks
         run: ./dev.sh check-all
 

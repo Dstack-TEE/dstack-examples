@@ -14,7 +14,7 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 ### Common Variables (Required for all providers)
 
 - `DOMAIN` - Your custom domain (e.g., `app.example.com`)
-- `GATEWAY_DOMAIN` - dstack gateway domain (e.g., `_.dstack-prod5.phala.network`)
+- `GATEWAY_DOMAIN` - dstack gateway domain (e.g., `gateway.dstack-prod5.phala.network`)
 - `CERTBOT_EMAIL` - Email for Let's Encrypt registration
 - `TARGET_ENDPOINT` - Backend application endpoint to proxy to
 - `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`)
@@ -124,7 +124,7 @@ services:
       # Common configuration
       - DNS_PROVIDER=linode
       - DOMAIN=app.example.com
-      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - GATEWAY_DOMAIN=gateway.dstack-prod5.phala.network
       - CERTBOT_EMAIL=admin@example.com
       - TARGET_ENDPOINT=http://backend:8080
 
@@ -149,7 +149,7 @@ services:
       # Common configuration
       - DNS_PROVIDER=namecheap
       - DOMAIN=app.example.com
-      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - GATEWAY_DOMAIN=gateway.dstack-prod5.phala.network
       - CERTBOT_EMAIL=admin@example.com
       - TARGET_ENDPOINT=http://backend:8080
 
@@ -177,7 +177,7 @@ services:
     environment:
       DNS_PROVIDER: route53
       DOMAIN: app.example.com
-      GATEWAY_DOMAIN: _.${DSTACK_GATEWAY_DOMAIN}
+      GATEWAY_DOMAIN: gateway.${DSTACK_GATEWAY_DOMAIN}
 
       AWS_REGION: ${AWS_REGION}
       AWS_ROLE_ARN: ${AWS_ROLE_ARN}
