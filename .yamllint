@@ -26,4 +26,4 @@ rules:
     min-spaces-from-content: 1
   
   # Allow empty values which are common in docker-compose
-  empty-values: enable
+  empty-values: disable
