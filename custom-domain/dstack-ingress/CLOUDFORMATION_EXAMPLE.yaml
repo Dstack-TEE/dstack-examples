@@ -3,7 +3,7 @@ AWSTemplateFormatVersion: '2010-09-09'
 Parameters:
   HostedZoneId:
     Type: String
-    Default: 
+    Default:
     Description: Route53 Hosted Zone ID
   UserName:
     Type: String
