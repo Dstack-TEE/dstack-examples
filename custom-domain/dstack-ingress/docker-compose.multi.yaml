@@ -7,7 +7,7 @@ services:
       DNS_PROVIDER: cloudflare
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
       CERTBOT_EMAIL: ${CERTBOT_EMAIL}
-      GATEWAY_DOMAIN: _.dstack-prod5.phala.network
+      GATEWAY_DOMAIN: gateway.dstack-prod5.phala.network
       SET_CAA: true
       DOMAINS: |
         app.example.com

@@ -41,7 +41,7 @@ services:
     environment:
       - CLOUDFLARE_API_TOKEN=${CLOUDFLARE_API_TOKEN}
       - DOMAIN=*.myapp.com
-      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - GATEWAY_DOMAIN=gateway.dstack-prod5.phala.network
       - CERTBOT_EMAIL=${CERTBOT_EMAIL}
       - SET_CAA=true
       - TARGET_ENDPOINT=http://app:80
@@ -109,7 +109,7 @@ services:
       DNS_PROVIDER: cloudflare
       CLOUDFLARE_API_TOKEN: ${CLOUDFLARE_API_TOKEN}
       CERTBOT_EMAIL: ${CERTBOT_EMAIL}
-      GATEWAY_DOMAIN: _.dstack-prod5.phala.network
+      GATEWAY_DOMAIN: gateway.dstack-prod5.phala.network
       SET_CAA: true
       DOMAINS: |
         app.example.com
@@ -158,9 +158,15 @@ environment:
 |----------|-------------|
 | `DOMAIN` | Your domain (single-domain mode). Supports wildcards (`*.example.com`) |
 | `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80` |
-| `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `_.dstack-prod5.phala.network`) |
+| `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `gateway.dstack-prod5.phala.network`) |
 | `ACME_EMAIL` | *(optional)* ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See below — it is optional, and published |
 | `DNS_PROVIDER` | DNS provider (`cloudflare`, `linode`, `namecheap`) |
+
+`GATEWAY_DOMAIN` is published as your domain's CNAME target, so its first label
+must start with a letter or digit. Android's resolver rejects a leading
+underscore in an address lookup, CNAME target included, so the older
+`_.<gateway-domain>` form resolves everywhere except Android. The label is
+otherwise arbitrary — the gateway answers every name under its domain.
 
 ### Optional
 
@@ -330,7 +336,7 @@ services:
       - TARGET_ENDPOINT=http://app:80
       # Printed as the CNAME target, and used to verify that the hostname
       # really resolves to the gateway before issuance starts.
-      - GATEWAY_DOMAIN=_.dstack-prod5.phala.network
+      - GATEWAY_DOMAIN=gateway.dstack-prod5.phala.network
       # - ACME_EMAIL=you@example.com   # optional, and published (see below)
       # - DNS_SETUP_MODE=wait          # default; blocks until the records exist
     ports:
@@ -349,7 +355,7 @@ public DNS until they are visible:
   DNS records required for app.example.com
 ==========================================================================
   CNAME  app.example.com
-         -> _.dstack-prod5.phala.network
+         -> gateway.dstack-prod5.phala.network
   TXT    _dstack-app-address.app.example.com
          -> b1ea785543bbbb19ce9de33744321360992bf63b:443
   CAA    app.example.com
