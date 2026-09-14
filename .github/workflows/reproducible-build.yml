@@ -2,6 +2,11 @@ name: Reproducible Build
 
 on:
   push:
+    # Run this tutorial workflow for branch pushes only. Without an explicit
+    # branch filter, release tag pushes from unrelated examples can evaluate
+    # this push trigger too.
+    branches:
+      - '**'
     paths:
       - 'tutorial/01a-reproducible-builds/**'
   pull_request:
