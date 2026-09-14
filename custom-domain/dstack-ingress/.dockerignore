@@ -1,0 +1,11 @@
+# Keep the build context independent of local artifacts, so untracked local
+# files can neither leak into the image nor change its digest.
+.git
+.gitignore
+.dockerignore
+.claude/
+CLAUDE.md
+test/
+oci.tar
+.pytest_cache/
+**/__pycache__/
