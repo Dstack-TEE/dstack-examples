@@ -57,7 +57,7 @@ Host my-dstack-app
     HostName <your-app-id>-22.<the-dstack-gateway-domain>
     User root
     Port 443
-    ProxyCommand openssl s_client -quiet -connect %h:%p
+    ProxyCommand openssl s_client -quiet -connect %h:%p -servername %h -verify_hostname %h -verify_return_error
 ```
 
 Change the 443 to the port of the dstack-gateway if not using the default one.
