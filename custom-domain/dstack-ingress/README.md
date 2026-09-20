@@ -321,7 +321,20 @@ Every image records where it came from, using the standard [OCI image annotation
 
 To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://docker.io/dstacktee/dstack-ingress:<tag> --owner Dstack-TEE`.
 
-Bumping the version is a source change: update `VERSION`, commit, then tag `dstack-ingress-v<version>`.
+### Releasing
+
+A release is not finished when the image is pushed. The compose files and the snippets above are what people deploy, so they have to point at the new image; 2.4 and 2.5 were tagged and published without that step, and every example kept deploying 2.3.
+
+1. Update `VERSION` and commit it. Bumping the version is a source change: the release workflow refuses to build unless the tag matches this file.
+2. Tag that commit `dstack-ingress-v<version>` and push the tag. CI builds with `--require-clean`, pushes the image, and reports the digest in the run summary and the release notes.
+3. Pin the published `<version>@sha256:<digest>` in one commit, everywhere the examples name the image:
+
+   ```bash
+   # from the repository root
+   grep -rn 'dstacktee/dstack-ingress:[0-9]' --include='*.yaml' --include='*.md' .
+   ```
+
+   Today that is `custom-domain/dstack-ingress/docker-compose.yaml`, `docker-compose.multi.yaml`, three snippets in this README, and `k3s/docker-compose.yaml`.
 
 ## License
 
