@@ -326,6 +326,8 @@ To reproduce a published image, check out the commit from its `revision` label a
 A release is not finished when the image is pushed. The compose files and the snippets above are what people deploy, so they have to point at the new image; 2.4 and 2.5 were tagged and published without that step, and every example kept deploying 2.3.
 
 1. Update `VERSION` and commit it. Bumping the version is a source change: the release workflow refuses to build unless the tag matches this file.
+
+   If the base image or the installed packages changed since the last release, run `./build-image.sh` locally first and commit the regenerated `pinned-packages.txt` in the same batch. The build refuses to publish an image whose packages that file does not record, so a stale one fails the release after a full CI build.
 2. Tag that commit `dstack-ingress-v<version>` and push the tag. CI builds with `--require-clean`, pushes the image, and reports the digest in the run summary and the release notes.
 3. Pin the published `<version>@sha256:<digest>` in one commit, everywhere the examples name the image:
 

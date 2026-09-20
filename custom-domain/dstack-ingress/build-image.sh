@@ -185,10 +185,12 @@ docker run --rm --entrypoint bash "$TEMP_TAG" \
 if cmp -s "$PACKAGES_BUILT" pinned-packages.txt; then
     echo "pinned-packages.txt matches the image ($(wc -l < pinned-packages.txt) packages)"
 else
-    if [ "$REQUIRE_CLEAN" = true ]; then
+    # Nothing that does not match its own record may leave this machine, so a
+    # mismatch is fatal whenever the image is about to be published.
+    if [ "$REQUIRE_CLEAN" = true ] || [ "$PUSH" = true ]; then
         echo "Error: the image installed a package set that pinned-packages.txt does not record:" >&2
-        diff -u pinned-packages.txt "$PACKAGES_BUILT" | tail -n +3 | head -n 40 >&2 || true
-        echo "Regenerate it with a local build, commit it, and re-tag." >&2
+        diff -u pinned-packages.txt "$PACKAGES_BUILT" | tail -n +3 >&2 || true
+        echo "Regenerate it with a local build, commit it, and build again." >&2
         exit 1
     fi
     cp "$PACKAGES_BUILT" pinned-packages.txt
