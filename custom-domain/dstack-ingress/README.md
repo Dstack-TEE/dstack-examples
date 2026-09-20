@@ -326,8 +326,10 @@ Every image records where it came from, using the standard [OCI image annotation
 | `org.opencontainers.image.source` | Repository URL (`SOURCE_URL` env when building from a fork) |
 | `org.opencontainers.image.revision` | Git commit; suffixed with `-dirty` when built from an unclean tree |
 | `org.opencontainers.image.version` | Contents of `VERSION`; the release tag `dstack-ingress-v<version>` must match |
-| `org.opencontainers.image.url` / `.documentation` | This directory / README at that exact commit |
+| `org.opencontainers.image.url` / `.documentation` | The release page, `releases/tag/dstack-ingress-v<version>` (see below) |
 | `org.opencontainers.image.base.name` / `.base.digest` | The pinned haproxy base image |
+
+`url` and `documentation` are derived from `VERSION` rather than from the commit, and that is deliberate. The examples in this repository pin the image by digest, so they can only be updated one commit *after* the one that was built — a link to the build commit's tree or README therefore always lands on a page telling the reader to deploy the previous release. The release page is the one document written after the digest is known, so it is the only one that can describe the image it ships with. Exact source stays available through `source` + `revision`.
 
 To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://ghcr.io/dstack-tee/dstack-ingress:<tag> --owner Dstack-TEE`.
 
