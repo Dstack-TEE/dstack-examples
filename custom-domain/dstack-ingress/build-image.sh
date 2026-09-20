@@ -145,8 +145,9 @@ for kv in "${METADATA[@]}"; do
 done
 
 BUILD_INFO=.BUILD_INFO
+PACKAGES_BUILT=$(mktemp)
 cleanup() {
-    rm -f "$BUILD_INFO"
+    rm -f "$BUILD_INFO" "$PACKAGES_BUILT"
     docker rmi "$TEMP_TAG" >/dev/null 2>&1 || true
 }
 TEMP_TAG="dstack-ingress-temp:$(date +%s)"
@@ -173,6 +174,30 @@ echo ""
 skopeo inspect oci-archive:./oci.tar | jq .Digest
 echo ""
 
+# pinned-packages.txt is an input to the build as well as its record: it is
+# tracked, and bind-mounted in to pin apt. Overwriting it in place would make
+# the next run of this script see a dirty tree and stamp the image -dirty, so
+# compare first and say what happened.
+echo "Checking pinned-packages.txt against the built image..."
+docker run --rm --entrypoint bash "$TEMP_TAG" \
+    -c "dpkg -l | grep '^ii' | awk '{print \$2\"=\"\$3}' | sort" > "$PACKAGES_BUILT"
+
+if cmp -s "$PACKAGES_BUILT" pinned-packages.txt; then
+    echo "pinned-packages.txt matches the image ($(wc -l < pinned-packages.txt) packages)"
+else
+    if [ "$REQUIRE_CLEAN" = true ]; then
+        echo "Error: the image installed a package set that pinned-packages.txt does not record:" >&2
+        diff -u pinned-packages.txt "$PACKAGES_BUILT" | tail -n +3 | head -n 40 >&2 || true
+        echo "Regenerate it with a local build, commit it, and re-tag." >&2
+        exit 1
+    fi
+    cp "$PACKAGES_BUILT" pinned-packages.txt
+    echo "Warning: pinned-packages.txt was out of date and has been regenerated" >&2
+    echo "         ($(wc -l < pinned-packages.txt) packages). This image was built with" >&2
+    echo "         the old pins -- commit the file and build again." >&2
+fi
+echo ""
+
 if [ "$PUSH" = true ]; then
     echo "Pushing image to $REPO..."
     skopeo copy --insecure-policy oci-archive:./oci.tar docker://"$REPO"
@@ -190,9 +215,3 @@ else
     echo " skopeo copy --insecure-policy oci-archive:./oci.tar docker://dstacktee/dstack-ingress:${VERSION} --authfile ~/.docker/config.json"
 fi
 echo ""
-
-# Extract package information from the built image
-echo "Extracting package information from built image: $TEMP_TAG"
-docker run --rm --entrypoint bash "$TEMP_TAG" -c "dpkg -l | grep '^ii' | awk '{print \$2\"=\"\$3}' | sort" > pinned-packages.txt
-
-echo "Package information extracted to pinned-packages.txt ($(wc -l < pinned-packages.txt) packages)"
