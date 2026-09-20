@@ -341,14 +341,16 @@ A release is not finished when the image is pushed. The compose files and the sn
 
    If the base image or the installed packages changed since the last release, run `./build-image.sh` locally first and commit the regenerated `pinned-packages.txt` in the same batch. The build refuses to publish an image whose packages that file does not record, so a stale one fails the release after a full CI build.
 2. Tag that commit `dstack-ingress-v<version>` and push the tag. CI builds with `--require-clean`, pushes the image, and reports the digest in the run summary and the release notes.
-3. Pin the published `<version>@sha256:<digest>` in one commit, everywhere the examples name the image:
+3. Merge the pin pull request. The release workflow opens it against the default branch as its last step, with every digest-pinned reference — `docker-compose.yaml`, `docker-compose.multi.yaml`, three snippets in this README, and `k3s/docker-compose.yaml` — set to the digest it just published.
+
+   Review it like any other: the digest in the diff must match the one in the release notes. Checks declared on `pull_request` do not start for a pull request opened with `GITHUB_TOKEN`, so its check list will be empty even though `./dev.sh check-all` ran on that tree in the release job; close and reopen it to run them.
+
+   If that job failed, do the same thing by hand:
 
    ```bash
-   # from the repository root
-   grep -rn 'dstack-ingress:[0-9]' --include='*.yaml' --include='*.md' .
+   # from anywhere in the repository
+   ./custom-domain/dstack-ingress/pin-release.sh ghcr.io/dstack-tee/dstack-ingress:<version>@sha256:<digest>
    ```
-
-   Today that is `custom-domain/dstack-ingress/docker-compose.yaml`, `docker-compose.multi.yaml`, three snippets in this README, and `k3s/docker-compose.yaml`.
 
 ## License
 
