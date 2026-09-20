@@ -24,6 +24,7 @@ usage() {
 PUSH=false
 REPO=""
 REQUIRE_CLEAN=false
+PINS_REGENERATED=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -194,6 +195,7 @@ else
         exit 1
     fi
     cp "$PACKAGES_BUILT" pinned-packages.txt
+    PINS_REGENERATED=true
     echo "Warning: pinned-packages.txt was out of date and has been regenerated" >&2
     echo "         ($(wc -l < pinned-packages.txt) packages). This image was built with" >&2
     echo "         the old pins -- commit the file and build again." >&2
@@ -204,6 +206,13 @@ if [ "$PUSH" = true ]; then
     echo "Pushing image to $REPO..."
     skopeo copy --insecure-policy oci-archive:./oci.tar docker://"$REPO"
     echo "Image pushed successfully to $REPO"
+elif [ "$PINS_REGENERATED" = true ]; then
+    # Withhold the push instructions rather than hand over a command that
+    # publishes this image: it was built with the pins that were just replaced,
+    # and the dirty check ran before that, so nothing in its labels says so.
+    echo "Not printing push instructions: ./oci.tar was built with the pins that"
+    echo "were just regenerated, and its revision label does not say so. Commit"
+    echo "pinned-packages.txt and build again to get an image worth publishing."
 else
     echo "To push the image to a registry, run:"
     echo ""
