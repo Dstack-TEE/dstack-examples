@@ -9,6 +9,16 @@
 
 set -e
 
+# Identify the build first, so the line is there even if validation below
+# fails. The same values are in the image labels and manifest annotations.
+if [ -r /etc/dstack-ingress/build-info ]; then
+    awk -F= '{ key = $1; sub(/^[^=]*=/, ""); info[key] = $0 }
+             END { print "dstack-ingress " info["org.opencontainers.image.version"] \
+                         " revision " info["org.opencontainers.image.revision"] \
+                         " source " info["org.opencontainers.image.source"] }' \
+        /etc/dstack-ingress/build-info
+fi
+
 source /scripts/functions.sh
 
 PORT=${PORT:-443}

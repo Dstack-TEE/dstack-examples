@@ -305,7 +305,44 @@ To disable the built-in evidence endpoint and serve evidence files only through 
 ./build-image.sh --push yourusername/dstack-ingress:tag
 ```
 
-The build script ensures reproducibility via pinned packages, deterministic timestamps, and specific buildkit version.
+The build script ensures reproducibility via pinned packages, deterministic timestamps, and specific buildkit version. Building the same commit from a clean checkout produces the same image digest; CI runs the same script with `--require-clean`.
+
+### Image metadata
+
+Every image records where it came from, using the standard [OCI image annotation keys](https://github.com/opencontainers/image-spec/blob/main/annotations.md). The values are derived from the git checkout only (commit, the `VERSION` file, the Dockerfile base image), so they do not disturb reproducibility. The same key/value set is written to three places:
+
+| Location | How to read it |
+|---|---|
+| Image config labels | `skopeo inspect docker://dstacktee/dstack-ingress:<tag> \| jq .Labels` or `docker inspect --format '{{json .Config.Labels}}' <image>` |
+| Image manifest annotations | `skopeo inspect --raw docker://dstacktee/dstack-ingress:<tag> \| jq .annotations` |
+| `/etc/dstack-ingress/build-info` inside the image | `docker run --rm --entrypoint cat <image> /etc/dstack-ingress/build-info`; also printed as the first line of the container log |
+
+| Key | Value |
+|---|---|
+| `org.opencontainers.image.source` | Repository URL (`SOURCE_URL` env when building from a fork) |
+| `org.opencontainers.image.revision` | Git commit; suffixed with `-dirty` when built from an unclean tree |
+| `org.opencontainers.image.version` | Contents of `VERSION`; the release tag `dstack-ingress-v<version>` must match |
+| `org.opencontainers.image.url` / `.documentation` | This directory / README at that exact commit |
+| `org.opencontainers.image.base.name` / `.base.digest` | The pinned haproxy base image |
+
+To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://docker.io/dstacktee/dstack-ingress:<tag> --owner Dstack-TEE`.
+
+### Releasing
+
+A release is not finished when the image is pushed. The compose files and the snippets above are what people deploy, so they have to point at the new image; 2.4 and 2.5 were tagged and published without that step, and every example kept deploying 2.3.
+
+1. Update `VERSION` and commit it. Bumping the version is a source change: the release workflow refuses to build unless the tag matches this file.
+
+   If the base image or the installed packages changed since the last release, run `./build-image.sh` locally first and commit the regenerated `pinned-packages.txt` in the same batch. The build refuses to publish an image whose packages that file does not record, so a stale one fails the release after a full CI build.
+2. Tag that commit `dstack-ingress-v<version>` and push the tag. CI builds with `--require-clean`, pushes the image, and reports the digest in the run summary and the release notes.
+3. Pin the published `<version>@sha256:<digest>` in one commit, everywhere the examples name the image:
+
+   ```bash
+   # from the repository root
+   grep -rn 'dstacktee/dstack-ingress:[0-9]' --include='*.yaml' --include='*.md' .
+   ```
+
+   Today that is `custom-domain/dstack-ingress/docker-compose.yaml`, `docker-compose.multi.yaml`, three snippets in this README, and `k3s/docker-compose.yaml`.
 
 ## License
 

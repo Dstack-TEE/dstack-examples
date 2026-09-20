@@ -1,0 +1,16 @@
+# The image needs exactly four things from this directory, so everything else
+# is excluded by default: an untracked local file can then neither leak into
+# the image nor change its digest. Enumerating junk instead would be a trap --
+# a tool's cache directory often carries its own .gitignore, so git reports a
+# clean tree and the --require-clean check in build-image.sh cannot see it.
+*
+!.BUILD_INFO
+!pinned-packages.txt
+!requirements.txt
+!scripts/
+
+# scripts/ comes back wholesale, so keep the same caches out of it: the dot
+# directories the Python tooling writes (pytest, mypy, ruff, coverage) and
+# __pycache__, which is the one that does not start with a dot.
+scripts/**/.*
+scripts/**/__pycache__
