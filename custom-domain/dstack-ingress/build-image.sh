@@ -222,7 +222,7 @@ else
     echo ""
     echo " skopeo copy --insecure-policy oci-archive:./oci.tar docker://<repo>[:<tag>]"
     echo ""
-    echo " Pushing image to dstacktee org:"
-    echo " skopeo copy --insecure-policy oci-archive:./oci.tar docker://dstacktee/dstack-ingress:${VERSION} --authfile ~/.docker/config.json"
+    echo " Pushing image to the project registry:"
+    echo " skopeo copy --insecure-policy oci-archive:./oci.tar docker://ghcr.io/dstack-tee/dstack-ingress:${VERSION} --authfile ~/.docker/config.json"
 fi
 echo ""

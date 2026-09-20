@@ -18,8 +18,7 @@ jobs:
       run:
         working-directory: custom-domain/dstack-ingress
     env:
-      IMAGE_REGISTRY: docker.io
-      IMAGE_REPOSITORY: ${{ vars.DOCKERHUB_ORG }}/dstack-ingress
+      IMAGE_REGISTRY: ghcr.io
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -49,7 +48,11 @@ jobs:
               exit 1
               ;;
           esac
+          # GHCR rejects an uppercase path, and the owner is spelled
+          # Dstack-TEE, so derive the repository rather than hardcode it.
+          IMAGE_REPOSITORY=$(printf '%s/dstack-ingress' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+          echo "IMAGE_REPOSITORY=${IMAGE_REPOSITORY}" >> "$GITHUB_ENV"
           echo "IMAGE_REFERENCE=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${VERSION}" >> "$GITHUB_ENV"
           echo "Parsed version: ${VERSION}"
 
@@ -58,12 +61,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y skopeo jq
 
-      - name: Log in to Docker registry
+      - name: Log in to the container registry
         uses: docker/login-action@v3
         with:
           registry: ${{ env.IMAGE_REGISTRY }}
-          username: ${{ vars.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build reproducible image and push
         env:
@@ -84,7 +87,7 @@ jobs:
       - name: Generate artifact attestation
         uses: actions/attest-build-provenance@v1
         with:
-          subject-name: docker.io/${{ env.IMAGE_REPOSITORY }}
+          subject-name: ${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_REPOSITORY }}
           subject-digest: ${{ steps.capture-digest.outputs.digest }}
           push-to-registry: true
 
