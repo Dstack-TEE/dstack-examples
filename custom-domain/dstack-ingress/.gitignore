@@ -2,5 +2,6 @@
 /CLAUDE.md
 /test/
 __pycache__
+.pytest_cache
 /oci.tar
 /.BUILD_INFO
