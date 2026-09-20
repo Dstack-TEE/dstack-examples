@@ -95,8 +95,21 @@ if [ -n "$DIRTY" ]; then
     GIT_REV="${GIT_REV}-dirty"
 fi
 
-# Base image, kept in sync with the Dockerfile FROM line.
-BASE_REF="$(sed -n 's/^FROM[[:space:]][[:space:]]*\([^[:space:]][^[:space:]]*\).*/\1/p' Dockerfile | head -n1)"
+# Base image, kept in sync with the Dockerfile FROM line. The labels below are
+# what someone else checks the supply chain against, so a second FROM -- a
+# builder stage, say -- must not silently relabel the image after the wrong
+# one. Fail instead, and whoever adds the stage picks the right base.
+BASE_REFS=$(sed -n 's/^FROM[[:space:]][[:space:]]*\([^[:space:]][^[:space:]]*\).*/\1/p' Dockerfile)
+BASE_REF_COUNT=$(printf '%s\n' "$BASE_REFS" | grep -c . || true)
+if [ "$BASE_REF_COUNT" -ne 1 ]; then
+    echo "Error: expected exactly one FROM in the Dockerfile, found ${BASE_REF_COUNT}" >&2
+    if [ -n "$BASE_REFS" ]; then
+        printf '%s\n' "$BASE_REFS" | sed 's/^/  /' >&2
+    fi
+    echo "Teach this script which one the final image is built on." >&2
+    exit 1
+fi
+BASE_REF="$BASE_REFS"
 BASE_NAME="${BASE_REF%%@*}"
 BASE_DIGEST="${BASE_REF#*@}"
 case "$BASE_NAME" in
