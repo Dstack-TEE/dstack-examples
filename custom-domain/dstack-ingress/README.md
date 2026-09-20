@@ -307,14 +307,18 @@ To disable the built-in evidence endpoint and serve evidence files only through 
 
 The build script ensures reproducibility via pinned packages, deterministic timestamps, and specific buildkit version. Building the same commit from a clean checkout produces the same image digest; CI runs the same script with `--require-clean`.
 
+### Where the images live
+
+Releases from 2.6 on are published to `ghcr.io/dstack-tee/dstack-ingress`, using the workflow's own `GITHUB_TOKEN`. 2.5 and earlier are on Docker Hub as `dstacktee/dstack-ingress` and stay there; they are not being mirrored.
+
 ### Image metadata
 
 Every image records where it came from, using the standard [OCI image annotation keys](https://github.com/opencontainers/image-spec/blob/main/annotations.md). The values are derived from the git checkout only (commit, the `VERSION` file, the Dockerfile base image), so they do not disturb reproducibility. The same key/value set is written to three places:
 
 | Location | How to read it |
 |---|---|
-| Image config labels | `skopeo inspect docker://dstacktee/dstack-ingress:<tag> \| jq .Labels` or `docker inspect --format '{{json .Config.Labels}}' <image>` |
-| Image manifest annotations | `skopeo inspect --raw docker://dstacktee/dstack-ingress:<tag> \| jq .annotations` |
+| Image config labels | `skopeo inspect docker://ghcr.io/dstack-tee/dstack-ingress:<tag> \| jq .Labels` or `docker inspect --format '{{json .Config.Labels}}' <image>` |
+| Image manifest annotations | `skopeo inspect --raw docker://ghcr.io/dstack-tee/dstack-ingress:<tag> \| jq .annotations` |
 | `/etc/dstack-ingress/build-info` inside the image | `docker run --rm --entrypoint cat <image> /etc/dstack-ingress/build-info`; also printed as the first line of the container log |
 
 | Key | Value |
@@ -325,7 +329,7 @@ Every image records where it came from, using the standard [OCI image annotation
 | `org.opencontainers.image.url` / `.documentation` | This directory / README at that exact commit |
 | `org.opencontainers.image.base.name` / `.base.digest` | The pinned haproxy base image |
 
-To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://docker.io/dstacktee/dstack-ingress:<tag> --owner Dstack-TEE`.
+To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://ghcr.io/dstack-tee/dstack-ingress:<tag> --owner Dstack-TEE`.
 
 ### Releasing
 
@@ -339,7 +343,7 @@ A release is not finished when the image is pushed. The compose files and the sn
 
    ```bash
    # from the repository root
-   grep -rn 'dstacktee/dstack-ingress:[0-9]' --include='*.yaml' --include='*.md' .
+   grep -rn 'dstack-ingress:[0-9]' --include='*.yaml' --include='*.md' .
    ```
 
    Today that is `custom-domain/dstack-ingress/docker-compose.yaml`, `docker-compose.multi.yaml`, three snippets in this README, and `k3s/docker-compose.yaml`.
@@ -366,7 +370,7 @@ at the cost of you creating three records by hand (or via a webhook).
 ```yaml
 services:
   dstack-ingress:
-    image: dstacktee/dstack-ingress:<tag>
+    image: ghcr.io/dstack-tee/dstack-ingress:<tag>
     environment:
       - CHALLENGE_TYPE=tls-alpn-01
       - DOMAIN=app.example.com
