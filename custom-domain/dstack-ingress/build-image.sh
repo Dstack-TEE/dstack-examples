@@ -69,13 +69,11 @@ cd "$(dirname "$0")"
 
 # ---------------------------------------------------------------------------
 # Source metadata. Every value below is a function of the checked-out commit
-# (plus SOURCE_URL for forks), so a rebuild of the same commit yields the same
-# labels and therefore the same digest.
+# and the committed VERSION file (plus SOURCE_URL for forks), so a rebuild of
+# the same commit yields the same labels and therefore the same digest.
 # ---------------------------------------------------------------------------
 SOURCE_URL="${SOURCE_URL:-https://github.com/Dstack-TEE/dstack-examples}"
 SOURCE_URL="${SOURCE_URL%/}"
-SUBDIR="$(git rev-parse --show-prefix)"
-SUBDIR="${SUBDIR%/}"
 GIT_REV="$(git rev-parse HEAD)"
 VERSION="$(tr -d '[:space:]' < VERSION)"
 if [ -z "$VERSION" ]; then
@@ -129,8 +127,16 @@ METADATA=(
     "org.opencontainers.image.source=${SOURCE_URL}"
     "org.opencontainers.image.revision=${GIT_REV}"
     "org.opencontainers.image.version=${VERSION}"
-    "org.opencontainers.image.url=${SOURCE_URL}/tree/${GIT_REV%-dirty}/${SUBDIR}"
-    "org.opencontainers.image.documentation=${SOURCE_URL}/blob/${GIT_REV%-dirty}/${SUBDIR}/README.md"
+    # Version-derived, not commit-derived, and deliberately so. The examples
+    # in the tree pin the image by digest, so they can only be updated after
+    # the digest exists -- one commit later than the one being built. A link
+    # to this commit's tree or README therefore always lands on a page that
+    # tells the reader to deploy the previous release. The release page is
+    # the one document written after the digest is known, so it is the only
+    # one that can describe this image. Both inputs (SOURCE_URL, VERSION) are
+    # already build inputs, so the digest stays reproducible.
+    "org.opencontainers.image.url=${SOURCE_URL}/releases/tag/dstack-ingress-v${VERSION}"
+    "org.opencontainers.image.documentation=${SOURCE_URL}/releases/tag/dstack-ingress-v${VERSION}"
     "org.opencontainers.image.licenses=MIT"
     "org.opencontainers.image.base.name=${BASE_NAME}"
     "org.opencontainers.image.base.digest=${BASE_DIGEST}"

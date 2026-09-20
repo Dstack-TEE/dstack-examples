@@ -326,8 +326,10 @@ Every image records where it came from, using the standard [OCI image annotation
 | `org.opencontainers.image.source` | Repository URL (`SOURCE_URL` env when building from a fork) |
 | `org.opencontainers.image.revision` | Git commit; suffixed with `-dirty` when built from an unclean tree |
 | `org.opencontainers.image.version` | Contents of `VERSION`; the release tag `dstack-ingress-v<version>` must match |
-| `org.opencontainers.image.url` / `.documentation` | This directory / README at that exact commit |
+| `org.opencontainers.image.url` / `.documentation` | The release page, `releases/tag/dstack-ingress-v<version>` (see below) |
 | `org.opencontainers.image.base.name` / `.base.digest` | The pinned haproxy base image |
+
+`url` and `documentation` are derived from `VERSION` rather than from the commit, and that is deliberate. The examples in this repository pin the image by digest, so they can only be updated one commit *after* the one that was built — a link to the build commit's tree or README therefore always lands on a page telling the reader to deploy the previous release. The release page is the one document written after the digest is known, so it is the only one that can describe the image it ships with. Exact source stays available through `source` + `revision`.
 
 To reproduce a published image, check out the commit from its `revision` label and run `./build-image.sh` on a native Linux amd64 host with Docker Buildx, Skopeo, jq and Git installed; the digest printed at the end must match the registry. Releases are additionally signed with SLSA provenance, verifiable with `gh attestation verify oci://ghcr.io/dstack-tee/dstack-ingress:<tag> --owner Dstack-TEE`.
 
@@ -339,14 +341,16 @@ A release is not finished when the image is pushed. The compose files and the sn
 
    If the base image or the installed packages changed since the last release, run `./build-image.sh` locally first and commit the regenerated `pinned-packages.txt` in the same batch. The build refuses to publish an image whose packages that file does not record, so a stale one fails the release after a full CI build.
 2. Tag that commit `dstack-ingress-v<version>` and push the tag. CI builds with `--require-clean`, pushes the image, and reports the digest in the run summary and the release notes.
-3. Pin the published `<version>@sha256:<digest>` in one commit, everywhere the examples name the image:
+3. Merge the pin pull request. The release workflow opens it against the default branch as its last step, with every digest-pinned reference — `docker-compose.yaml`, `docker-compose.multi.yaml`, three snippets in this README, and `k3s/docker-compose.yaml` — set to the digest it just published.
+
+   Review it like any other: the digest in the diff must match the one in the release notes. Checks declared on `pull_request` do not start for a pull request opened with `GITHUB_TOKEN`, so its check list will be empty even though `./dev.sh check-all` ran on that tree in the release job; close and reopen it to run them.
+
+   If that job failed, do the same thing by hand:
 
    ```bash
-   # from the repository root
-   grep -rn 'dstack-ingress:[0-9]' --include='*.yaml' --include='*.md' .
+   # from anywhere in the repository
+   ./custom-domain/dstack-ingress/pin-release.sh ghcr.io/dstack-tee/dstack-ingress:<version>@sha256:<digest>
    ```
-
-   Today that is `custom-domain/dstack-ingress/docker-compose.yaml`, `docker-compose.multi.yaml`, three snippets in this README, and `k3s/docker-compose.yaml`.
 
 ## License
 

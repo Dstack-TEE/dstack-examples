@@ -19,11 +19,15 @@ jobs:
         working-directory: custom-domain/dstack-ingress
     env:
       IMAGE_REGISTRY: ghcr.io
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      pinned-reference: ${{ steps.version.outputs.image-reference }}@${{ steps.capture-digest.outputs.digest }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Parse and check version
+        id: version
         run: |
           # The image records its version from the committed VERSION file, so
           # that a plain checkout reproduces the digest. The release tag only
@@ -51,9 +55,12 @@ jobs:
           # GHCR rejects an uppercase path, and the owner is spelled
           # Dstack-TEE, so derive the repository rather than hardcode it.
           IMAGE_REPOSITORY=$(printf '%s/dstack-ingress' "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_REFERENCE="${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${VERSION}"
           echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
           echo "IMAGE_REPOSITORY=${IMAGE_REPOSITORY}" >> "$GITHUB_ENV"
-          echo "IMAGE_REFERENCE=${IMAGE_REGISTRY}/${IMAGE_REPOSITORY}:${VERSION}" >> "$GITHUB_ENV"
+          echo "IMAGE_REFERENCE=${IMAGE_REFERENCE}" >> "$GITHUB_ENV"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "image-reference=${IMAGE_REFERENCE}" >> "$GITHUB_OUTPUT"
           echo "Parsed version: ${VERSION}"
 
       - name: Install dependencies
@@ -137,3 +144,97 @@ jobs:
             ```
 
             Expected digest: `${{ steps.capture-digest.outputs.digest }}`
+
+  # Pinning the published digest into the examples is the step that gets
+  # forgotten: 2.4 and 2.5 were both tagged and published without it, so every
+  # compose file and README snippet in the repository kept deploying 2.3. Open
+  # the pull request here, while the digest is in hand.
+  pin-digest:
+    needs: build-and-attest
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      VERSION: ${{ needs.build-and-attest.outputs.version }}
+      PINNED_REFERENCE: ${{ needs.build-and-attest.outputs.pinned-reference }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@v4
+        with:
+          # Not the tag: the pull request has to target the branch, and the
+          # branch may already have moved past the commit that was built.
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Pin the published digest
+        id: pin
+        run: |
+          ./custom-domain/dstack-ingress/pin-release.sh "${PINNED_REFERENCE}"
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check the pinned tree
+        if: steps.pin.outputs.changed == 'true'
+        run: ./dev.sh check-all
+
+      - name: Open the pull request
+        if: steps.pin.outputs.changed == 'true'
+        run: |
+          BRANCH="chore/pin-ingress-${VERSION}"
+          TITLE="chore(ingress): pin dstack-ingress ${VERSION} digest from the release build"
+
+          cat > /tmp/commit-message <<EOF
+          ${TITLE}
+
+          Published by the dstack-ingress-v${VERSION} release run from
+          ${GITHUB_SHA}. Opened automatically: a release is not finished until
+          the examples point at what it published.
+          EOF
+
+          cat > /tmp/pr-body <<EOF
+          Step 3 of the release, opened by the \`dstack-ingress-v${VERSION}\` release run.
+          Until it lands, every example in this repository still deploys the previous
+          release -- which is how 2.4 and 2.5 both shipped.
+
+          Every digest-pinned reference now reads:
+
+          \`\`\`text
+          ${PINNED_REFERENCE}
+          \`\`\`
+
+          \`./dev.sh check-all\` passed on this tree in the release run. GitHub does not
+          start \`pull_request\` workflows for a pull request opened with \`GITHUB_TOKEN\`,
+          so the check list below will be empty; close and reopen this pull request to
+          run them for real.
+
+          To verify the digest independently, on a native linux/amd64 host:
+
+          \`\`\`bash
+          git checkout dstack-ingress-v${VERSION}
+          cd custom-domain/dstack-ingress
+          ./build-image.sh
+          skopeo inspect oci-archive:./oci.tar | jq -r '.Digest'
+          \`\`\`
+          EOF
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "${BRANCH}"
+          git commit -a -F /tmp/commit-message
+          git push --force origin "${BRANCH}"
+
+          if [ -n "$(gh pr list --head "${BRANCH}" --state open --json number --jq '.[].number')" ]; then
+            echo "A pull request for ${BRANCH} is already open; pushed to it."
+            exit 0
+          fi
+
+          gh pr create \
+            --base "${DEFAULT_BRANCH}" \
+            --head "${BRANCH}" \
+            --title "${TITLE}" \
+            --body-file /tmp/pr-body
