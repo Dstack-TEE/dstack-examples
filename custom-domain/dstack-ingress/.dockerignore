@@ -9,6 +9,8 @@
 !requirements.txt
 !scripts/
 
-# Caches that appear inside scripts/ once the tests are run locally.
-**/__pycache__/
-**/.pytest_cache/
+# scripts/ comes back wholesale, so keep the same caches out of it: the dot
+# directories the Python tooling writes (pytest, mypy, ruff, coverage) and
+# __pycache__, which is the one that does not start with a dot.
+scripts/**/.*
+scripts/**/__pycache__
