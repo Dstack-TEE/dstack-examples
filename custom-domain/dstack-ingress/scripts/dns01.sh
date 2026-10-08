@@ -407,7 +407,7 @@ run_pass
 build_combined_pems
 
 haproxy_emit_global
-haproxy_emit_tls_frontend ":${PORT}"
+haproxy_emit_tls_frontend ":${PORT}$(haproxy_accept_proxy)"
 haproxy_emit_backends
 
 evidence_start_server

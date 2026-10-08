@@ -44,6 +44,17 @@ defaults
 EOF
 }
 
+# The PROXY protocol, opt-in at each end. The public bind takes it when the dstack
+# gateway prepends the client's address (the app's port_policy sets pp for
+# PORT); every connection must then carry it. The backends get it, v2, when they
+# read it. Either way the client's address, not the gateway's, is the one used.
+haproxy_accept_proxy() {
+    if [ "${ACCEPT_PROXY_PROTOCOL:-false}" = "true" ]; then printf ' accept-proxy'; fi
+}
+haproxy_send_proxy() {
+    if [ "${SEND_PROXY_PROTOCOL:-false}" = "true" ]; then printf ' send-proxy-v2'; fi
+}
+
 # The TLS-terminating frontend. $1 is the bind spec -- the one part the modes
 # disagree about.
 haproxy_emit_tls_frontend() {
@@ -97,7 +108,7 @@ haproxy_emit_backends_single() {
     default_backend be_upstream
 
 backend be_upstream
-    server app1 ${target_hostport}
+    server app1 ${target_hostport}$(haproxy_send_proxy)
 EOF
 }
 
@@ -147,7 +158,7 @@ haproxy_emit_backends_multi() {
         backend_sections="${backend_sections}
 
 backend ${be_name}
-    server s1 ${target}"
+    server s1 ${target}$(haproxy_send_proxy)"
     done <<< "$routing_map_normalized"
 
     echo "$backend_rules" >> /etc/haproxy/haproxy.cfg

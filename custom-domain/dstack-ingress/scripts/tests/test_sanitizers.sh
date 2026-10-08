@@ -67,6 +67,8 @@ assert_equal "$(sanitize_alpn 'h2,http/1.1')" "h2,http/1.1" "sanitize_alpn accep
 assert_equal "$(sanitize_alpn 'h2')" "h2" "sanitize_alpn accepts h2"
 assert_equal "$(sanitize_alpn 'http/1.1')" "http/1.1" "sanitize_alpn accepts http/1.1"
 assert_equal "$(sanitize_alpn '')" "" "sanitize_alpn accepts empty"
+assert_equal "$(sanitize_boolean true FLAG)" "true" "sanitize_boolean accepts true"
+assert_equal "$(sanitize_boolean false FLAG)" "false" "sanitize_boolean accepts false"
 
 # Failing cases
 assert_fails "sanitize_port rejects non-numeric" sanitize_port abc
@@ -108,6 +110,8 @@ assert_fails "sanitize_haproxy_timeout rejects bare number" sanitize_haproxy_tim
 assert_fails "sanitize_alpn rejects semicolons" sanitize_alpn "h2;drop"
 assert_fails "sanitize_alpn rejects newlines" sanitize_alpn $'h2\nhttp/1.1'
 assert_fails "sanitize_alpn rejects spaces" sanitize_alpn "h2, http/1.1"
+assert_fails "sanitize_boolean rejects yes" sanitize_boolean yes FLAG
+assert_fails "sanitize_boolean rejects empty" sanitize_boolean "" FLAG
 
 if [[ $failures -eq 0 ]]; then
     echo "All sanitizer tests passed"

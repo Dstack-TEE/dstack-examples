@@ -111,6 +111,18 @@ sanitize_alpn() {
     fi
 }
 
+sanitize_boolean() {
+    local candidate="$1"
+    local name="$2"
+    case "$candidate" in
+        true|false) echo "$candidate" ;;
+        *)
+            echo "Error: $name must be true or false: $candidate" >&2
+            return 1
+            ;;
+    esac
+}
+
 sanitize_proxy_timeout() {
     local candidate="$1"
     if [ -z "$candidate" ]; then
