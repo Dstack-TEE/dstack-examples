@@ -30,6 +30,8 @@ TIMEOUT_SERVER=${TIMEOUT_SERVER:-86400s}
 EVIDENCE_SERVER=${EVIDENCE_SERVER:-true}
 EVIDENCE_PORT=${EVIDENCE_PORT:-80}
 ALPN=${ALPN:-}
+ACCEPT_PROXY_PROTOCOL=${ACCEPT_PROXY_PROTOCOL:-false}
+SEND_PROXY_PROTOCOL=${SEND_PROXY_PROTOCOL:-false}
 CHALLENGE_TYPE=${CHALLENGE_TYPE:-dns-01}
 
 # ACME account settings, normalised once for both modes. What you are
@@ -83,6 +85,12 @@ fi
 if ! ALPN=$(sanitize_alpn "$ALPN"); then
     exit 1
 fi
+if ! ACCEPT_PROXY_PROTOCOL=$(sanitize_boolean "$ACCEPT_PROXY_PROTOCOL" "ACCEPT_PROXY_PROTOCOL"); then
+    exit 1
+fi
+if ! SEND_PROXY_PROTOCOL=$(sanitize_boolean "$SEND_PROXY_PROTOCOL" "SEND_PROXY_PROTOCOL"); then
+    exit 1
+fi
 
 # Warn about deprecated L7 env vars
 for var in CLIENT_MAX_BODY_SIZE PROXY_READ_TIMEOUT PROXY_SEND_TIMEOUT PROXY_CONNECT_TIMEOUT PROXY_BUFFER_SIZE PROXY_BUFFERS PROXY_BUSY_BUFFERS_SIZE; do
@@ -90,11 +98,15 @@ for var in CLIENT_MAX_BODY_SIZE PROXY_READ_TIMEOUT PROXY_SEND_TIMEOUT PROXY_CONN
         echo "Warning: $var is ignored in TCP proxy mode"
     fi
 done
+if [ "$SEND_PROXY_PROTOCOL" = "true" ] && [ "$ACCEPT_PROXY_PROTOCOL" != "true" ]; then
+    echo "Warning: SEND_PROXY_PROTOCOL without ACCEPT_PROXY_PROTOCOL passes the gateway's address, not the client's"
+fi
 
 # Everything from here on belongs to one mode. Exported so the mode script and
 # the helpers it invokes see the sanitized values.
 export PORT DOMAIN DOMAINS TARGET_ENDPOINT ROUTING_MAP TXT_PREFIX MAXCONN
 export TIMEOUT_CONNECT TIMEOUT_CLIENT TIMEOUT_SERVER EVIDENCE_SERVER EVIDENCE_PORT ALPN
+export ACCEPT_PROXY_PROTOCOL SEND_PROXY_PROTOCOL
 export ACME_EMAIL ACME_STAGING
 
 case "$CHALLENGE_TYPE" in

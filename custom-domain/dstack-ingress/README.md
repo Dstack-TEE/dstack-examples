@@ -197,6 +197,8 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
+| `ACCEPT_PROXY_PROTOCOL` | `false` | Read the client's address from a PROXY protocol header (v1 or v2) on every connection to `PORT`, as the dstack gateway sends when the app's `port_policy` sets `pp` for it. A connection without one is refused. See [Client address](#client-address-proxy-protocol) |
+| `SEND_PROXY_PROTOCOL` | `false` | Pass the client's address to the backends (`TARGET_ENDPOINT`, `ROUTING_MAP`) with PROXY protocol v2. Only for backends that read it |
 | `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below) |
 | `DELEGATION_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. The certbot run timeout is sized from this, so raising it is safe |
 | `CERTBOT_TIMEOUT` | propagation wait + 180s, never below 300s | Seconds a single certbot run may take. The default is derived from the provider's propagation wait (or `DELEGATION_PROPAGATION_SECONDS`), which is what dominates it. Set this only if a run needs longer still; an explicit value is used as given, floor included |
@@ -274,6 +276,28 @@ them correctly. `wait` (the default) blocks until they appear, so you can
 start the container and create the records afterwards; `print` lists them and
 continues without checking; `webhook` POSTs them to `DNS_WEBHOOK_URL` for an
 operator service to create automatically.
+
+## Client address (PROXY protocol)
+
+The gateway relays TCP, so haproxy sees each connection come from the gateway, and the backend sees it come from
+haproxy. To give the backend the client's address instead (requires dstack-gateway 0.5.9 or later):
+
+1. Have the gateway send it: in the app compose, set `"port_policy": {"ports": [{"port": <PORT>, "pp": true}]}`,
+   with `PORT` as configured for this container (on Phala Cloud, the port policy's "Proxy protocol (pp)" switch).
+   Guest OS 0.5.9+ reports the policy when the CVM registers with the gateway; older images need `public_tcbinfo`
+   on so the gateway can read it from the TCB info.
+2. Set `ACCEPT_PROXY_PROTOCOL=true`, so haproxy reads that header. Change both in the same deployment: a header
+   haproxy does not expect, or one it expects and does not get, fails every connection. This includes anything
+   that reaches `PORT` without the gateway, such as a host port mapping or another container in the CVM.
+3. Set `SEND_PROXY_PROTOCOL=true`, and have the backend accept PROXY protocol v2 from haproxy only, for example
+   Caddy's `proxy_protocol` listener wrapper or nginx's `listen ... proxy_protocol` with `set_real_ip_from`. With
+   `ROUTING_MAP`, this applies to every backend.
+
+In tls-alpn-01 mode the address also survives the hop to the TLS frontend on loopback, which already uses the PROXY
+protocol internally. The ACME responder never sees the header.
+
+If the gateway itself sits behind an L4 load balancer, the gateway operator must enable `inbound_pp_enabled` on it
+(and PROXY protocol on the load balancer), or the address passed on is the load balancer's.
 
 ## Evidence & Attestation
 

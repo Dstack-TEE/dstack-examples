@@ -335,6 +335,12 @@ python3 scripts/tests/test_dnsguide.py     # DNS/CAA parsing and record building
 bash    scripts/tests/test_sanitizers.sh   # env var validation
 ```
 
+Against a built image:
+
+```bash
+bash scripts/tests/test_proxy_protocol.sh <image>     # ACCEPT_/SEND_PROXY_PROTOCOL end to end
+```
+
 The parsing tests are built from rdata real resolvers actually returned, in both
 encodings. When you touch DNS handling, add the real string you saw rather than
 one you composed — the encodings are the part that surprises people.

@@ -121,7 +121,7 @@ txt_record_value() { echo "${DSTACK_INSTANCE_ID}:${PORT}"; }
 emit_peek_frontend() {
     cat <<EOF >>/etc/haproxy/haproxy.cfg
 frontend tls_peek
-    bind :${PORT}
+    bind :${PORT}$(haproxy_accept_proxy)
     tcp-request inspect-delay 5s
     tcp-request content accept if { req.ssl_hello_type 1 }
     # Only the CA sends this ALPN protocol. A client that sends it anyway just
