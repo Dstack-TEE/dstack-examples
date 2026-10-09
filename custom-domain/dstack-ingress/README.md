@@ -280,18 +280,24 @@ operator service to create automatically.
 ## Client address (PROXY protocol)
 
 The gateway relays TCP, so haproxy sees each connection come from the gateway, and the backend sees it come from
-haproxy. To give the backend the client's address instead:
+haproxy. To give the backend the client's address instead (requires dstack-gateway 0.5.9 or later):
 
-1. Have the gateway send it: in the app compose, a `port_policy` with `{"port": 443, "pp": true}` (on Phala Cloud,
-   the port policy's "Proxy protocol (pp)" switch). The gateway reads the policy from the CVM's TCB info, so
-   `public_tcbinfo` must be on.
+1. Have the gateway send it: in the app compose, set `"port_policy": {"ports": [{"port": <PORT>, "pp": true}]}`,
+   with `PORT` as configured for this container (on Phala Cloud, the port policy's "Proxy protocol (pp)" switch).
+   Guest OS 0.5.9+ reports the policy when the CVM registers with the gateway; older images need `public_tcbinfo`
+   on so the gateway can read it from the TCB info.
 2. Set `ACCEPT_PROXY_PROTOCOL=true`, so haproxy reads that header. Change both in the same deployment: a header
-   haproxy does not expect, or one it expects and does not get, fails every connection.
+   haproxy does not expect, or one it expects and does not get, fails every connection. This includes anything
+   that reaches `PORT` without the gateway, such as a host port mapping or another container in the CVM.
 3. Set `SEND_PROXY_PROTOCOL=true`, and have the backend accept PROXY protocol v2 from haproxy only, for example
-   Caddy's `proxy_protocol` listener wrapper or nginx's `listen ... proxy_protocol` with `set_real_ip_from`.
+   Caddy's `proxy_protocol` listener wrapper or nginx's `listen ... proxy_protocol` with `set_real_ip_from`. With
+   `ROUTING_MAP`, this applies to every backend.
 
 In tls-alpn-01 mode the address also survives the hop to the TLS frontend on loopback, which already uses the PROXY
 protocol internally. The ACME responder never sees the header.
+
+If the gateway itself sits behind an L4 load balancer, the gateway operator must enable `inbound_pp_enabled` on it
+(and PROXY protocol on the load balancer), or the address passed on is the load balancer's.
 
 ## Evidence & Attestation
 

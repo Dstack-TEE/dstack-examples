@@ -57,12 +57,17 @@ docker run -d --rm --name "${CONTAINER}" --entrypoint bash "${IMAGE}" -c '
 import socket, struct
 srv = socket.socket(); srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("127.0.0.1", 25080)); srv.listen()
+def recv_exact(conn, n):
+    buf = b""
+    while len(buf) < n and (chunk := conn.recv(n - len(buf))):
+        buf += chunk
+    return buf
 while True:
     conn, _ = srv.accept()
-    head = conn.recv(16)
+    head = recv_exact(conn, 16)
     if head[:12] != b"\r\n\r\n\x00\r\nQUIT\n":
         conn.sendall(b"src=none"); conn.close(); continue
-    body = conn.recv(struct.unpack("!H", head[14:16])[0])
+    body = recv_exact(conn, struct.unpack("!H", head[14:16])[0])
     conn.sendall(("src=" + socket.inet_ntoa(body[:4])).encode()); conn.close()
 PY
 

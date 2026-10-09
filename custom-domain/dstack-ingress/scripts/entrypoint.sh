@@ -98,6 +98,9 @@ for var in CLIENT_MAX_BODY_SIZE PROXY_READ_TIMEOUT PROXY_SEND_TIMEOUT PROXY_CONN
         echo "Warning: $var is ignored in TCP proxy mode"
     fi
 done
+if [ "$SEND_PROXY_PROTOCOL" = "true" ] && [ "$ACCEPT_PROXY_PROTOCOL" != "true" ]; then
+    echo "Warning: SEND_PROXY_PROTOCOL without ACCEPT_PROXY_PROTOCOL passes the gateway's address, not the client's"
+fi
 
 # Everything from here on belongs to one mode. Exported so the mode script and
 # the helpers it invokes see the sanitized values.

@@ -44,10 +44,8 @@ defaults
 EOF
 }
 
-# The PROXY protocol, opt-in at each end. The public bind takes it when the dstack
-# gateway prepends the client's address (the app's port_policy sets pp for
-# PORT); every connection must then carry it. The backends get it, v2, when they
-# read it. Either way the client's address, not the gateway's, is the one used.
+# PROXY protocol, opt-in at each end: accept it from the gateway on the public
+# bind, send it (v2) to the app backends.
 haproxy_accept_proxy() {
     if [ "${ACCEPT_PROXY_PROTOCOL:-false}" = "true" ]; then printf ' accept-proxy'; fi
 }
