@@ -1,1 +1,18 @@
+
 *~
+.claude/
+
+# consul-postgres-ha — compiled Go binaries (build artifacts)
+consul-postgres-ha/.local/
+consul-postgres-ha/bootstrap-secrets/bootstrap-secrets
+consul-postgres-ha/mesh-conn/mesh-conn
+consul-postgres-ha/quic-on-ice/quic-on-ice
+consul-postgres-ha/signaling/signaling
+consul-postgres-ha/signaling/icetest
+consul-postgres-ha/webdemo/webdemo
+
+# consul-postgres-ha — local terraform state (per-deploy, not for git)
+consul-postgres-ha/cluster-example/.terraform/
+consul-postgres-ha/cluster-example/.terraform.lock.hcl
+consul-postgres-ha/cluster-example/terraform.tfstate*
+consul-postgres-ha/cluster-example/terraform.tfvars

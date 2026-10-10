@@ -1,0 +1,135 @@
+# Worker compose template — peer-VIP / service-VIP layout.
+#
+# A "worker" CVM ends up running exactly three containers:
+#
+#   sidecar   bundled platform plumbing — bootstrap-secrets, mesh-conn,
+#             consul (client), and one Envoy per backend declared in
+#             SERVICES_JSON (services sharing a canonical port share a
+#             backend). Provisions per-peer VIP loopback aliases on
+#             127.50.0.0/24 and per-service VIP aliases on
+#             127.10.0.0/24 at startup, so needs NET_ADMIN.
+#   patroni   the workload — Postgres + Patroni leader/replica. Also
+#             hosts the role-watcher that mirrors Patroni's current
+#             role onto the postgres sidecar's Service.Tags.
+#   webdemo   tiny example app sitting on the mesh; swap for your
+#             own service when adapting this template.
+
+services:
+  sidecar:
+    image: ${MESH_SIDECAR_IMAGE}
+    network_mode: host
+    restart: on-failure
+    # NET_ADMIN: required for `ip addr add 127.{50,10}.0.<n>/32 dev lo`
+    # at entrypoint. Loopback-only modifications, no external interface
+    # touched — the sidecar is the only platform-level component that
+    # touches the kernel network at all.
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - ROLE=worker
+      - CLUSTER_NAME=${CLUSTER_NAME}
+      - WORKER_ORDINAL=${WORKER_ORDINAL}
+      - EXPECTED_REPLICAS=${EXPECTED_REPLICAS}
+      # PEERS_JSON shape: [{id, vip}] — vip is the last octet in
+      # 127.50.0.0/24. mesh-conn binds the runtime allowlist on every
+      # other peer's VIP; entrypoint provisions the aliases.
+      - PEERS_JSON=${PEERS_JSON}
+      # SERVICES_JSON shape: [{name, port, subset, vip, sidecar_port,
+      # parent, registers_parent}] — single source of truth for every
+      # microservice on the mesh. The sidecar generates Consul
+      # registrations, Envoy supervise loops, /etc/hosts aliases, and
+      # mesh-conn's allowlist from this one env. Editing local.services
+      # in cluster.tf is the only place adding a service touches.
+      - SERVICES_JSON=${SERVICES_JSON}
+      # COORDINATOR_VIPS: comma-separated list of coordinators' peer
+      # VIPs. Workers retry-join 127.50.0.<vip>:8301 (serf) for each.
+      - COORDINATOR_VIPS=${COORDINATOR_VIPS}
+      - SIGNALING_URL=${SIGNALING_URL}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
+      # WORKAROUND: gossip key generated in Terraform and broadcast
+      # identically to every CVM. See cluster.tf.
+      - GOSSIP_KEY=${GOSSIP_KEY}
+      - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
+      - MESH_CONN_DEBUG_ICE=${MESH_CONN_DEBUG_ICE:-}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets
+      - /tmp/dstack-runtime/instance:/run/instance
+      - /tmp/dstack-runtime/consul-tokens:/run/consul-tokens
+      - consul-data:/consul/data
+    # Healthy = bootstrap-secrets has finished and info.json is in
+    # place. patroni/webdemo gate on this so they don't FATAL-restart
+    # in a loop while the sidecar is still booting.
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/instance/info.json"]
+      interval: 2s
+      timeout: 1s
+      retries: 60
+      start_period: 5s
+
+  patroni:
+    image: ${PATRONI_IMAGE}
+    network_mode: host
+    restart: on-failure
+    # CLUSTER_NAME drives Patroni's `scope` — every peer's patroni
+    # must use the same value to land in the same cluster. Postgres
+    # binds the canonical 127.0.0.1:5432; Patroni REST on 127.0.0.1:8008.
+    # Patroni's native Consul integration registers the parent service
+    # `${scope}/${peer}` with role-aware tags; the platform sidecar
+    # pre-registers a stub at the same service_id so consumer-side
+    # Envoy can come up before Patroni has bootstrapped.
+    # WORKAROUND: superuser + replication passwords generated in
+    # Terraform and broadcast identically to every worker. See
+    # cluster.tf.
+    environment:
+      - CLUSTER_NAME=${CLUSTER_NAME}
+      - PATRONI_SUPERUSER_PW=${PATRONI_SUPERUSER_PW}
+      - PATRONI_REPLICATION_PW=${PATRONI_REPLICATION_PW}
+      - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
+      # SERVICES_JSON: service VIPs for /etc/hosts (patroni needs to
+      # resolve postgres-master to its local Envoy upstream so
+      # primary_conninfo routes through the mesh).
+      - SERVICES_JSON=${SERVICES_JSON}
+      # PEERS_JSON: role-watcher needs SELF_VIP to set Address on the
+      # inline SidecarService entry.
+      - PEERS_JSON=${PEERS_JSON}
+    volumes:
+      - /tmp/dstack-runtime/instance:/run/instance:ro
+      - /tmp/dstack-runtime/consul-tokens:/run/consul-tokens:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets:ro
+      - patroni-pgdata:/var/lib/patroni
+    depends_on:
+      sidecar:
+        condition: service_healthy
+
+  webdemo:
+    image: ${WEBDEMO_IMAGE}
+    network_mode: host
+    restart: unless-stopped
+    environment:
+      - PEERS_JSON=${PEERS_JSON}
+      - SERVICES_JSON=${SERVICES_JSON}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        export PEER_ID=$$(jq -r '.role + "-" + (.ordinal|tostring)' /run/instance/info.json)
+        # Append service-VIP /etc/hosts entries — each container has
+        # its own /etc/hosts (network_mode: host doesn't share it).
+        echo "$$SERVICES_JSON" | jq -r '.[] | "127.10.0.\(.vip)  \(.name)"' >> /etc/hosts
+        exec webdemo
+    volumes:
+      - /tmp/dstack-runtime/instance:/run/instance:ro
+    depends_on:
+      sidecar:
+        condition: service_healthy
+
+volumes:
+  consul-data:
+  patroni-pgdata:
+
+# Shared state goes through HOST BIND MOUNTS, not named docker
+# volumes — see coordinator.yaml for the full note. Short version:
+# named docker volumes don't share data across containers on the
+# dstack platform we run on. Bind mounts to /tmp work fine.
