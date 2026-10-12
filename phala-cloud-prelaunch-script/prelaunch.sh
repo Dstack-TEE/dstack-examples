@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.20"
+echo "Running Phala Cloud Pre-Launch Script v0.0.21"
 echo "----------------------------------------------"
 set -e
 
@@ -235,7 +235,7 @@ echo "Images before pull:"
 docker images --format '{{.Repository}}:{{.Tag}} {{.ID}} ({{.CreatedSince}})'
 
 echo "Pulling latest images from /dstack/docker-compose.yaml..."
-if docker compose -f /dstack/docker-compose.yaml pull; then
+if timeout 300 docker compose -f /dstack/docker-compose.yaml pull; then
     echo "docker compose pull completed"
     notify_host_hoot_info "docker compose pull completed"
 else
