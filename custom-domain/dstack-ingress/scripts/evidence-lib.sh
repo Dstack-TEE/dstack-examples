@@ -17,7 +17,7 @@ EVIDENCE_DIR=${EVIDENCE_DIR:-/evidences}
 evidence_reset() {
     mkdir -p "$EVIDENCE_DIR"
     rm -rf "$EVIDENCE_DIR"/.staging.*
-    EVIDENCE_STAGE=$(mktemp -d "$EVIDENCE_DIR/.staging.XXXXXX")
+    EVIDENCE_STAGE=$(mktemp -d "$EVIDENCE_DIR/.staging.XXXXXX") || return 1
 }
 
 # These files exist to be published, so force them world-readable. lego writes
@@ -60,7 +60,11 @@ evidence_finalize() {
         return 1
     fi
     chmod 644 "$stage/sha256sum.txt" "$stage/quote.json"
-    evidence_publish "$stage"
+    if ! evidence_publish "$stage"; then
+        echo "Error: Failed to publish evidences"
+        rm -rf "$stage"
+        return 1
+    fi
     echo "Generated evidences successfully"
 }
 
@@ -77,15 +81,15 @@ evidence_get_quote() {
 # Each rename is atomic. The manifest and quote go last, so they never list a
 # file that is not yet in place, and certificates of removed domains go after.
 evidence_publish() {
-    local stage="$1" names name f
-    names=$(awk '{print $2}' "$stage/sha256sum.txt")
-    for name in $names sha256sum.txt quote.json; do
-        mv -f "$stage/$name" "$EVIDENCE_DIR/$name"
-    done
+    local stage="$1" f stale=()
     for f in "$EVIDENCE_DIR"/cert-*.pem; do
-        [ -e "$f" ] || continue
-        grep -qxF "${f##*/}" <<<"$names" || rm -f "$f"
+        if [ -e "$f" ] && [ ! -e "$stage/${f##*/}" ]; then
+            stale+=("$f")
+        fi
     done
+    mv -f "$stage"/acme-account.json "$stage"/cert-*.pem "$EVIDENCE_DIR"/ || return 1
+    mv -f "$stage"/sha256sum.txt "$stage"/quote.json "$EVIDENCE_DIR"/ || return 1
+    rm -f "${stale[@]}"
     rm -rf "$stage"
 }
 
