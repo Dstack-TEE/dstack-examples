@@ -112,37 +112,15 @@ EOF
 
 # Generate haproxy.cfg for multi-domain mode (ROUTING_MAP)
 haproxy_emit_backends_multi() {
-    # Parse ROUTING_MAP and generate use_backend rules + backend sections
-    # Support both newline-separated and comma-separated formats
     local routing_map_normalized
-    routing_map_normalized=$(echo "$ROUTING_MAP" | tr ',' '\n')
+    routing_map_normalized=$(routing_map_entries) || exit 1
 
     local backend_rules=""
     local backend_sections=""
     local first_be_name=""
     local domain target be_name
 
-    while IFS= read -r line; do
-        [[ -n "$line" ]] || continue
-        [[ "$line" == \#* ]] && continue
-        domain="${line%%=*}"
-        target="${line#*=}"
-        domain=$(echo "$domain" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        target=$(echo "$target" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-        [[ -n "$domain" && -n "$target" ]] || continue
-
-        # Validate domain and target to prevent config injection
-        if ! domain=$(sanitize_domain "$domain"); then
-            echo "Error: Invalid domain in ROUTING_MAP: ${line}" >&2
-            exit 1
-        fi
-        if ! target=$(sanitize_target_endpoint "$target"); then
-            echo "Error: Invalid target in ROUTING_MAP: ${line}" >&2
-            exit 1
-        fi
-
-        # Strip protocol prefix from target if present
-        target=$(parse_target_endpoint "$target")
+    while read -r domain target; do
 
         # Generate safe backend name from domain
         be_name="be_$(echo "$domain" | sed 's/[^A-Za-z0-9]/_/g')"
@@ -168,6 +146,44 @@ backend ${be_name}
     fi
 
     echo "$backend_sections" >> /etc/haproxy/haproxy.cfg
+}
+
+# Parse and validate ROUTING_MAP (newline- or comma-separated domain=target
+# entries) into "domain host:port" lines. Fails on an invalid or duplicate entry
+# or an empty map, so entrypoint.sh can reject a bad map before any ACME work.
+routing_map_entries() {
+    local line domain target
+    local -A seen=()
+    while IFS= read -r line; do
+        read -r domain target <<< "${line/=/ }"
+        [[ -n "$domain" && "$domain" != \#* ]] || continue
+        if [[ "$line" != *=* || -z "$target" ]]; then
+            echo "Error: ROUTING_MAP entry is not domain=target: ${line}" >&2
+            return 1
+        fi
+
+        # Validate domain and target to prevent config injection
+        if ! domain=$(sanitize_domain "$domain"); then
+            echo "Error: Invalid domain in ROUTING_MAP: ${line}" >&2
+            return 1
+        fi
+        if ! target=$(sanitize_target_endpoint "$target"); then
+            echo "Error: Invalid target in ROUTING_MAP: ${line}" >&2
+            return 1
+        fi
+        if [[ -n "${seen[${domain,,}]:-}" ]]; then
+            echo "Error: Duplicate domain in ROUTING_MAP: ${domain}" >&2
+            return 1
+        fi
+        seen[${domain,,}]=1
+
+        # Strip protocol prefix from target if present
+        echo "${domain} $(parse_target_endpoint "$target")"
+    done <<< "$(echo "$ROUTING_MAP" | tr ',' '\n')"
+    if [[ ${#seen[@]} -eq 0 ]]; then
+        echo "Error: ROUTING_MAP has no entries" >&2
+        return 1
+    fi
 }
 
 # Pick the backend layout from the environment, then append the evidence backend.

@@ -7,11 +7,10 @@ set -e
 
 parse_domains_list() {
     local input="$1"
-    if [[ "$input" == *$'\n'* ]]; then
-        echo "$input" | grep -v '^#' | grep -v '^$' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'
-    else
-        echo "$input" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$'
+    if [[ "$input" != *$'\n'* ]]; then
+        input=$(echo "$input" | tr ',' '\n')
     fi
+    echo "$input" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v -e '^#' -e '^$'
 }
 
 {

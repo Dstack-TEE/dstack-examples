@@ -7,6 +7,8 @@ SCRIPTS_DIR="$(cd "${THIS_DIR}/.." && pwd)"
 
 # shellcheck source=../functions.sh
 source "${SCRIPTS_DIR}/functions.sh"
+# shellcheck source=../haproxy-lib.sh
+source "${SCRIPTS_DIR}/haproxy-lib.sh"
 
 failures=0
 
@@ -112,6 +114,16 @@ assert_fails "sanitize_alpn rejects newlines" sanitize_alpn $'h2\nhttp/1.1'
 assert_fails "sanitize_alpn rejects spaces" sanitize_alpn "h2, http/1.1"
 assert_fails "sanitize_boolean rejects yes" sanitize_boolean yes FLAG
 assert_fails "sanitize_boolean rejects empty" sanitize_boolean "" FLAG
+
+routing_map() { ROUTING_MAP="$1" routing_map_entries; }
+assert_equal "$(routing_map $'# apps\n  a.example.com = http://app:80\n\n  # api\n*.example.com=api:8080')" \
+    $'a.example.com app:80\n*.example.com api:8080' "routing_map_entries skips indented comments and blank lines"
+assert_equal "$(routing_map 'a.example.com=app:80, b.example.com=api:8080')" \
+    $'a.example.com app:80\nb.example.com api:8080' "routing_map_entries accepts comma-separated entries"
+assert_fails "routing_map_entries rejects duplicate domains" routing_map $'a.example.com=app:80\nA.example.com=api:8080'
+assert_fails "routing_map_entries rejects an entry without a target" routing_map 'a.example.com'
+assert_fails "routing_map_entries rejects an invalid domain" routing_map 'bad_domain=app:80'
+assert_fails "routing_map_entries rejects an empty map" routing_map '# none'
 
 if [[ $failures -eq 0 ]]; then
     echo "All sanitizer tests passed"
