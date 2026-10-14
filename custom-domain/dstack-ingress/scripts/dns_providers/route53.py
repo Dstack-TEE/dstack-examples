@@ -134,9 +134,6 @@ class Route53DNSProvider(DNSProvider):
         self.hosted_zone_id, self.hosted_zone_name = zone_info
         return self.hosted_zone_id
 
-    def zone_is_resolvable(self, name: str) -> bool:
-        return self._ensure_hosted_zone_id(name) is not None
-
     def _normalize_record_name(self, name: str) -> str:
         """Normalize record name to FQDN with trailing dot (Route53 format)."""
         if not name.endswith("."):
@@ -149,10 +146,7 @@ class Route53DNSProvider(DNSProvider):
         """Get DNS records for a domain."""
         hosted_zone_id = self._ensure_hosted_zone_id(name)
         if not hosted_zone_id:
-            print(
-                f"Error: Could not find hosted zone for domain {name}", file=sys.stderr
-            )
-            return []
+            raise RuntimeError(f"Could not find hosted zone for domain {name}")
 
         normalized_name = self._normalize_record_name(name)
 

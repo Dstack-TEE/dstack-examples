@@ -166,17 +166,13 @@ class CloudflareDNSProvider(DNSProvider):
         self.zone_id, self.zone_domain = zone_info
         return self.zone_id
 
-    def zone_is_resolvable(self, name: str) -> bool:
-        return self._ensure_zone_id(name) is not None
-
     def get_dns_records(
         self, name: str, record_type: Optional[RecordType] = None
     ) -> List[DNSRecord]:
         """Get DNS records for a domain."""
         zone_id = self._ensure_zone_id(name)
         if not zone_id:
-            print(f"Error: Could not find zone for domain {name}", file=sys.stderr)
-            return []
+            raise RuntimeError(f"Could not find zone for domain {name}")
 
         params = f"zones/{zone_id}/dns_records?name={name}"
         if record_type:
