@@ -23,7 +23,9 @@ export DELEGATION_ZONE
 # keeps those for derived keys (DETERMINISTIC_TLS_KEY) apart from its lineages.
 cert_dir() {
     if [ "${DETERMINISTIC_TLS_KEY,,}" = "true" ]; then
-        echo "/etc/letsencrypt/deterministic/$(cert_dir_name "$1")"
+        local name="$1"
+        [[ "$name" == \*.* ]] && name="_wildcard.${name#\*.}"
+        echo "/etc/letsencrypt/deterministic/$name"
     else
         echo "/etc/letsencrypt/live/$(cert_dir_name "$1")"
     fi

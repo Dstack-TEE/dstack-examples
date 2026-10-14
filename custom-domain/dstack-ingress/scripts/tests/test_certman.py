@@ -148,6 +148,13 @@ class RenewalWindowTest(unittest.TestCase):
             certman.CertManager._lineage_name("example.com"), "example.com"
         )
 
+    def test_wildcard_has_its_own_deterministic_dir(self):
+        mgr = object.__new__(certman.CertManager)
+        self.assertEqual(os.path.basename(mgr._deterministic_dir("*.example.com")),
+                         "_wildcard.example.com")
+        self.assertEqual(os.path.basename(mgr._deterministic_dir("example.com")),
+                         "example.com")
+
 
 class FakeProvider:
     CERTBOT_PLUGIN = "dns-cloudflare"

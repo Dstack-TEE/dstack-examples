@@ -14,6 +14,7 @@ from importlib import metadata
 from typing import List, Optional, Tuple
 
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 
 # Add script directory to path to import dns_providers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -36,6 +37,27 @@ def renewal_due(cert: x509.Certificate, now: datetime) -> bool:
         return now >= not_after - timedelta(days=int(days))
     lifetime = not_after - not_before
     return now >= not_before + (lifetime / 2 if lifetime < timedelta(days=10) else lifetime * 2 / 3)
+
+
+def _cert_names(path: str) -> Optional[List[str]]:
+    """The DNS names a certificate file is for, or None if it cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+        return cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+    except (OSError, ValueError, x509.ExtensionNotFound):
+        return None
+
+
+def _key_matches(directory: str) -> bool:
+    """Whether privkey.pem in directory is the key of cert.pem there."""
+    try:
+        with open(os.path.join(directory, "privkey.pem"), "rb") as fh:
+            key = serialization.load_pem_private_key(fh.read(), None)
+    except (OSError, ValueError, TypeError):
+        return False
+    return deterministic_key.cert_matches(os.path.join(directory, "cert.pem"), key)
 
 
 def staging_enabled() -> bool:
@@ -352,7 +374,9 @@ class CertManager:
                 shutil.rmtree(staging, ignore_errors=True)
 
     def _deterministic_dir(self, domain: str) -> str:
-        return os.path.join(DETERMINISTIC_DIR, self._lineage_name(domain))
+        """A wildcard's is apart from its base domain's, which may be served too."""
+        name = f"_wildcard.{domain[2:]}" if domain.startswith("*.") else domain
+        return os.path.join(DETERMINISTIC_DIR, name)
 
     def _install_deterministic(self, domain: str, staging: str, key) -> bool:
         if not deterministic_key.cert_matches(os.path.join(staging, "cert.pem"), key):
@@ -372,8 +396,10 @@ class CertManager:
         certbot links a lineage's files into live/ from archive/; plain files
         there come from the old `--csr` issuance, which nothing renews and which
         blocks certbot from creating the lineage. 2.6 wrote privkey.pem before
-        issuing, so a failed issuance left it alone there. Keep a complete
-        certificate as the deterministic one if there is none yet, otherwise
+        issuing, so a failed issuance left it alone there. 2.4-2.6 put a
+        wildcard's there under the base name too, so the certificate's name
+        tells whose it is. Keep a complete certificate as that domain's
+        deterministic one if there is none yet and the key matches, otherwise
         drop the files. certbot's failed attempts to create the lineage over
         them left an empty renewal config, which would push the next lineage
         to <name>-0001; drop that too.
@@ -387,9 +413,14 @@ class CertManager:
         if not os.path.isfile(privkey) or os.path.islink(privkey):
             return
         fullchain = os.path.join(live, "fullchain.pem")
-        target = self._deterministic_dir(domain)
-        if (deterministic_key.enabled() and not os.path.exists(target)
-                and os.path.isfile(fullchain) and not os.path.islink(fullchain)):
+        base = self._lineage_name(domain)
+        names = _cert_names(os.path.join(live, "cert.pem"))
+        target = None
+        if names in ([base], [f"*.{base}"]):
+            target = self._deterministic_dir(names[0])
+        if (deterministic_key.enabled() and target and not os.path.exists(target)
+                and os.path.isfile(fullchain) and not os.path.islink(fullchain)
+                and _key_matches(live)):
             os.makedirs(DETERMINISTIC_DIR, exist_ok=True)
             os.replace(live, target)
             print(f"Moved the certificate in {live} to {target}")
