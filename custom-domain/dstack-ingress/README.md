@@ -173,7 +173,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `443` | HAProxy listen port |
-| `DOMAINS` | | Multiple domains, one per line. Without `ROUTING_MAP`, all of them go to `TARGET_ENDPOINT` |
+| `DOMAINS` | | Multiple domains, one per line or one comma-separated line. Without `ROUTING_MAP`, all of them go to `TARGET_ENDPOINT` |
 | `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line. A wildcard entry (`*.example.com=host:port`) matches one label, and exact entries take precedence over it. Unmatched names go to the first entry |
 | `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
