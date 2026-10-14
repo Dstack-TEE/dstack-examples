@@ -156,7 +156,7 @@ environment:
 
 | Variable | Description |
 |----------|-------------|
-| `DOMAIN` or `DOMAINS` | The domain to serve, or several (`DOMAINS`, below); both may be set. Supports wildcards (`*.example.com`) |
+| `DOMAIN` or `DOMAINS` | The domain to serve, or several in `DOMAINS` (one per line or comma-separated); both may be set. Supports wildcards (`*.example.com`) |
 | `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80`. Not needed with `ROUTING_MAP` |
 | `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `gateway.dstack-prod5.phala.network`) |
 
@@ -171,7 +171,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `443` | HAProxy listen port |
-| `DOMAINS` | | Multiple domains, one per line or comma-separated. Without `ROUTING_MAP`, also set `DOMAIN`: `TARGET_ENDPOINT` is only wired up when it is set |
+| `DOMAINS` | | Multiple domains, one per line |
 | `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line |
 | `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
