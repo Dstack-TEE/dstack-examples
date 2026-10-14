@@ -156,7 +156,7 @@ environment:
 
 | Variable | Description |
 |----------|-------------|
-| `DOMAIN` or `DOMAINS` | The domain to serve, or several in `DOMAINS` (one per line or comma-separated); both may be set. Supports wildcards (`*.example.com`) |
+| `DOMAIN` or `DOMAINS` | The domain to serve, or several in `DOMAINS`; both may be set. `DOMAINS` takes one domain per line, or a single comma-separated line (commas in a multi-line value are not separators). Supports wildcards (`*.example.com`) |
 | `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80`. Not needed with `ROUTING_MAP` |
 | `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `gateway.dstack-prod5.phala.network`) |
 
@@ -177,7 +177,6 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `ACME_EMAIL` | | ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See [below](#the-acme-contact-address-is-optional-and-public) — it is optional, and published |
 | `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode. `CERTBOT_STAGING` is the historical name and still works |
-| `ACME_DIRECTORY_URL` | Let's Encrypt | ACME directory to use instead, e.g. a local Pebble. dns-01 only: passed to certbot as `--server`, and certbot refuses it together with `ACME_STAGING`. tls-alpn-01 ignores it |
 | `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
 | `DNS_PROVIDER` | detected | dns-01: `cloudflare`, `linode`, `namecheap` or `route53`. Detected from the provider's credential variable when unset; set it explicitly for `route53`, whose role setup depends on it |
 | `DNS_SETUP_MODE` | `wait` | How to handle operator-managed records: `wait`, `print` or `webhook` — see below. Applies to tls-alpn-01 and to dns-01 challenge delegation |
