@@ -33,6 +33,8 @@ import sys
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
+import deterministic_key
+
 LEGO_BIN = os.environ.get("LEGO_BIN", "/usr/local/bin/lego")
 LEGO_PATH = os.environ.get("LEGO_PATH", "/etc/letsencrypt/lego")
 ACME_PROD = "https://acme-v02.api.letsencrypt.org/directory"
@@ -179,10 +181,25 @@ def run_cert(domain: str, email: str) -> int:
     if os.path.exists(marker):
         os.remove(marker)
 
+    crt, key_file = cert_paths(domain)
+    key = None
+    target = ["--domains", domain]
+    if deterministic_key.enabled():
+        # With --csr lego renews on its usual schedule but never rewrites the
+        # .key file, so it is kept in step below.
+        key = deterministic_key.private_key(domain)
+        base = os.path.join(LEGO_PATH, "deterministic", domain)
+        deterministic_key.write_file(f"{base}.csr", deterministic_key.csr_pem(key, domain))
+        deterministic_key.write_file(f"{base}.key", deterministic_key.key_pem(key))
+        target = ["--csr", f"{base}.csr", "--private-key", f"{base}.key"]
+        if certificate_exists(domain) and not deterministic_key.cert_matches(crt, key):
+            print(f"Certificate for {domain} does not carry the derived key, re-issuing")
+            target.append("--renew-force")
+
     cmd = (
         [LEGO_BIN, "run"]
         + _common_flags(email)
-        + ["--domains", domain]
+        + target
         + _challenge_flags()
         + ["--deploy-hook", f"touch {marker}"]
     )
@@ -199,10 +216,23 @@ def run_cert(domain: str, email: str) -> int:
         print(f"✗ lego reported success but no certificate for {domain}", file=sys.stderr)
         return EXIT_ERROR
 
-    if not os.path.exists(marker):
+    key_rewritten = False
+    if key is not None:
+        if not deterministic_key.cert_matches(crt, key):
+            print(f"✗ Certificate for {domain} does not carry the derived key", file=sys.stderr)
+            return EXIT_ERROR
+        pem = deterministic_key.key_pem(key)
+        with open(key_file, "rb") as fh:
+            key_rewritten = fh.read() != pem
+        if key_rewritten:
+            deterministic_key.write_file(key_file, pem)
+
+    renewed = os.path.exists(marker)
+    if renewed:
+        os.remove(marker)
+    if not renewed and not key_rewritten:
         print(f"Certificate for {domain} is still current; nothing to do")
         return EXIT_UNCHANGED
-    os.remove(marker)
 
     print(f"✓ Certificate ready for {domain}")
     return EXIT_CHANGED

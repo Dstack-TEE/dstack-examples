@@ -188,6 +188,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `TLSALPN_PORT` | `9443` | Loopback port lego's ACME responder binds to |
 | `TLS_TERMINATE_PORT` | `9444` | Loopback port the TLS frontend moves to in tls-alpn-01 mode |
 | `RENEW_DAYS_BEFORE` | client default | Days of remaining lifetime that trigger renewal. Applies to both modes: passed to lego as `--renew-days`, and written to certbot's `renew_before_expiry`. Unsetting it removes that setting again, so the client's own default applies |
+| `DETERMINISTIC_TLS_KEY` | `false` | Derive a stable TLS key from the dstack KMS so clients can pin it; see [Deterministic TLS keys](#deterministic-tls-keys-spki-pinning) |
 | `RENEW_INTERVAL` | `43200` | Seconds between successful certificate passes |
 | `DNS_SETTLE_SECONDS` | `30` | Wait after DNS verifies, so the gateway's own TXT cache expires |
 | `MAXCONN` | `4096` | HAProxy max connections |
@@ -298,6 +299,26 @@ protocol internally. The ACME responder never sees the header.
 
 If the gateway itself sits behind an L4 load balancer, the gateway operator must enable `inbound_pp_enabled` on it
 (and PROXY protocol on the load balancer), or the address passed on is the load balancer's.
+
+## Deterministic TLS keys (SPKI pinning)
+
+Set `DETERMINISTIC_TLS_KEY=true` to derive a P-256 TLS key per domain from the dstack
+`/GetKey` endpoint instead of generating a random one. The key depends only on the app's
+KMS-derived key and the domain, so every instance, restart, upgrade and certificate
+renewal serves the same public key, and clients can pin its SPKI. Works in both challenge
+modes; turning it on for an existing deployment re-issues the certificate with the
+derived key on the next pass.
+
+The SPKI stays the same only as long as the app ID and the KMS do. It changes when the app
+is deployed under a new app ID, when it moves to a different KMS, or when it runs without
+a KMS (the local key provider ties keys to the host). There is no rotation: if the key has
+to be replaced, so do the pins. The derived key is not covered by the agent's signature
+chain; bind it to the app through the attested evidence instead.
+
+In dns-01 mode certbot cannot keep a lineage for a key it did not generate, so these
+certificates live under `/etc/letsencrypt/deterministic/` and are renewed by the container
+at the same point certbot would (two thirds into the lifetime, or `RENEW_DAYS_BEFORE`),
+without ARI. In tls-alpn-01 mode lego renews them on its normal schedule.
 
 ## Evidence & Attestation
 
@@ -524,10 +545,3 @@ and renewal therefore never interrupt serving traffic. In this mode haproxy
 starts on a self-signed placeholder certificate — it has to be listening before
 the first certificate can be issued — and reloads onto the real one as soon as
 it arrives.
-
-### Deterministic TLS keys (optional)
-
-Set `DETERMINISTIC_TLS_KEY=true` to derive a stable P-256 TLS key per domain from the
-internal dstack agent `/GetKey` endpoint. The default is `false`; when unset, Certbot
-retains its normal key generation behavior. The derived key is used only to generate the
-CSR and is not represented by the agent's signature chain.
