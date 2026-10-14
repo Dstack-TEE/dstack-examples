@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import json
 import os
 import requests
 import xml.etree.ElementTree as ET
@@ -131,7 +132,7 @@ class NamecheapDNSProvider(DNSProvider):
 
     def _get_domain_info(self, domain: str) -> Optional[tuple]:
         """Extract SLD and TLD from domain."""
-        parts = domain.split('.')
+        parts = domain.rstrip('.').split('.')
         if len(parts) < 2:
             return None
         
@@ -168,6 +169,12 @@ class NamecheapDNSProvider(DNSProvider):
         domain = f"{sld}.{tld}"
         return domain if host_name == "@" else f"{host_name}.{domain}"
 
+    @classmethod
+    def _host_key(cls, host: Dict[str, str], sld: str, tld: str) -> str:
+        """Identify a host by its content: setHosts renumbers HostIds."""
+        fqdn = cls._host_fqdn(host.get("Name", "@"), sld, tld).lower()
+        return json.dumps([fqdn, host.get("Type"), host.get("Address")])
+
     def get_dns_records(
         self, name: str, record_type: Optional[RecordType] = None
     ) -> List[DNSRecord]:
@@ -195,7 +202,7 @@ class NamecheapDNSProvider(DNSProvider):
             
             # Create DNS record
             record = DNSRecord(
-                id=host.get("HostId"),
+                id=self._host_key(host, sld, tld),
                 name=record_name,
                 type=RecordType(record_type_str),
                 content=host.get("Address"),
@@ -258,7 +265,10 @@ class NamecheapDNSProvider(DNSProvider):
 
         sld, tld = domain_info
         hosts = self._get_hosts(sld, tld)
-        all_records = [h for h in hosts if h.get("HostId") != record_id]
+        all_records = [h for h in hosts if self._host_key(h, sld, tld) != record_id]
+        if len(all_records) == len(hosts):
+            print(f"No record {record_id} in {sld}.{tld}; nothing to delete")
+            return True
 
         return self._set_dns_records(sld, tld, all_records)
 
