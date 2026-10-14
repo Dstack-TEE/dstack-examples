@@ -412,16 +412,18 @@ load_dstack_identity
 
 # dns-01 needs no inbound traffic, so keep the original order: certificate
 # first, serving second. A certificate failure here is fatal only when there is
-# nothing to serve. With certificates from an earlier run on disk, exiting
-# would just restart into the same failure -- hitting the CA again on every
-# restart -- while the certificates go unserved; serve them and let the loop
-# retry with backoff instead.
-have_all_certs() {
+# nothing to serve. Otherwise exiting would just restart into the same failure
+# -- hitting the CA again on every restart -- while every domain goes unserved,
+# including those whose certificates are fine (a newly added domain failing its
+# first issuance would take down the others). Serve what there is and let the
+# loop retry with backoff instead.
+have_any_cert() {
     local domain
     while IFS= read -r domain; do
         [[ -n "$domain" ]] || continue
-        [ -f "$(cert_fullchain_path "$domain")" ] && [ -f "$(cert_privkey_path "$domain")" ] || return 1
+        [ -f "$(cert_fullchain_path "$domain")" ] && [ -f "$(cert_privkey_path "$domain")" ] && return 0
     done <<<"$(get-all-domains.sh)"
+    return 1
 }
 
 startup_status=0
@@ -430,8 +432,8 @@ case $startup_status in
     0) next_check=${RENEW_INTERVAL:-43200} ;;
     3) next_check=60 ;;
     *)
-        have_all_certs || exit "$startup_status"
-        echo "Certificate pass failed; serving the existing certificates and retrying" >&2
+        have_any_cert || exit "$startup_status"
+        echo "Certificate pass failed; serving the certificates there are and retrying" >&2
         next_check=60
         ;;
 esac
