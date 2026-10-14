@@ -200,12 +200,17 @@ class NamecheapDNSProvider(DNSProvider):
             if record_type and record_type_str != record_type.value:
                 continue
             
+            content = host.get("Address")
+            if record_type_str == "CNAME":
+                # Namecheap returns CNAME targets fully qualified
+                content = content.rstrip(".")
+
             # Create DNS record
             record = DNSRecord(
                 id=self._host_key(host, sld, tld),
                 name=record_name,
                 type=RecordType(record_type_str),
-                content=host.get("Address"),
+                content=content,
                 ttl=int(host.get("TTL", "1800")),
                 proxied=False,
                 priority=int(host.get("MXPref", "10")) if host.get("MXPref") else None
