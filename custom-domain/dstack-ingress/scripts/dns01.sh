@@ -274,6 +274,9 @@ process_domain() {
     if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
         echo "First certificate attempt failed for $domain, retrying after the CAA record is set"
         if issue_certificate "$domain"; then status=0; else status=$?; fi
+        # The failed attempt may still have saved a certificate (e.g. killed by
+        # the timeout after writing it), so "nothing to renew" now is a change.
+        [ "$status" -ne 2 ] || status=0
     fi
     return "$status"
 }
@@ -371,7 +374,7 @@ run_pass() {
 # $1: seconds to wait before the first pass. dns-01 issues before it serves, so
 # the caller has already run a pass by the time we get here; without this the
 # loop would immediately repeat it -- two full passes, and for a single domain
-# four certbot invocations plus a duplicate round of DNS writes, on every start.
+# two certbot invocations plus a duplicate round of DNS writes, on every start.
 cert_loop() {
     local attempt=0 delay="${1:-0}"
     while true; do
