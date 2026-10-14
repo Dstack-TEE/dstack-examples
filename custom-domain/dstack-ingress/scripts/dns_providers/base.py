@@ -98,7 +98,13 @@ class DNSProvider(ABC):
             record_type: Optional record type filter
 
         Returns:
-            List of DNS records
+            List of DNS records; empty if there are none or the zone cannot
+            be found (see zone_is_resolvable)
+
+        Raises:
+            RuntimeError: if the records could not be listed. Callers decide
+            what to delete or keep from this list, so a failed read must not
+            pass for an empty one.
         """
         pass
 

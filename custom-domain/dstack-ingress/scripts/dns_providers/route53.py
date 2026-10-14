@@ -134,6 +134,9 @@ class Route53DNSProvider(DNSProvider):
         self.hosted_zone_id, self.hosted_zone_name = zone_info
         return self.hosted_zone_id
 
+    def zone_is_resolvable(self, name: str) -> bool:
+        return self._ensure_hosted_zone_id(name) is not None
+
     def _normalize_record_name(self, name: str) -> str:
         """Normalize record name to FQDN with trailing dot (Route53 format)."""
         if not name.endswith("."):
@@ -220,8 +223,7 @@ class Route53DNSProvider(DNSProvider):
             return records
 
         except Exception as e:
-            print(f"Error getting DNS records: {e}", file=sys.stderr)
-            return []
+            raise RuntimeError(f"Failed to list DNS records for {name}: {e}") from e
 
     def create_dns_record(self, record: DNSRecord) -> bool:
         """Create a DNS record."""

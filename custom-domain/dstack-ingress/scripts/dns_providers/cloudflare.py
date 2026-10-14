@@ -186,7 +186,7 @@ class CloudflareDNSProvider(DNSProvider):
         result = self._make_request("GET", params)
 
         if not result.get("success", False):
-            return []
+            raise RuntimeError(f"Failed to list DNS records for {name}")
 
         records = []
         for record_data in result.get("result", []):
