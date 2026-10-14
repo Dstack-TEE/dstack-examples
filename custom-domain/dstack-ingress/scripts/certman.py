@@ -2,6 +2,7 @@
 
 import deterministic_key
 import argparse
+import glob
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import tempfile
 from datetime import datetime, timedelta, timezone
 from importlib import metadata
 from typing import List, Optional, Tuple
+from urllib.parse import urlparse
 
 from cryptography import x509
 
@@ -43,6 +45,27 @@ def staging_enabled() -> bool:
     """
     value = os.environ.get("ACME_STAGING") or os.environ.get("CERTBOT_STAGING", "false")
     return value == "true"
+
+
+ACME_PROD = "https://acme-v02.api.letsencrypt.org/directory"
+ACME_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+
+def acme_server() -> str:
+    """The ACME directory to use. ACME_DIRECTORY_URL allows local test servers
+    (for example Pebble) without changing the production/staging defaults."""
+    return (os.environ.get("ACME_DIRECTORY_URL", "").strip()
+            or (ACME_STAGING if staging_enabled() else ACME_PROD))
+
+
+def account_file() -> Optional[str]:
+    """certbot's account for acme_server(), stored under the directory URL's
+    host and path."""
+    parsed = urlparse(acme_server())
+    pattern = os.path.join(LETSENCRYPT_DIR, "accounts", parsed.netloc + parsed.path,
+                           "*", "regr.json")
+    matches = sorted(glob.glob(pattern))
+    return matches[0] if matches else None
 
 
 # Time a certbot run needs on top of the DNS propagation wait: ACME round
@@ -167,7 +190,7 @@ class CertManager:
         return result
 
     def _build_certbot_command(self, action: str, domain: str, email: str,
-                               csr_args: Tuple[str, ...] = ()) -> List[str]:
+                               extra_args: Tuple[str, ...] = ()) -> List[str]:
         """Build certbot command using provider configuration."""
         certbot_cmd = self._get_certbot_command()
 
@@ -191,15 +214,16 @@ class CertManager:
                     base_cmd.extend(["--email", email])
                 else:
                     base_cmd.append("--register-unsafely-without-email")
-                base_cmd.extend(csr_args)
+                base_cmd.extend(extra_args)
                 base_cmd.extend(["-d", domain])
             # For `renew`, certbot reuses the authenticator + hooks saved in the
             # renewal config from the initial `certonly`, so we don't re-specify
             # them here (and must not fall back to the DNS plugin).
             if action == "renew":
                 base_cmd.extend(["--cert-name", self._lineage_name(domain)])
-            if staging_enabled():
-                base_cmd.append("--staging")
+            # Explicit on `renew` too: certbot would otherwise take the server
+            # saved in the lineage, whatever the configuration says now.
+            base_cmd.extend(["--server", acme_server()])
             masked = [a if not (i > 0 and base_cmd[i - 1] == "--email") else "<email>"
                       for i, a in enumerate(base_cmd)]
             print(f"Executing (challenge-delegation): {' '.join(masked)}")
@@ -225,7 +249,7 @@ class CertManager:
                     f"Credentials file does not exist: {credentials_file}")
 
         if action == "certonly":
-            base_cmd.extend(csr_args)
+            base_cmd.extend(extra_args)
             base_cmd.extend(["--agree-tos", "--no-eff-email"])
             # The ACME contact address is optional (RFC 8555 section 7.3), and
             # it is published: the account document is served as attestation
@@ -244,13 +268,7 @@ class CertManager:
             # N domains meant N passes over all N lineages, and the result was
             # then reported against whichever domain happened to ask.
             base_cmd.extend(["--cert-name", self._lineage_name(domain)])
-        if staging_enabled():
-            base_cmd.extend(["--staging"])
-        # Allow local ACME test servers (for example Pebble) without changing
-        # the production/staging defaults.
-        acme_server = os.environ.get("ACME_DIRECTORY_URL", "").strip()
-        if acme_server:
-            base_cmd.extend(["--server", acme_server])
+        base_cmd.extend(["--server", acme_server()])
 
         if getattr(self.provider, 'CERTBOT_PROPAGATION_SECONDS'):
             propagation_seconds = self.provider.CERTBOT_PROPAGATION_SECONDS
@@ -264,8 +282,11 @@ class CertManager:
 
         return base_cmd
 
-    def obtain_certificate(self, domain: str, email: str) -> bool:
-        """Obtain a new certificate for the domain."""
+    def obtain_certificate(self, domain: str, email: str, replace: bool = False) -> bool:
+        """Obtain a new certificate for the domain.
+
+        replace: re-issue even though the current certificate is not due.
+        """
         print(f"Obtaining certificate for {domain} using {self.provider_type}")
 
         # Ensure plugin is installed
@@ -287,7 +308,7 @@ class CertManager:
             return False
 
         key = None
-        csr_args: Tuple[str, ...] = ()
+        extra_args: Tuple[str, ...] = ()
         if deterministic_key.enabled():
             key = deterministic_key.private_key(domain)
             # certbot refuses to overwrite an explicit --cert-path, so issue
@@ -297,11 +318,15 @@ class CertManager:
             staging = tempfile.mkdtemp(dir=root, prefix=".issue-")
             csr = os.path.join(staging, "request.csr")
             deterministic_key.write_file(csr, deterministic_key.csr_pem(key, domain))
-            csr_args = ("--csr", csr) + tuple(
+            extra_args = ("--csr", csr) + tuple(
                 arg for name in ("cert", "chain", "fullchain")
                 for arg in (f"--{name}-path", os.path.join(staging, f"{name}.pem")))
+        elif replace:
+            # certbot keeps a lineage that is not yet due, and refuses to
+            # replace a trusted certificate with a staging one.
+            extra_args = ("--force-renewal", "--break-my-certs")
 
-        cmd = self._build_certbot_command("certonly", domain, email, csr_args)
+        cmd = self._build_certbot_command("certonly", domain, email, extra_args)
         timeout = self._certbot_timeout()
 
         try:
@@ -357,6 +382,7 @@ class CertManager:
                                      deterministic_key.key_pem(key))
         for name in ("cert.pem", "chain.pem", "fullchain.pem"):
             os.replace(os.path.join(staging, name), os.path.join(target, name))
+        deterministic_key.write_file(os.path.join(target, "server"), acme_server().encode())
         return True
 
     def _clear_legacy_live(self, domain: str) -> None:
@@ -491,6 +517,22 @@ class CertManager:
     def _renewal_conf_path(self, domain: str) -> str:
         """Where certbot keeps this lineage's renewal config."""
         return os.path.join(LETSENCRYPT_DIR, "renewal", f"{self._lineage_name(domain)}.conf")
+
+    def _issuing_server(self, domain: str) -> Optional[str]:
+        """The ACME server the current certificate came from."""
+        try:
+            if deterministic_key.enabled():
+                with open(os.path.join(self.cert_dir(domain), "server"),
+                          encoding="utf-8") as fh:
+                    return fh.read().strip()
+            with open(self._renewal_conf_path(domain), encoding="utf-8") as fh:
+                for line in fh:
+                    match = re.match(r"\s*server\s*=\s*(\S+)", line)
+                    if match:
+                        return match.group(1)
+        except OSError:
+            pass
+        return None
 
     def _certbot_timeout(self) -> int:
         """How long one certbot run may take.
@@ -631,21 +673,8 @@ class CertManager:
         print(f"Renewal window for {domain} set to {days} days before expiry")
 
     def acme_account_exists(self) -> bool:
-        """Check if an ACME account exists for the current server (staging or production).
-
-        The account directory differs between staging and production:
-        - production: /etc/letsencrypt/accounts/acme-v02.api.letsencrypt.org/directory/
-        - staging:    /etc/letsencrypt/accounts/acme-staging-v02.api.letsencrypt.org/directory/
-
-        When switching between staging and production, the cert file persists
-        on the volume but the account only exists for the previous server.
-        """
-        import glob
-        api_endpoint = "acme-v02.api.letsencrypt.org"
-        if staging_enabled():
-            api_endpoint = "acme-staging-v02.api.letsencrypt.org"
-        pattern = os.path.join(LETSENCRYPT_DIR, "accounts", api_endpoint, "directory", "*", "regr.json")
-        return len(glob.glob(pattern)) > 0
+        """Check if an ACME account exists for the current server."""
+        return account_file() is not None
 
     def run_action(
         self, domain: str, email: str, action: str = "auto"
@@ -657,15 +686,24 @@ class CertManager:
         """
         self._clear_legacy_live(domain)
         if action == "auto":
-            if self.certificate_exists(domain) and self.acme_account_exists():
-                success, renewed = self.renew_certificate(domain, email)
-                return success, renewed  # Only generate evidence if actually renewed
-            else:
-                if self.certificate_exists(domain) and not self.acme_account_exists():
-                    print(f"Certificate exists for {domain} but ACME account is missing "
-                          f"(staging/production switch?), re-obtaining")
+            if not self.certificate_exists(domain):
                 success = self.obtain_certificate(domain, email)
                 return success, success  # Always generate evidence for new certificates
+            # The certificate volume outlives the configuration: after a switch
+            # between staging and production (or ACME_DIRECTORY_URL), the
+            # certificate in place came from the other server.
+            server = self._issuing_server(domain)
+            if server == acme_server() and self.acme_account_exists():
+                success, renewed = self.renew_certificate(domain, email)
+                return success, renewed  # Only generate evidence if actually renewed
+            if server != acme_server():
+                print(f"Certificate for {domain} came from {server or 'an unknown ACME server'}, "
+                      f"replacing it from {acme_server()}")
+            else:
+                print(f"Certificate exists for {domain} but the ACME account is missing, "
+                      f"re-obtaining")
+            success = self.obtain_certificate(domain, email, replace=True)
+            return success, success
         elif action == "obtain":
             success = self.obtain_certificate(domain, email)
             return success, success
@@ -681,7 +719,8 @@ def main():
         description="Manage SSL certificates with certbot using DNS providers"
     )
     parser.add_argument(
-        "action", choices=["obtain", "renew", "auto", "setup", "cert-dir"],
+        "action", choices=["obtain", "renew", "auto", "setup", "cert-dir",
+                            "account-file"],
         help="Action to perform"
     )
     parser.add_argument("--domain", help="Domain name")
@@ -691,6 +730,13 @@ def main():
 
     args = parser.parse_args()
 
+    if args.action == "account-file":
+        path = account_file()
+        if not path:
+            print(f"Error: no ACME account found for {acme_server()}", file=sys.stderr)
+            sys.exit(1)
+        print(path)
+        return
     if args.action == "cert-dir":
         if not args.domain:
             parser.error("--domain is required")

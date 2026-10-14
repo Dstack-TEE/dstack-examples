@@ -25,7 +25,6 @@ The dns-01 path still runs certbot via certman.py; nothing here touches it.
 """
 
 import argparse
-import glob
 import json
 import os
 import subprocess
@@ -39,6 +38,8 @@ LEGO_BIN = os.environ.get("LEGO_BIN", "/usr/local/bin/lego")
 LEGO_PATH = os.environ.get("LEGO_PATH", "/etc/letsencrypt/lego")
 ACME_PROD = "https://acme-v02.api.letsencrypt.org/directory"
 ACME_STAGING = "https://acme-staging-v02.api.letsencrypt.org/directory"
+# lego's account directory name when there is no email.
+NO_EMAIL_ACCOUNT = "noemail@example.com"
 
 # Exit codes: 0 changed, 2 nothing to do, 1 failed. The caller reloads on 0.
 EXIT_CHANGED = 0
@@ -50,6 +51,10 @@ REGISTER_TIMEOUT = 120
 
 
 def acme_server() -> str:
+    # Same override as certman.py, for local test servers such as Pebble.
+    custom = os.environ.get("ACME_DIRECTORY_URL", "").strip()
+    if custom:
+        return custom
     # CERTBOT_STAGING is the historical name and still works, but there is no
     # certbot on this path: the ACME client here is lego.
     staging = os.environ.get("ACME_STAGING") or os.environ.get("CERTBOT_STAGING", "false")
@@ -63,21 +68,20 @@ def server_dir() -> str:
     return f"{host}_{parsed.port}" if parsed.port else host
 
 
-def account_file() -> Optional[str]:
-    """Find the account document by globbing rather than by building the path.
+def account_file(email: str) -> str:
+    """The account `lego run` uses: lego keys accounts by server and email, with
+    a placeholder of its own when there is no email.
 
-    lego names the directory after the account email, and after a placeholder of
-    its own choosing when there is no email. Globbing means we neither have to
-    know that placeholder nor track it across lego versions.
+    Any other account in the directory -- one for a previous ACME_EMAIL, say --
+    is not the one issuing, so publishing it would name the wrong account.
     """
-    pattern = os.path.join(LEGO_PATH, "accounts", server_dir(), "*", "account.json")
-    matches = sorted(glob.glob(pattern))
-    return matches[0] if matches else None
+    return os.path.join(LEGO_PATH, "accounts", server_dir(),
+                        email or NO_EMAIL_ACCOUNT, "account.json")
 
 
-def account_uri() -> Optional[str]:
-    path = account_file()
-    if not path:
+def account_uri(email: str) -> Optional[str]:
+    path = account_file(email)
+    if not os.path.isfile(path):
         return None
     try:
         with open(path, encoding="utf-8") as fh:
@@ -135,7 +139,7 @@ def _run(cmd: List[str], timeout: int = RUN_TIMEOUT) -> Tuple[int, str]:
 
 def register(email: str) -> int:
     """Create the ACME account without issuing anything."""
-    if account_file():
+    if os.path.isfile(account_file(email)):
         print("ACME account already exists")
         return EXIT_UNCHANGED
 
@@ -144,7 +148,7 @@ def register(email: str) -> int:
         [LEGO_BIN, "accounts", "register"] + _common_flags(email),
         timeout=REGISTER_TIMEOUT,
     )
-    if code == 0 and account_file():
+    if code == 0 and os.path.isfile(account_file(email)):
         print("✓ ACME account registered")
         return EXIT_CHANGED
     print(f"✗ ACME account registration failed (exit code {code})", file=sys.stderr)
@@ -242,7 +246,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "action",
-        choices=["obtain", "renew", "auto", "register", "account-uri", "cert-path"],
+        choices=["obtain", "renew", "auto", "register", "account-uri", "account-file",
+                 "cert-path"],
     )
     parser.add_argument("--domain", help="Domain name")
     parser.add_argument("--email", help="Email for ACME registration")
@@ -251,10 +256,18 @@ def main() -> int:
     email = args.email or os.environ.get("ACME_EMAIL") or os.environ.get("CERTBOT_EMAIL", "")
 
     if args.action == "account-uri":
-        uri = account_uri()
+        uri = account_uri(email)
         if not uri:
             return EXIT_ERROR
         print(uri)
+        return EXIT_CHANGED
+
+    if args.action == "account-file":
+        path = account_file(email)
+        if not os.path.isfile(path):
+            print(f"Error: lego account file not found at {path}", file=sys.stderr)
+            return EXIT_ERROR
+        print(path)
         return EXIT_CHANGED
 
     if args.action == "cert-path":
