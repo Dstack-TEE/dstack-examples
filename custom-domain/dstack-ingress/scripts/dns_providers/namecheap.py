@@ -281,18 +281,52 @@ class NamecheapDNSProvider(DNSProvider):
 
         return self._set_dns_records(sld, tld, all_records, email_type)
 
+    def set_caa_record(
+        self,
+        name: str,
+        tag: str,
+        value: str,
+        flags: int = 0,
+        ttl: int = 60,
+    ) -> bool:
+        """Replace the name's CAA records of this tag in a single setHosts.
+
+        The base implementation deletes first and creates after, which on
+        Namecheap is two zone writes with no CAA of this tag in between.
+        """
+        values = [
+            r.data["value"]
+            for r in self.get_dns_records(name, RecordType.CAA)
+            if r.data and r.data.get("tag") == tag
+        ]
+        if values == [value.strip('"')]:
+            print("CAA record with the same content already exists")
+            return True
+        return self.create_caa_record(
+            CAARecord(name=name, flags=flags, tag=tag, value=value, ttl=ttl)
+        )
+
     def create_caa_record(self, caa_record: CAARecord) -> bool:
-        """Add a CAA record, keeping the name's other CAA records (e.g. iodef)."""
+        """Replace the name's CAA records of this tag, keeping other tags (e.g. iodef)."""
         domain_info = self._get_domain_info(caa_record.name)
         if not domain_info:
             print(f"Could not determine domain info from {caa_record.name}")
             return False
 
         sld, tld = domain_info
-        hostname = self._host_label(caa_record.name.rstrip("."), sld, tld)
+        name = caa_record.name.rstrip(".")
+        hostname = self._host_label(name, sld, tld)
         value = caa_record.value.strip('"')
 
-        hosts, email_type = self._get_hosts(sld, tld)
+        all_hosts, email_type = self._get_hosts(sld, tld)
+        hosts = [
+            h for h in all_hosts
+            if not (
+                h.get("Type") == "CAA"
+                and self._host_fqdn(h.get("Name", "@"), sld, tld).lower() == name.lower()
+                and h.get("Address", "").split(None, 2)[1:2] == [caa_record.tag]
+            )
+        ]
         hosts.append({
             "Name": hostname,
             "Type": "CAA",

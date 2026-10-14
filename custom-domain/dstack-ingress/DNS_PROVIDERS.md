@@ -74,7 +74,7 @@ NAMECHEAP_CLIENT_IP=your-client-ip
 
 **Important Notes for Namecheap:**
 - Namecheap API requires node IP address for authentication, and you need add it to whitelist IP first.
-- Namecheap doesn't support CAA records through their API currently
+- CAA records are written through `setHosts`, which replaces the whole zone. The rest of the zone is read first and written back unchanged.
 - The certbot plugin uses the format `certbot-dns-namecheap` package
 
 ### Route53
