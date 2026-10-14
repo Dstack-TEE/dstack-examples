@@ -371,15 +371,25 @@ class CertManager:
 
         certbot links a lineage's files into live/ from archive/; plain files
         there come from the old `--csr` issuance, which nothing renews and which
-        blocks certbot from creating the lineage. Keep them as the deterministic
-        certificate if there is none yet, otherwise drop them.
+        blocks certbot from creating the lineage. 2.6 wrote privkey.pem before
+        issuing, so a failed issuance left it alone there. Keep a complete
+        certificate as the deterministic one if there is none yet, otherwise
+        drop the files. certbot's failed attempts to create the lineage over
+        them left an empty renewal config, which would push the next lineage
+        to <name>-0001; drop that too.
         """
+        conf = self._renewal_conf_path(domain)
+        if os.path.isfile(conf) and os.path.getsize(conf) == 0:
+            os.remove(conf)
+            print(f"Removed the empty renewal config {conf}")
         live = f"/etc/letsencrypt/live/{self._lineage_name(domain)}"
-        fullchain = os.path.join(live, "fullchain.pem")
-        if not os.path.isfile(fullchain) or os.path.islink(fullchain):
+        privkey = os.path.join(live, "privkey.pem")
+        if not os.path.isfile(privkey) or os.path.islink(privkey):
             return
+        fullchain = os.path.join(live, "fullchain.pem")
         target = self._deterministic_dir(domain)
-        if deterministic_key.enabled() and not os.path.exists(target):
+        if (deterministic_key.enabled() and not os.path.exists(target)
+                and os.path.isfile(fullchain) and not os.path.islink(fullchain)):
             os.makedirs(DETERMINISTIC_DIR, exist_ok=True)
             os.replace(live, target)
             print(f"Moved the certificate in {live} to {target}")
