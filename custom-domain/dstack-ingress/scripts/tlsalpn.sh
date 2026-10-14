@@ -306,7 +306,9 @@ run_pass() {
         fi
     fi
     FIRST_PASS=false
-    [ "$failed" -eq 0 ]
+    [ "$failed" -eq 0 ] || return 1
+    # Not a quiet pass either: wait the retry backoff, not RENEW_INTERVAL.
+    [ "$APPLY_PENDING" = false ] || return 3
 }
 
 cert_loop() {

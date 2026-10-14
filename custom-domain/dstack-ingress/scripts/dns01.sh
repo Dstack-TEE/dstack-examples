@@ -371,7 +371,9 @@ run_pass() {
         fi
     fi
     FIRST_PASS=false
-    [ "$failed" -eq 0 ]
+    [ "$failed" -eq 0 ] || return 1
+    # Not a quiet pass either: wait the retry backoff, not RENEW_INTERVAL.
+    [ "$APPLY_PENDING" = false ] || return 3
 }
 
 # $1: seconds to wait before the first pass. dns-01 issues before it serves, so
@@ -402,8 +404,15 @@ setup_certbot_env
 load_dstack_identity
 
 # dns-01 needs no inbound traffic, so keep the original order: certificate
-# first, serving second. A failure here is fatal, as it always was.
-run_pass
+# first, serving second. A certificate failure here is fatal, as it always
+# was; an apply failure is left to the loop to retry.
+startup_status=0
+run_pass || startup_status=$?
+case $startup_status in
+    0) next_check=${RENEW_INTERVAL:-43200} ;;
+    3) next_check=60 ;;
+    *) exit "$startup_status" ;;
+esac
 build_combined_pems
 
 haproxy_emit_global
@@ -411,6 +420,6 @@ haproxy_emit_tls_frontend ":${PORT}$(haproxy_accept_proxy)"
 haproxy_emit_backends
 
 evidence_start_server
-cert_loop "${RENEW_INTERVAL:-43200}" &
+cert_loop "$next_check" &
 
 exec "$@"

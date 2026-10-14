@@ -8,8 +8,16 @@
 
 EVIDENCE_DIR=${EVIDENCE_DIR:-/evidences}
 
+# Evidence is assembled in a staging directory and published only once the
+# quote is in hand. Rewriting the served files in place let a reader catch a
+# sha256sum.txt that did not match quote.json, and kept certificates of
+# domains that are no longer configured. The staging directory sits inside
+# EVIDENCE_DIR because that is a volume mount point: it cannot be swapped
+# itself, and rename(2) only works within one filesystem.
 evidence_reset() {
     mkdir -p "$EVIDENCE_DIR"
+    rm -rf "$EVIDENCE_DIR"/.staging.*
+    EVIDENCE_STAGE=$(mktemp -d "$EVIDENCE_DIR/.staging.XXXXXX")
 }
 
 # These files exist to be published, so force them world-readable. lego writes
@@ -18,8 +26,8 @@ evidence_reset() {
 # document holds the account URL and status, and a certificate chain is public
 # by construction.
 evidence_collect_account() {
-    cp "$1" "$EVIDENCE_DIR/acme-account.json"
-    chmod 644 "$EVIDENCE_DIR/acme-account.json"
+    cp "$1" "$EVIDENCE_STAGE/acme-account.json"
+    chmod 644 "$EVIDENCE_STAGE/acme-account.json"
 }
 
 evidence_collect_cert() {
@@ -28,37 +36,57 @@ evidence_collect_cert() {
         echo "Warning: Certificate not found for domain: $domain"
         return 0
     fi
-    cp "$path" "$EVIDENCE_DIR/cert-${domain}.pem"
-    chmod 644 "$EVIDENCE_DIR/cert-${domain}.pem"
+    cp "$path" "$EVIDENCE_STAGE/cert-${domain}.pem"
+    chmod 644 "$EVIDENCE_STAGE/cert-${domain}.pem"
 }
 
-# Hash whatever was collected and bind it into a TDX quote.
+# Hash whatever was collected, bind it into a TDX quote, and publish it.
 evidence_finalize() {
-    cd "$EVIDENCE_DIR" || return 1
-# Generate checksum for all files
-    sha256sum acme-account.json cert-*.pem > sha256sum.txt 2>/dev/null || {
+    local stage="$EVIDENCE_STAGE" quoted_hash
+    if ! (cd "$stage" && sha256sum acme-account.json cert-*.pem > sha256sum.txt) 2>/dev/null; then
         echo "Error: No certificate files found"
+        rm -rf "$stage"
         return 1
-    }
-    
-    QUOTED_HASH=$(sha256sum sha256sum.txt | awk '{print $1}')
-    
-    PADDED_HASH="${QUOTED_HASH}"
-    while [ ${#PADDED_HASH} -lt 128 ]; do
-        PADDED_HASH="${PADDED_HASH}0"
+    fi
+
+    quoted_hash=$(sha256sum "$stage/sha256sum.txt" | awk '{print $1}')
+    while [ ${#quoted_hash} -lt 128 ]; do
+        quoted_hash="${quoted_hash}0"
     done
-    QUOTED_HASH="${PADDED_HASH}"
-    
-    if [[ -S /var/run/dstack.sock ]]; then
-        curl -s --unix-socket /var/run/dstack.sock "http://localhost/GetQuote?report_data=${QUOTED_HASH}" > quote.json
-    else
-        curl -s --unix-socket /var/run/tappd.sock "http://localhost/prpc/Tappd.RawQuote?report_data=${QUOTED_HASH}" > quote.json
-    fi
-    if [ $? -ne 0 ]; then
+
+    if ! evidence_get_quote "$quoted_hash" > "$stage/quote.json"; then
         echo "Error: Failed to generate evidences"
+        rm -rf "$stage"
         return 1
     fi
+    chmod 644 "$stage/sha256sum.txt" "$stage/quote.json"
+    evidence_publish "$stage"
     echo "Generated evidences successfully"
+}
+
+# -f: the guest agent reports errors as an HTTP status with a body, and that
+# body must not be published as the quote.
+evidence_get_quote() {
+    if [[ -S /var/run/dstack.sock ]]; then
+        curl -sSf --unix-socket /var/run/dstack.sock "http://localhost/GetQuote?report_data=$1"
+    else
+        curl -sSf --unix-socket /var/run/tappd.sock "http://localhost/prpc/Tappd.RawQuote?report_data=$1"
+    fi
+}
+
+# Each rename is atomic. The manifest and quote go last, so they never list a
+# file that is not yet in place, and certificates of removed domains go after.
+evidence_publish() {
+    local stage="$1" names name f
+    names=$(awk '{print $2}' "$stage/sha256sum.txt")
+    for name in $names sha256sum.txt quote.json; do
+        mv -f "$stage/$name" "$EVIDENCE_DIR/$name"
+    done
+    for f in "$EVIDENCE_DIR"/cert-*.pem; do
+        [ -e "$f" ] || continue
+        grep -qxF "${f##*/}" <<<"$names" || rm -f "$f"
+    done
+    rm -rf "$stage"
 }
 
 evidence_start_server() {
