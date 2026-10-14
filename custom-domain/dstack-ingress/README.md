@@ -7,7 +7,7 @@ TCP proxy with automatic TLS termination for dstack applications.
 dstack-ingress is a HAProxy-based L4 (TCP) proxy that provides:
 
 - Automatic SSL certificate provisioning and renewal via Let's Encrypt
-- Multi-provider DNS support (Cloudflare, Linode DNS, Namecheap)
+- Multi-provider DNS support (Cloudflare, Linode DNS, Namecheap, Route53)
 - Pure TCP proxying — all protocols (HTTP, WebSocket, gRPC, arbitrary TCP) work transparently
 - Wildcard domain support
 - SNI-based multi-domain routing
@@ -157,10 +157,8 @@ environment:
 | Variable | Description |
 |----------|-------------|
 | `DOMAIN` | Your domain (single-domain mode). Supports wildcards (`*.example.com`) |
-| `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80` |
+| `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80`. Not needed with `ROUTING_MAP` |
 | `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `gateway.dstack-prod5.phala.network`) |
-| `ACME_EMAIL` | *(optional)* ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See below — it is optional, and published |
-| `DNS_PROVIDER` | DNS provider (`cloudflare`, `linode`, `namecheap`) |
 
 `GATEWAY_DOMAIN` is published as your domain's CNAME target, so its first label
 must start with a letter or digit. Android's resolver rejects a leading
@@ -177,19 +175,24 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line |
 | `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
+| `ACME_EMAIL` | | ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See [below](#the-acme-contact-address-is-optional-and-public) — it is optional, and published |
 | `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode. `CERTBOT_STAGING` is the historical name and still works |
+| `ACME_DIRECTORY_URL` | Let's Encrypt | ACME directory to use instead, e.g. a local Pebble. dns-01 only: passed to certbot as `--server`, and certbot refuses it together with `ACME_STAGING`. tls-alpn-01 ignores it |
 | `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
+| `DNS_PROVIDER` | detected | dns-01: `cloudflare`, `linode`, `namecheap` or `route53`. Detected from the provider's credential variable when unset; set it explicitly for `route53`, whose role setup depends on it |
 | `DNS_SETUP_MODE` | `wait` | How to handle operator-managed records: `wait`, `print` or `webhook` — see below. Applies to tls-alpn-01 and to dns-01 challenge delegation |
 | `DNS_SETUP_TIMEOUT` | `1800` | Seconds to wait for those records to appear |
 | `DNS_SETUP_INTERVAL` | `15` | Seconds between DNS checks |
-| `DNS_WEBHOOK_URL` | | tls-alpn-01 + `DNS_SETUP_MODE=webhook`: endpoint to notify |
+| `DNS_WEBHOOK_URL` | | `DNS_SETUP_MODE=webhook`: endpoint to notify |
 | `DNS_WEBHOOK_TOKEN` | | Shared secret; the payload is HMAC-SHA256 signed with it |
+| `DNS_WEBHOOK_TIMEOUT` | `15` | Seconds per webhook POST attempt |
 | `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records |
+| `TLSALPN_ADDRESS` | `127.0.0.1` | Address lego's ACME responder binds to, and haproxy forwards `acme-tls/1` connections to |
 | `TLSALPN_PORT` | `9443` | Loopback port lego's ACME responder binds to |
 | `TLS_TERMINATE_PORT` | `9444` | Loopback port the TLS frontend moves to in tls-alpn-01 mode |
 | `RENEW_DAYS_BEFORE` | client default | Days of remaining lifetime that trigger renewal. Applies to both modes: passed to lego as `--renew-days`, and written to certbot's `renew_before_expiry`. Unsetting it removes that setting again, so the client's own default applies |
 | `RENEW_INTERVAL` | `43200` | Seconds between successful certificate passes |
-| `DNS_SETTLE_SECONDS` | `30` | Wait after DNS verifies, so the gateway's own TXT cache expires |
+| `DNS_SETTLE_SECONDS` | `30` | tls-alpn-01: wait after DNS verifies, so the gateway's own TXT cache expires |
 | `MAXCONN` | `4096` | HAProxy max connections |
 | `TIMEOUT_CONNECT` | `10s` | Backend connect timeout |
 | `TIMEOUT_CLIENT` | `86400s` | Client-side timeout (24h for long-lived connections) |
