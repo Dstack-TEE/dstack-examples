@@ -220,7 +220,8 @@ class CertManager:
             # renewal config from the initial `certonly`, so we don't re-specify
             # them here (and must not fall back to the DNS plugin).
             if action == "renew":
-                base_cmd.extend(["--cert-name", self._lineage_name(domain)])
+                base_cmd.extend(["--cert-name", self._lineage_name(domain),
+                                 "--no-random-sleep-on-renew"])
             # Explicit on `renew` too: certbot would otherwise take the server
             # saved in the lineage, whatever the configuration says now.
             base_cmd.extend(["--server", acme_server()])
@@ -267,7 +268,11 @@ class CertManager:
             # /etc/letsencrypt/renewal. run_pass calls this once per domain, so
             # N domains meant N passes over all N lineages, and the result was
             # then reported against whichever domain happened to ask.
-            base_cmd.extend(["--cert-name", self._lineage_name(domain)])
+            #
+            # Without a TTY, certbot also sleeps up to 8 minutes before a due
+            # renewal, which overruns _certbot_timeout and gets the run killed.
+            base_cmd.extend(["--cert-name", self._lineage_name(domain),
+                             "--no-random-sleep-on-renew"])
         base_cmd.extend(["--server", acme_server()])
 
         if getattr(self.provider, 'CERTBOT_PROPAGATION_SECONDS'):
