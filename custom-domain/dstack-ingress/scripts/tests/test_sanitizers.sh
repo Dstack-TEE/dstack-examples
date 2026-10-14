@@ -120,6 +120,8 @@ assert_equal "$(routing_map $'# apps\n  a.example.com = http://app:80\n\n  # api
     $'a.example.com app:80\n*.example.com api:8080' "routing_map_entries skips indented comments and blank lines"
 assert_equal "$(routing_map 'a.example.com=app:80, b.example.com=api:8080')" \
     $'a.example.com app:80\nb.example.com api:8080' "routing_map_entries accepts comma-separated entries"
+assert_equal "$(routing_map $'# apps, internal\r\na.example.com=app:80\r\nb.example.com=api:8080\r\n')" \
+    $'a.example.com app:80\nb.example.com api:8080' "routing_map_entries accepts CRLF and commas in comments"
 assert_fails "routing_map_entries rejects duplicate domains" routing_map $'a.example.com=app:80\nA.example.com=api:8080'
 assert_fails "routing_map_entries rejects an entry without a target" routing_map 'a.example.com'
 assert_fails "routing_map_entries rejects an invalid domain" routing_map 'bad_domain=app:80'

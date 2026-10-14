@@ -149,8 +149,9 @@ backend ${be_name}
 }
 
 # Parse and validate ROUTING_MAP (newline- or comma-separated domain=target
-# entries) into "domain host:port" lines. Fails on an invalid or duplicate entry
-# or an empty map, so entrypoint.sh can reject a bad map before any ACME work.
+# entries; comment lines are dropped before splitting on commas) into
+# "domain host:port" lines. Fails on an invalid or duplicate entry or an empty
+# map, so entrypoint.sh can reject a bad map before any ACME work.
 routing_map_entries() {
     local line domain target
     local -A seen=()
@@ -179,7 +180,7 @@ routing_map_entries() {
 
         # Strip protocol prefix from target if present
         echo "${domain} $(parse_target_endpoint "$target")"
-    done <<< "$(echo "$ROUTING_MAP" | tr ',' '\n')"
+    done <<< "$(echo "$ROUTING_MAP" | tr -d '\r' | sed '/^[[:space:]]*#/d' | tr ',' '\n')"
     if [[ ${#seen[@]} -eq 0 ]]; then
         echo "Error: ROUTING_MAP has no entries" >&2
         return 1
