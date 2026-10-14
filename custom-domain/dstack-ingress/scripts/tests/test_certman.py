@@ -268,7 +268,8 @@ class AcmeServerTest(EnvTestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         conf = os.path.join(tmp, "a.example.com.conf")
         with open(conf, "w", encoding="utf-8") as fh:
-            fh.write(f"version = 5.8.0\n[renewalparams]\nserver = {lineage_server}\n")
+            if lineage_server:
+                fh.write(f"version = 5.8.0\n[renewalparams]\nserver = {lineage_server}\n")
         calls = []
         mgr = object.__new__(certman.CertManager)
         mgr._renewal_conf_path = lambda domain: conf  # noqa: SLF001
@@ -293,6 +294,9 @@ class AcmeServerTest(EnvTestCase):
     def test_missing_account_replaces_the_certificate(self):
         self.assertEqual(self.run_auto(certman.ACME_PROD, account=False),
                          [("obtain", True)])
+
+    def test_unknown_server_does_not_replace_every_pass(self):
+        self.assertEqual(self.run_auto(None), ["renew"])
 
 
 class CertbotTimeoutTest(EnvTestCase):

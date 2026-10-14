@@ -105,6 +105,22 @@ def certificate_exists(domain: str) -> bool:
     return os.path.isfile(crt) and os.path.isfile(key)
 
 
+def _origin(url: str) -> str:
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def issuing_origin(domain: str) -> Optional[str]:
+    """The CA the current certificate came from, by the URL lego recorded."""
+    path = os.path.join(LEGO_PATH, "certificates", f"{domain}.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            url = json.load(fh).get("certUrl")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return _origin(url) if url else None
+
+
 def _renewed_marker(domain: str) -> str:
     return os.path.join(LEGO_PATH, f".renewed-{domain}")
 
@@ -188,6 +204,7 @@ def run_cert(domain: str, email: str) -> int:
     crt, key_file = cert_paths(domain)
     key = None
     target = ["--domains", domain]
+    force: List[str] = []
     if deterministic_key.enabled():
         # With --csr lego renews on its usual schedule but never rewrites the
         # .key file, so it is kept in step below.
@@ -198,12 +215,21 @@ def run_cert(domain: str, email: str) -> int:
         target = ["--csr", f"{base}.csr", "--private-key", f"{base}.key"]
         if certificate_exists(domain) and not deterministic_key.cert_matches(crt, key):
             print(f"Certificate for {domain} does not carry the derived key, re-issuing")
-            target.append("--renew-force")
+            force = ["--renew-force"]
+
+    # The certificate volume outlives the configuration. After a switch of CA,
+    # lego would keep the old CA's certificate until it is due, and then fail:
+    # its ARI request names a certificate the new CA never issued.
+    origin = issuing_origin(domain)
+    if certificate_exists(domain) and origin and origin != _origin(acme_server()):
+        print(f"Certificate for {domain} came from {origin}, replacing it from {acme_server()}")
+        force = ["--renew-force", "--ari-disable"]
 
     cmd = (
         [LEGO_BIN, "run"]
         + _common_flags(email)
         + target
+        + force
         + _challenge_flags()
         + ["--deploy-hook", f"touch {marker}"]
     )

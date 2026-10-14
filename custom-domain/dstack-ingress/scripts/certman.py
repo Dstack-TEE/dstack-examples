@@ -693,6 +693,10 @@ class CertManager:
             # between staging and production (or ACME_DIRECTORY_URL), the
             # certificate in place came from the other server.
             server = self._issuing_server(domain)
+            if server is None and not deterministic_key.enabled():
+                # certbot always records the server; a lineage without one has
+                # a broken renewal config, which re-issuing would not repair.
+                server = acme_server()
             if server == acme_server() and self.acme_account_exists():
                 success, renewed = self.renew_certificate(domain, email)
                 return success, renewed  # Only generate evidence if actually renewed
