@@ -13,6 +13,8 @@ from .base import (
     write_secret_file,
 )
 
+NS = "{http://api.namecheap.com/xml.response}"
+
 
 class NamecheapDNSProvider(DNSProvider):
     """Namecheap DNS provider implementation."""
@@ -140,6 +142,32 @@ class NamecheapDNSProvider(DNSProvider):
         
         return sld, tld
 
+    def _get_hosts(self, sld: str, tld: str) -> List[Dict[str, str]]:
+        """Read the zone's full host list.
+
+        setHosts replaces the whole zone, so callers must never write back a
+        list that did not come from a successful read: raise instead of
+        returning an empty or partial list.
+        """
+        result = self._make_request(
+            "namecheap.domains.dns.getHosts",
+            SLD=sld,
+            TLD=tld
+        )
+        hosts_result = None
+        if result.get("success", False):
+            hosts_result = result["result"].find(f".//{NS}DomainDNSGetHostsResult")
+        if hosts_result is None:
+            raise RuntimeError(
+                f"Failed to read DNS records for {sld}.{tld}: {result.get('errors', 'no host list in response')}"
+            )
+        return [dict(host.attrib) for host in hosts_result.findall(f"{NS}host")]
+
+    @staticmethod
+    def _host_fqdn(host_name: str, sld: str, tld: str) -> str:
+        domain = f"{sld}.{tld}"
+        return domain if host_name == "@" else f"{host_name}.{domain}"
+
     def get_dns_records(
         self, name: str, record_type: Optional[RecordType] = None
     ) -> List[DNSRecord]:
@@ -152,32 +180,18 @@ class NamecheapDNSProvider(DNSProvider):
         sld, tld = domain_info
         print(f"Getting DNS records for {name} (SLD: {sld}, TLD: {tld})")
         
-        result = self._make_request(
-            "namecheap.domains.dns.getHosts",
-            SLD=sld,
-            TLD=tld
-        )
+        hosts = self._get_hosts(sld, tld)
+        wanted = name.rstrip(".").lower()
         
-        if not result.get("success", False):
-            return []
-        
-        # Parse the host records from XML response
         records = []
-        host_elements = result["result"].findall('.//{http://api.namecheap.com/xml.response}host')
-        
-        for host in host_elements:
-            record_name = host.get("Name")
+        for host in hosts:
+            record_name = self._host_fqdn(host.get("Name", "@"), sld, tld)
             record_type_str = host.get("Type")
             
-            # Skip if record type doesn't match
+            if record_name.lower() != wanted:
+                continue
             if record_type and record_type_str != record_type.value:
                 continue
-            
-            # Skip if name doesn't match (considering @ for root domain)
-            if record_name == "@":
-                record_name = sld + "." + tld
-            elif not record_name.endswith("." + sld + "." + tld):
-                record_name = record_name + "." + sld + "." + tld
             
             # Create DNS record
             record = DNSRecord(
@@ -214,29 +228,22 @@ class NamecheapDNSProvider(DNSProvider):
             return False
         
         sld, tld = domain_info
+        domain = f"{sld}.{tld}"
+        name = record.name.rstrip(".")
+        hostname = "@" if name.lower() == domain.lower() else name[:-len(domain) - 1]
         
-        # Get existing records
-        existing_records = self.get_dns_records(record.name)
-        
-        # Extract hostname from domain
-        if record.name == sld + "." + tld:
-            hostname = "@"
-        else:
-            hostname = record.name.replace("." + sld + "." + tld, "")
-        
-        # Remove existing records of the same type and name, convert to dicts
-        all_records = []
-        for r in existing_records:
-            if r.name == record.name and r.type == record.type:
-                continue
-            r_hostname = "@" if r.name == sld + "." + tld else r.name.replace("." + sld + "." + tld, "")
-            d = {"HostName": r_hostname, "RecordType": r.type.value, "Address": r.content, "TTL": str(r.ttl)}
-            if r.type == RecordType.MX and r.priority:
-                d["MXPref"] = str(r.priority)
-            all_records.append(d)
+        # Replace existing records of the same type and name, keep the rest of the zone
+        hosts = self._get_hosts(sld, tld)
+        all_records = [
+            h for h in hosts
+            if not (
+                self._host_fqdn(h.get("Name", "@"), sld, tld).lower() == name.lower()
+                and h.get("Type") == record.type.value
+            )
+        ]
 
         # Add new record
-        new_record = {"HostName": hostname, "RecordType": record.type.value, "Address": record.content, "TTL": str(record.ttl)}
+        new_record = {"Name": hostname, "Type": record.type.value, "Address": record.content, "TTL": str(record.ttl)}
         if record.type == RecordType.MX and record.priority:
             new_record["MXPref"] = str(record.priority)
         all_records.append(new_record)
@@ -250,18 +257,8 @@ class NamecheapDNSProvider(DNSProvider):
             return False
 
         sld, tld = domain_info
-        existing_records = self.get_dns_records(domain)
-
-        # Remove record with matching ID, convert rest to dicts
-        all_records = []
-        for r in existing_records:
-            if r.id == record_id:
-                continue
-            r_hostname = "@" if r.name == sld + "." + tld else r.name.replace("." + sld + "." + tld, "")
-            d = {"HostName": r_hostname, "RecordType": r.type.value, "Address": r.content, "TTL": str(r.ttl)}
-            if r.type == RecordType.MX and r.priority:
-                d["MXPref"] = str(r.priority)
-            all_records.append(d)
+        hosts = self._get_hosts(sld, tld)
+        all_records = [h for h in hosts if h.get("HostId") != record_id]
 
         return self._set_dns_records(sld, tld, all_records)
 
@@ -273,7 +270,7 @@ class NamecheapDNSProvider(DNSProvider):
         print(f"You need to manually add CAA record for {caa_record.name}")
         return True  # Return True to not break the workflow
 
-    def _set_dns_records(self, sld: str, tld: str, records: List[Dict]) -> bool:
+    def _set_dns_records(self, sld: str, tld: str, records: List[Dict[str, str]]) -> bool:
         """Set DNS records for a domain."""
         # Prepare host records parameters
         params = {
@@ -283,13 +280,13 @@ class NamecheapDNSProvider(DNSProvider):
         
         # Add host records to parameters
         for i, record in enumerate(records, 1):
-            params[f"HostName{i}"] = record.get("HostName", "@")
-            params[f"RecordType{i}"] = record.get("RecordType", "A")
+            params[f"HostName{i}"] = record.get("Name", "@")
+            params[f"RecordType{i}"] = record.get("Type", "A")
             params[f"Address{i}"] = record.get("Address", "")
             params[f"TTL{i}"] = record.get("TTL", "1800")
             
             # Add MXPref for MX records
-            if record.get("RecordType") == "MX":
+            if record.get("Type") == "MX":
                 params[f"MXPref{i}"] = record.get("MXPref", "10")
         
         print(f"Setting DNS records for {sld}.{tld}")
