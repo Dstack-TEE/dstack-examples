@@ -366,6 +366,27 @@ class CertManager:
             os.replace(os.path.join(staging, name), os.path.join(target, name))
         return True
 
+    def _adopt_legacy_deterministic(self, domain: str) -> None:
+        """Clear the plain files 2.4-2.6 wrote into live/ for derived keys.
+
+        certbot links a lineage's files into live/ from archive/; plain files
+        there come from the old `--csr` issuance, which nothing renews and which
+        blocks certbot from creating the lineage. Keep them as the deterministic
+        certificate if there is none yet, otherwise drop them.
+        """
+        live = f"/etc/letsencrypt/live/{self._lineage_name(domain)}"
+        fullchain = os.path.join(live, "fullchain.pem")
+        if not os.path.isfile(fullchain) or os.path.islink(fullchain):
+            return
+        target = self._deterministic_dir(domain)
+        if deterministic_key.enabled() and not os.path.exists(target):
+            os.makedirs(DETERMINISTIC_DIR, exist_ok=True)
+            os.replace(live, target)
+            print(f"Moved the certificate in {live} to {target}")
+        else:
+            shutil.rmtree(live)
+            print(f"Removed the unmanaged certificate in {live}")
+
     def _deterministic_renewal_due(self, domain: str) -> bool:
         fullchain = self._fullchain_path(domain)
         if not deterministic_key.cert_matches(fullchain, deterministic_key.private_key(domain)):
@@ -626,6 +647,7 @@ class CertManager:
         Returns:
             (success, needs_evidence): success status and whether evidence should be generated
         """
+        self._adopt_legacy_deterministic(domain)
         if action == "auto":
             if self.certificate_exists(domain) and self.acme_account_exists():
                 success, renewed = self.renew_certificate(domain, email)
