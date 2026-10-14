@@ -82,7 +82,13 @@ if [ -z "$VERSION" ]; then
 fi
 
 # Untracked files count as dirty: scripts/ is copied wholesale into the image.
+# So do git-ignored ones (editor backups, say) that the scripts/ rules in
+# .dockerignore let through: git status does not report them, yet they would
+# change the digest.
 DIRTY="$(git status --porcelain --untracked-files=all -- .)"
+LEAKED="$(git ls-files --others --ignored --exclude-standard --full-name -- scripts |
+    grep -Ev '(^|/)(\.[^/]*|__pycache__)(/|$)' | sed 's/^/!! /' || true)"
+DIRTY="$(printf '%s\n%s' "$DIRTY" "$LEAKED" | sed '/^$/d')"
 if [ -n "$DIRTY" ]; then
     if [ "$REQUIRE_CLEAN" = true ]; then
         echo "Error: working tree is not clean; refusing to build a release image:" >&2
