@@ -299,6 +299,20 @@ class AcmeServerTest(EnvTestCase):
         self.assertEqual(self.run_auto(None), ["renew"])
 
 
+class RenewRandomSleepTest(EnvTestCase):
+    """Without a TTY certbot sleeps up to 480s before a due renewal, longer
+    than the subprocess timeout allows."""
+
+    def test_renew_skips_the_random_sleep(self):
+        cmd = _command_manager()._build_certbot_command("renew", "a.example.com", "")
+        self.assertIn("--no-random-sleep-on-renew", cmd)
+
+    def test_delegation_renew_skips_the_random_sleep(self):
+        os.environ["DELEGATION_ZONE"] = "deleg.example.net"
+        cmd = _command_manager()._build_certbot_command("renew", "a.example.com", "")
+        self.assertIn("--no-random-sleep-on-renew", cmd)
+
+
 class CertbotTimeoutTest(EnvTestCase):
     """A fixed 300s cap could not fit every provider's own propagation wait."""
 

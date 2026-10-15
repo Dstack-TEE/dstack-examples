@@ -232,6 +232,9 @@ def run_cert(domain: str, email: str) -> int:
         + force
         + _challenge_flags()
         + ["--deploy-hook", f"touch {marker}"]
+        # lego otherwise sleeps up to 8 minutes before a due renewal, most of
+        # RUN_TIMEOUT.
+        + ["--no-random-sleep"]
     )
     renew_days = os.environ.get("RENEW_DAYS_BEFORE", "")
     if renew_days:
