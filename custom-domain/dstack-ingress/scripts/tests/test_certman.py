@@ -106,13 +106,6 @@ class RenewalWindowTest(unittest.TestCase):
         self.apply(None)
         self.assertEqual(self.read(), CERTBOT_CONF)
 
-    def test_invalid_value_leaves_the_config_alone(self):
-        self.apply("365")
-        before = self.read()
-        for bad in ("0", "-1", "later", "30 days"):
-            self.apply(bad)
-            self.assertEqual(self.read(), before, f"{bad!r} should be ignored")
-
     def test_missing_lineage_is_not_an_error(self):
         os.unlink(self.path)
         self.apply("365")

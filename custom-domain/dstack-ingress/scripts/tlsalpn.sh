@@ -25,17 +25,24 @@ LEGO_PATH=${LEGO_PATH:-/etc/letsencrypt/lego}
 TLSALPN_ADDRESS=${TLSALPN_ADDRESS:-127.0.0.1}
 TLSALPN_PORT=${TLSALPN_PORT:-9443}
 TLS_TERMINATE_PORT=${TLS_TERMINATE_PORT:-9444}
-DNS_SETUP_MODE=${DNS_SETUP_MODE:-wait}
 DNS_SETTLE_SECONDS=${DNS_SETTLE_SECONDS:-30}
-export LEGO_BIN LEGO_PATH TLSALPN_ADDRESS TLSALPN_PORT DNS_SETUP_MODE
 
-case "$DNS_SETUP_MODE" in
-    wait|print|webhook) ;;
-    *)
-        echo "Error: invalid DNS_SETUP_MODE '$DNS_SETUP_MODE' (expected wait, print or webhook)" >&2
-        exit 1
-        ;;
-esac
+# All three are written into haproxy.cfg, so they get the same treatment as the
+# settings entrypoint.sh checks.
+if ! TLSALPN_ADDRESS=$(sanitize_host "$TLSALPN_ADDRESS" "TLSALPN_ADDRESS"); then
+    exit 1
+fi
+if ! TLSALPN_PORT=$(sanitize_port "$TLSALPN_PORT" "TLSALPN_PORT"); then
+    exit 1
+fi
+if ! TLS_TERMINATE_PORT=$(sanitize_port "$TLS_TERMINATE_PORT" "TLS_TERMINATE_PORT"); then
+    exit 1
+fi
+
+if ! DNS_SETTLE_SECONDS=$(sanitize_nonnegative_integer "$DNS_SETTLE_SECONDS" "DNS_SETTLE_SECONDS"); then
+    exit 1
+fi
+export LEGO_BIN LEGO_PATH TLSALPN_ADDRESS TLSALPN_PORT
 
 # lego stores certificates under $LEGO_PATH/certificates/<domain>.{crt,key};
 # the .crt already holds the full chain.

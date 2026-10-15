@@ -5,10 +5,11 @@
 
 sanitize_port() {
     local candidate="$1"
-    if [[ "$candidate" =~ ^[0-9]+$ ]] && (( candidate >= 1 && candidate <= 65535 )); then
+    local name="${2:-PORT}"
+    if [[ "$candidate" =~ ^[1-9][0-9]{0,4}$ ]] && (( candidate <= 65535 )); then
         echo "$candidate"
     else
-        echo "Error: Invalid PORT value: $candidate" >&2
+        echo "Error: Invalid ${name} value: $candidate" >&2
         return 1
     fi
 }
@@ -23,6 +24,19 @@ sanitize_domain() {
         echo "$candidate"
     else
         echo "Error: Invalid DOMAIN value: $candidate" >&2
+        return 1
+    fi
+}
+
+# A hostname, IPv4 address or bracketed IPv6 address. Only whitespace and
+# other characters that could break out of a haproxy.cfg line matter here.
+sanitize_host() {
+    local candidate="$1"
+    local name="${2:-host}"
+    if [[ "$candidate" =~ ^[][A-Za-z0-9.:-]+$ ]]; then
+        echo "$candidate"
+    else
+        echo "Error: Invalid ${name} value: $candidate" >&2
         return 1
     fi
 }
@@ -74,10 +88,34 @@ sanitize_dns_label() {
 sanitize_positive_integer() {
     local candidate="$1"
     local name="${2:-value}"
-    if [[ "$candidate" =~ ^[0-9]+$ ]] && (( candidate >= 1 )); then
+    if [[ "$candidate" =~ ^[1-9][0-9]*$ ]]; then
         echo "$candidate"
     else
         echo "Error: Invalid ${name}: $candidate (must be a positive integer)" >&2
+        return 1
+    fi
+}
+
+sanitize_nonnegative_integer() {
+    local candidate="$1"
+    local name="${2:-value}"
+    if [[ "$candidate" =~ ^(0|[1-9][0-9]*)$ ]]; then
+        echo "$candidate"
+    else
+        echo "Error: Invalid ${name}: $candidate (must be a non-negative integer)" >&2
+        return 1
+    fi
+}
+
+# lego builds a directory name from the address, so reject what would make it
+# unsafe as one: no single @ with text on both sides, a /, whitespace or
+# control characters, or a leading dot.
+sanitize_email() {
+    local candidate="$1"
+    if [[ "$candidate" =~ ^[^@./[:space:][:cntrl:]][^@/[:space:][:cntrl:]]*@[^@/[:space:][:cntrl:]]+$ ]]; then
+        echo "$candidate"
+    else
+        echo "Error: Invalid ACME_EMAIL/CERTBOT_EMAIL value: $candidate" >&2
         return 1
     fi
 }

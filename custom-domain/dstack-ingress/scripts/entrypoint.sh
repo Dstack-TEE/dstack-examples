@@ -34,6 +34,11 @@ ALPN=${ALPN:-}
 ACCEPT_PROXY_PROTOCOL=${ACCEPT_PROXY_PROTOCOL:-false}
 SEND_PROXY_PROTOCOL=${SEND_PROXY_PROTOCOL:-false}
 CHALLENGE_TYPE=${CHALLENGE_TYPE:-dns-01}
+RENEW_INTERVAL=${RENEW_INTERVAL:-43200}
+RENEW_DAYS_BEFORE=${RENEW_DAYS_BEFORE:-}
+DNS_SETUP_TIMEOUT=${DNS_SETUP_TIMEOUT:-1800}
+DNS_SETUP_INTERVAL=${DNS_SETUP_INTERVAL:-15}
+DNS_SETUP_MODE=${DNS_SETUP_MODE:-wait}
 
 # ACME account settings, normalised once for both modes. What you are
 # configuring is an ACME account, not a particular client -- which client
@@ -62,7 +67,28 @@ fi
 if ! DOMAIN=$(sanitize_domain "$DOMAIN"); then
     exit 1
 fi
+all_domains=$(get-all-domains.sh || true)
+if [ -z "$all_domains" ]; then
+    echo "Error: no domain configured; set DOMAIN or DOMAINS" >&2
+    exit 1
+fi
+# DOMAINS reaches file paths and certificate requests unchecked, so every
+# entry has to pass the same check as DOMAIN.
+while IFS= read -r domain; do
+    if ! sanitize_domain "$domain" >/dev/null; then
+        exit 1
+    fi
+done <<<"$all_domains"
 if ! TARGET_ENDPOINT=$(sanitize_target_endpoint "$TARGET_ENDPOINT"); then
+    exit 1
+fi
+# Without one of these haproxy has no default backend and closes every
+# connection that is not for the evidence server.
+if [ -z "${ROUTING_MAP:-}" ] && [ -z "$TARGET_ENDPOINT" ]; then
+    echo "Error: nothing to route to; set TARGET_ENDPOINT or ROUTING_MAP" >&2
+    exit 1
+fi
+if [ -n "$ACME_EMAIL" ] && ! ACME_EMAIL=$(sanitize_email "$ACME_EMAIL"); then
     exit 1
 fi
 if ! TXT_PREFIX=$(sanitize_dns_label "$TXT_PREFIX"); then
@@ -80,7 +106,33 @@ fi
 if ! TIMEOUT_SERVER=$(sanitize_haproxy_timeout "$TIMEOUT_SERVER" "TIMEOUT_SERVER"); then
     exit 1
 fi
-if ! EVIDENCE_PORT=$(sanitize_positive_integer "$EVIDENCE_PORT" "EVIDENCE_PORT"); then
+if ! EVIDENCE_SERVER=$(sanitize_boolean "$EVIDENCE_SERVER" "EVIDENCE_SERVER"); then
+    exit 1
+fi
+if ! EVIDENCE_PORT=$(sanitize_port "$EVIDENCE_PORT" "EVIDENCE_PORT"); then
+    exit 1
+fi
+if ! RENEW_INTERVAL=$(sanitize_positive_integer "$RENEW_INTERVAL" "RENEW_INTERVAL"); then
+    exit 1
+fi
+if [ -n "$RENEW_DAYS_BEFORE" ] && ! RENEW_DAYS_BEFORE=$(sanitize_positive_integer "$RENEW_DAYS_BEFORE" "RENEW_DAYS_BEFORE"); then
+    exit 1
+fi
+if ! DNS_SETUP_TIMEOUT=$(sanitize_positive_integer "$DNS_SETUP_TIMEOUT" "DNS_SETUP_TIMEOUT"); then
+    exit 1
+fi
+if ! DNS_SETUP_INTERVAL=$(sanitize_positive_integer "$DNS_SETUP_INTERVAL" "DNS_SETUP_INTERVAL"); then
+    exit 1
+fi
+case "$DNS_SETUP_MODE" in
+    wait|print|webhook) ;;
+    *)
+        echo "Error: invalid DNS_SETUP_MODE '$DNS_SETUP_MODE' (expected wait, print or webhook)" >&2
+        exit 1
+        ;;
+esac
+if [ "$DNS_SETUP_MODE" = "webhook" ] && [ -n "${DNS_WEBHOOK_TIMEOUT+set}" ] &&
+   ! DNS_WEBHOOK_TIMEOUT=$(sanitize_positive_integer "$DNS_WEBHOOK_TIMEOUT" "DNS_WEBHOOK_TIMEOUT"); then
     exit 1
 fi
 if ! ALPN=$(sanitize_alpn "$ALPN"); then
@@ -111,7 +163,8 @@ fi
 export PORT DOMAIN DOMAINS TARGET_ENDPOINT ROUTING_MAP TXT_PREFIX MAXCONN
 export TIMEOUT_CONNECT TIMEOUT_CLIENT TIMEOUT_SERVER EVIDENCE_SERVER EVIDENCE_PORT ALPN
 export ACCEPT_PROXY_PROTOCOL SEND_PROXY_PROTOCOL
-export ACME_EMAIL ACME_STAGING
+export ACME_EMAIL ACME_STAGING RENEW_INTERVAL RENEW_DAYS_BEFORE
+export DNS_SETUP_TIMEOUT DNS_SETUP_INTERVAL DNS_SETUP_MODE DNS_WEBHOOK_TIMEOUT
 
 # A container restart keeps the filesystem, and with it the last run's pidfile.
 rm -f /var/run/haproxy/haproxy.pid
