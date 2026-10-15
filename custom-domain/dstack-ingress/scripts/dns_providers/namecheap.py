@@ -4,7 +4,7 @@ import json
 import os
 import requests
 import xml.etree.ElementTree as ET
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from .base import (
     HTTP_TIMEOUT,
     CAARecord,
@@ -143,8 +143,8 @@ class NamecheapDNSProvider(DNSProvider):
         
         return sld, tld
 
-    def _get_hosts(self, sld: str, tld: str) -> List[Dict[str, str]]:
-        """Read the zone's full host list.
+    def _get_hosts(self, sld: str, tld: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
+        """Read the zone's full host list and its EmailType.
 
         setHosts replaces the whole zone, so callers must never write back a
         list that did not come from a successful read: raise instead of
@@ -162,7 +162,8 @@ class NamecheapDNSProvider(DNSProvider):
             raise RuntimeError(
                 f"Failed to read DNS records for {sld}.{tld}: {result.get('errors', 'no host list in response')}"
             )
-        return [dict(host.attrib) for host in hosts_result.findall(f"{NS}host")]
+        hosts = [dict(host.attrib) for host in hosts_result.findall(f"{NS}host")]
+        return hosts, hosts_result.get("EmailType")
 
     @staticmethod
     def _host_fqdn(host_name: str, sld: str, tld: str) -> str:
@@ -174,6 +175,11 @@ class NamecheapDNSProvider(DNSProvider):
         """Identify a host by its content: setHosts renumbers HostIds."""
         fqdn = cls._host_fqdn(host.get("Name", "@"), sld, tld).lower()
         return json.dumps([fqdn, host.get("Type"), host.get("Address")])
+
+    @staticmethod
+    def _host_label(name: str, sld: str, tld: str) -> str:
+        domain = f"{sld}.{tld}"
+        return "@" if name.lower() == domain.lower() else name[:-len(domain) - 1]
 
     def get_dns_records(
         self, name: str, record_type: Optional[RecordType] = None
@@ -187,7 +193,7 @@ class NamecheapDNSProvider(DNSProvider):
         sld, tld = domain_info
         print(f"Getting DNS records for {name} (SLD: {sld}, TLD: {tld})")
         
-        hosts = self._get_hosts(sld, tld)
+        hosts, _ = self._get_hosts(sld, tld)
         wanted = name.rstrip(".").lower()
         
         records = []
@@ -218,14 +224,13 @@ class NamecheapDNSProvider(DNSProvider):
             
             # Add CAA-specific data
             if record_type_str == "CAA":
-                # Parse CAA record content (format: flags tag value)
-                content = host.get("Address", "")
-                parts = content.split(" ", 2)
-                if len(parts) >= 3:
+                # Namecheap stores CAA as: flags tag "value"
+                parts = host.get("Address", "").split(None, 2)
+                if len(parts) == 3 and parts[0].isdigit():
                     record.data = {
                         "flags": int(parts[0]),
                         "tag": parts[1],
-                        "value": parts[2]
+                        "value": parts[2].strip('"')
                     }
             
             records.append(record)
@@ -240,12 +245,11 @@ class NamecheapDNSProvider(DNSProvider):
             return False
         
         sld, tld = domain_info
-        domain = f"{sld}.{tld}"
         name = record.name.rstrip(".")
-        hostname = "@" if name.lower() == domain.lower() else name[:-len(domain) - 1]
+        hostname = self._host_label(name, sld, tld)
         
         # Replace existing records of the same type and name, keep the rest of the zone
-        hosts = self._get_hosts(sld, tld)
+        hosts, email_type = self._get_hosts(sld, tld)
         all_records = [
             h for h in hosts
             if not (
@@ -260,7 +264,7 @@ class NamecheapDNSProvider(DNSProvider):
             new_record["MXPref"] = str(record.priority)
         all_records.append(new_record)
 
-        return self._set_dns_records(sld, tld, all_records)
+        return self._set_dns_records(sld, tld, all_records, email_type)
 
     def delete_dns_record(self, record_id: str, domain: str) -> bool:
         """Delete a DNS record."""
@@ -269,29 +273,80 @@ class NamecheapDNSProvider(DNSProvider):
             return False
 
         sld, tld = domain_info
-        hosts = self._get_hosts(sld, tld)
+        hosts, email_type = self._get_hosts(sld, tld)
         all_records = [h for h in hosts if self._host_key(h, sld, tld) != record_id]
         if len(all_records) == len(hosts):
             print(f"No record {record_id} in {sld}.{tld}; nothing to delete")
             return True
 
-        return self._set_dns_records(sld, tld, all_records)
+        return self._set_dns_records(sld, tld, all_records, email_type)
+
+    def set_caa_record(
+        self,
+        name: str,
+        tag: str,
+        value: str,
+        flags: int = 0,
+        ttl: int = 60,
+    ) -> bool:
+        """Replace the name's CAA records of this tag in a single setHosts.
+
+        The base implementation deletes first and creates after, which on
+        Namecheap is two zone writes with no CAA of this tag in between.
+        """
+        values = [
+            r.data["value"]
+            for r in self.get_dns_records(name, RecordType.CAA)
+            if r.data and r.data.get("tag") == tag
+        ]
+        if values == [value.strip('"')]:
+            print("CAA record with the same content already exists")
+            return True
+        return self.create_caa_record(
+            CAARecord(name=name, flags=flags, tag=tag, value=value, ttl=ttl)
+        )
 
     def create_caa_record(self, caa_record: CAARecord) -> bool:
-        """Create a CAA record."""
-        # Namecheap doesn't support CAA records through their API currently
-        # This is a limitation of their API
-        print(f"Warning: Namecheap API does not currently support CAA records")
-        print(f"You need to manually add CAA record for {caa_record.name}")
-        return True  # Return True to not break the workflow
+        """Replace the name's CAA records of this tag, keeping other tags (e.g. iodef)."""
+        domain_info = self._get_domain_info(caa_record.name)
+        if not domain_info:
+            print(f"Could not determine domain info from {caa_record.name}")
+            return False
 
-    def _set_dns_records(self, sld: str, tld: str, records: List[Dict[str, str]]) -> bool:
+        sld, tld = domain_info
+        name = caa_record.name.rstrip(".")
+        hostname = self._host_label(name, sld, tld)
+        value = caa_record.value.strip('"')
+
+        all_hosts, email_type = self._get_hosts(sld, tld)
+        hosts = [
+            h for h in all_hosts
+            if not (
+                h.get("Type") == "CAA"
+                and self._host_fqdn(h.get("Name", "@"), sld, tld).lower() == name.lower()
+                and h.get("Address", "").split(None, 2)[1:2] == [caa_record.tag]
+            )
+        ]
+        hosts.append({
+            "Name": hostname,
+            "Type": "CAA",
+            "Address": f'{caa_record.flags} {caa_record.tag} "{value}"',
+            "TTL": str(caa_record.ttl),
+        })
+        return self._set_dns_records(sld, tld, hosts, email_type)
+
+    def _set_dns_records(
+        self, sld: str, tld: str, records: List[Dict[str, str]], email_type: Optional[str] = None
+    ) -> bool:
         """Set DNS records for a domain."""
         # Prepare host records parameters
         params = {
             "SLD": sld,
             "TLD": tld
         }
+        # Pass the zone's EmailType back so setHosts keeps its mail setup
+        if email_type:
+            params["EmailType"] = email_type
         
         # Add host records to parameters
         for i, record in enumerate(records, 1):
