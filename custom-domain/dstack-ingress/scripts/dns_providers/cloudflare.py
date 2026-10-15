@@ -18,6 +18,9 @@ from .base import (
 class CloudflareDNSProvider(DNSProvider):
     """DNS provider implementation for Cloudflare."""
 
+    # Cloudflare answers a CAA query with the CAA beside a CNAME.
+    CAA_BESIDE_CNAME = True
+
     DETECT_ENV = "CLOUDFLARE_API_TOKEN"
 
     # Certbot configuration

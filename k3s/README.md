@@ -176,7 +176,7 @@ k3s-node   Ready    control-plane,master   2m    v1.31.6+k3s1
 
 ### 4. Wait for the Wildcard Certificate
 
-The dstack-ingress container issues a Let's Encrypt wildcard certificate via DNS-01 challenge. This takes 5-8 minutes after CVM boot (image pull + 120s DNS propagation + issuance). If your domain has existing CAA records, the first attempt may fail and auto-retry after setting the correct `issuewild` CAA record.
+The dstack-ingress container issues a Let's Encrypt wildcard certificate via DNS-01 challenge. This takes 5-8 minutes after CVM boot (image pull + 120s DNS propagation + issuance). If your domain has existing CAA records, the first attempt may fail and auto-retry after setting the correct `issue` and `issuewild` CAA records.
 
 Check with:
 

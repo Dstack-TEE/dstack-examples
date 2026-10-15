@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 
 import os
+import socket
+import sys
 
 from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
@@ -143,10 +145,34 @@ class DNSProvider(ABC):
         """
         pass
 
+    def _prune_records(
+        self, name: str, records: List[DNSRecord], wanted, strict: bool = True
+    ) -> Optional[bool]:
+        """Delete every record that is not wanted.
+
+        Returns whether a wanted record is present, or None if a stale one
+        could not be deleted -- reporting success then would leave it in place
+        for good, since the next run finds the wanted record and stops there.
+        Without `strict`, a failed delete is only a warning.
+        """
+        found = False
+        ok = True
+        for record in records:
+            if wanted(record):
+                found = True
+            elif not record.id or not self.delete_dns_record(record.id, name):
+                print(
+                    f"{'Error' if strict else 'Warning'}: could not delete stale "
+                    f"{record.type.value} record for {name}: {record.content}",
+                    file=sys.stderr,
+                )
+                ok = ok and not strict
+        return found if ok else None
+
     def set_a_record(
         self, name: str, ip_address: str, ttl: int = 60, proxied: bool = False
     ) -> bool:
-        """Set an A record (delete existing and create new).
+        """Set an A record (create new, then delete the others).
 
         Args:
             name: The record name
@@ -157,15 +183,6 @@ class DNSProvider(ABC):
         Returns:
             True if successful, False otherwise
         """
-        existing_records = self.get_dns_records(name, RecordType.A)
-        for record in existing_records:
-            # Check if record already exists with same IP
-            if record.content == ip_address:
-                print("A record with the same IP already exists")
-                return True
-            if record.id:
-                self.delete_dns_record(record.id, name)
-
         new_record = DNSRecord(
             id=None,
             name=name,
@@ -174,7 +191,29 @@ class DNSProvider(ABC):
             ttl=ttl,
             proxied=proxied,
         )
-        return self.create_dns_record(new_record)
+        return self._replace_records(
+            new_record, lambda r: r.content == ip_address, "same IP"
+        )
+
+    def _replace_records(
+        self, new_record: DNSRecord, wanted, what: str, strict: bool = True
+    ) -> bool:
+        """Make `new_record` the only value of its type at its name.
+
+        Stale values go only once the new one is in place: a failed create
+        must not leave the name without an answer.
+        """
+        name, record_type = new_record.name, new_record.type
+        records = self.get_dns_records(name, record_type)
+        if any(wanted(r) for r in records):
+            print(f"{record_type.value} record with the {what} already exists")
+        elif not self.create_dns_record(new_record):
+            return False
+        else:
+            # Some providers replace the whole set on create; list it again
+            # so the record just written is not mistaken for a stale one.
+            records = self.get_dns_records(name, record_type)
+        return self._prune_records(name, records, wanted, strict) is not None
 
     def clear_conflicting_alias(self, name: str, keep: "RecordType") -> None:
         """Remove address/alias records at `name` other than `keep`.
@@ -193,24 +232,60 @@ class DNSProvider(ABC):
                 if record.id:
                     self.delete_dns_record(record.id, name)
 
+    # Whether a CAA beside a CNAME at one name takes effect. By the DNS rules
+    # a CNAME owns its name, so resolvers follow it and never see the CAA,
+    # and Route53 and Linode refuse the pair. Providers whose servers answer a
+    # CAA query with the CAA beside the CNAME set this.
+    CAA_BESIDE_CNAME = False
+
     def set_alias_record(
         self,
         name: str,
         content: str,
         ttl: int = 60,
         proxied: bool = False,
+        with_caa: bool = False,
     ) -> bool:
         """Point `name` at `content`, in whatever form this provider allows.
 
-        A CNAME by default. Providers override this where a CNAME will not do
-        -- Linode publishes an address record instead, because it refuses a CAA
-        beside a CNAME, and delegation needs both on one name.
-
-        Callers should not second-guess the form: which one works is a property
-        of the provider, and this is where that knowledge lives.
+        A CNAME follows the gateway wherever it moves, so it is the default.
+        Where a CAA shares the name (`with_caa`, or one is already there) and
+        the provider cannot serve it beside a CNAME, an address record instead.
         """
+        if not self.CAA_BESIDE_CNAME and (with_caa or self._holds_caa(name)):
+            return self.set_address_record(name, content, ttl)
         self.clear_conflicting_alias(name, RecordType.CNAME)
         return self.set_cname_record(name, content, ttl, proxied)
+
+    def _holds_caa(self, name: str) -> bool:
+        """Whether `name` has a CAA record, which a CNAME would hide.
+
+        One left over from SET_CAA or delegation, or the operator's own: either
+        way it cannot be told apart from a wanted one, so keep it meaningful.
+        """
+        wanted = name.rstrip(".").lower()
+        if not any(
+            r.name.rstrip(".").lower() == wanted
+            for r in self.get_dns_records(name, RecordType.CAA)
+        ):
+            return False
+        print(
+            f"{name} has a CAA record, which a CNAME would hide: publishing "
+            f"an A record instead. Delete the CAA record to go back to a CNAME."
+        )
+        return True
+
+    def set_address_record(self, name: str, content: str, ttl: int = 60) -> bool:
+        """Point `name` at the address `content` resolves to now.
+
+        For a name that also carries a CAA record, on a provider without
+        CAA_BESIDE_CNAME. The cost is that the address is pinned until the
+        next run, and only one of the gateway's addresses is published.
+        """
+        ip_address = socket.gethostbyname(content)
+        print(f"Creating A record for {name} pointing to {ip_address} ({content})")
+        self.clear_conflicting_alias(name, RecordType.A)
+        return self.set_a_record(name, ip_address, ttl)
 
     def set_cname_record(
         self,
@@ -234,13 +309,14 @@ class DNSProvider(ABC):
             True if successful, False otherwise
         """
         existing_records = self.get_dns_records(name, RecordType.CNAME)
-        for record in existing_records:
-            # Check if record already exists with same content
-            if record.content == content:
-                print("CNAME record with the same content already exists")
-                return True
-            if record.id:
-                self.delete_dns_record(record.id, name)
+        found = self._prune_records(
+            name, existing_records, lambda r: r.content == content
+        )
+        if found is None:
+            return False
+        if found:
+            print("CNAME record with the same content already exists")
+            return True
 
         new_record = DNSRecord(
             id=None,
@@ -252,30 +328,29 @@ class DNSProvider(ABC):
         )
         return self.create_dns_record(new_record)
 
-    def set_txt_record(self, name: str, content: str, ttl: int = 60) -> bool:
-        """Set a TXT record (delete existing and create new).
+    def set_txt_record(
+        self, name: str, content: str, ttl: int = 60, tolerate_stale: bool = False
+    ) -> bool:
+        """Set a TXT record (create new, then delete the others).
 
         Args:
             name: The record name
             content: The TXT content
             ttl: Time to live
+            tolerate_stale: Succeed even if other values could not be deleted
 
         Returns:
             True if successful, False otherwise
         """
-        existing_records = self.get_dns_records(name, RecordType.TXT)
-        for record in existing_records:
-            # Check if record already exists with same content
-            if record.content == content or record.content == f'"{content}"':
-                print("TXT record with the same content already exists")
-                return True
-            if record.id:
-                self.delete_dns_record(record.id, name)
-
         new_record = DNSRecord(
             id=None, name=name, type=RecordType.TXT, content=content, ttl=ttl
         )
-        return self.create_dns_record(new_record)
+        return self._replace_records(
+            new_record,
+            lambda r: r.content in (content, f'"{content}"'),
+            "same content",
+            strict=not tolerate_stale,
+        )
 
     def unset_records(self, name: str, record_type: RecordType) -> bool:
         """Delete every record of one type at a name.
@@ -314,7 +389,7 @@ class DNSProvider(ABC):
         flags: int = 0,
         ttl: int = 60,
     ) -> bool:
-        """Set a CAA record (delete existing with same tag and create new).
+        """Set a CAA record (create new, then delete others with the same tag).
 
         Args:
             name: The record name
@@ -326,14 +401,20 @@ class DNSProvider(ABC):
         Returns:
             True if successful, False otherwise
         """
-        existing_records = self.get_dns_records(name, RecordType.CAA)
-        for record in existing_records:
-            if record.data and record.data.get("tag") == tag:
-                if record.data.get("value") == value:
-                    print("CAA record with the same content already exists")
-                    return True
-                if record.id:
-                    self.delete_dns_record(record.id, name)
-
-        caa_record = CAARecord(name=name, flags=flags, tag=tag, value=value, ttl=ttl)
-        return self.create_caa_record(caa_record)
+        same_tag = [
+            r
+            for r in self.get_dns_records(name, RecordType.CAA)
+            if r.data and r.data.get("tag") == tag
+        ]
+        if any(r.data.get("value") == value for r in same_tag):
+            print("CAA record with the same content already exists")
+        elif not self.create_caa_record(
+            CAARecord(name=name, flags=flags, tag=tag, value=value, ttl=ttl)
+        ):
+            return False
+        # Stale values go only once the new one is in place: a failed create
+        # must not leave the name without a CAA record.
+        found = self._prune_records(
+            name, same_tag, lambda r: r.data.get("value") == value
+        )
+        return found is not None

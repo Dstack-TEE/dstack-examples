@@ -251,7 +251,7 @@ authoritative nameserver — it should be gone).
 The CAA comes last and needs nothing from you: it names the ACME account, so the
 account has to exist first, and the container publishes it into the delegation
 zone itself once it does. Expect `Adding CAA record for <domain>.<zone> with tag
-issue` on the first pass — `issuewild` for a wildcard, on the base name. Confirm
+issue` on the first pass — `issue` and `issuewild` for a wildcard, on the base name. Confirm
 it at the authoritative nameserver, and confirm it resolves *through* the
 operator's CNAME, since that is what the CA follows:
 
@@ -351,6 +351,7 @@ this before suspecting the proxy.
 
 ```bash
 python3 scripts/tests/test_dnsguide.py     # DNS/CAA parsing and record building
+python3 scripts/tests/test_route53.py      # Route53 record names and changes
 bash    scripts/tests/test_sanitizers.sh   # env var validation
 ```
 

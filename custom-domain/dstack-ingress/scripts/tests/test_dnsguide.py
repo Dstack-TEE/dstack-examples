@@ -119,6 +119,50 @@ class TestCaaCheckDeduplication(unittest.TestCase):
         self.assertEqual(reason.count("excludes tls-alpn-01"), 1, reason)
 
 
+class TestCaaRelevantTag(unittest.TestCase):
+    """RFC 8659: only the tag that applies to the name restricts issuance."""
+
+    def _check(self, rdatas, tag):
+        saved = dnsguide.query_union
+        dnsguide.query_union = lambda name, rr, resolvers: (
+            rdatas if name == "app.example.com" else []
+        )
+        self.addCleanup(lambda: setattr(dnsguide, "query_union", saved))
+        return dnsguide.check_caa("app.example.com", tag, "dns-01", "", "r1")
+
+    def test_iodef_only_is_unrestricted(self):
+        ok, _ = self._check(['0 iodef "mailto:sec@example.com"'], "issue")
+        self.assertTrue(ok)
+
+    def test_issuewild_does_not_restrict_a_plain_name(self):
+        ok, _ = self._check(['0 issuewild "ca.example.net"'], "issue")
+        self.assertTrue(ok)
+
+    def test_wildcard_falls_back_to_issue(self):
+        ok, _ = self._check(['0 issue "letsencrypt.org"'], "issuewild")
+        self.assertTrue(ok)
+        ok, why = self._check(['0 issue "ca.example.net"'], "issuewild")
+        self.assertFalse(ok)
+        self.assertIn("ca.example.net", why)
+
+    def test_unknown_critical_tag_forbids_issuance(self):
+        ok, why = self._check(['128 tbs "x"'], "issue")
+        self.assertFalse(ok)
+        self.assertIn("critical tbs", why)
+        ok, _ = self._check(['128 tbs "x"', '0 issue "letsencrypt.org"'], "issue")
+        self.assertFalse(ok)
+        ok, _ = self._check(['128 iodef "mailto:sec@example.com"'], "issue")
+        self.assertTrue(ok)
+        ok, _ = self._check(['0 tbs "x"'], "issue")
+        self.assertTrue(ok)
+
+    def test_issuewild_overrides_issue_for_a_wildcard(self):
+        ok, _ = self._check(
+            ['0 issue "letsencrypt.org"', '0 issuewild "ca.example.net"'], "issuewild"
+        )
+        self.assertFalse(ok)
+
+
 class TestDelegationRecord(unittest.TestCase):
     """The _acme-challenge CNAME that makes challenge delegation work."""
 
@@ -235,6 +279,15 @@ class TestRecordBuilding(unittest.TestCase):
     def test_include_filters(self):
         types = [r.type for r in dnsguide.build_records(self._args(include="txt"))]
         self.assertEqual(types, ["TXT"])
+
+    def test_wildcard_caa_also_publishes_issue(self):
+        caa = [r.value for r in dnsguide.build_records(self._args(caa_tag="issuewild"))
+               if r.type == "CAA"]
+        self.assertEqual(
+            caa,
+            ['0 issue "letsencrypt.org;validationmethods=tls-alpn-01"',
+             '0 issuewild "letsencrypt.org;validationmethods=tls-alpn-01"'],
+        )
 
     def test_caa_omitted_without_value(self):
         types = [r.type for r in dnsguide.build_records(self._args(caa_value=""))]

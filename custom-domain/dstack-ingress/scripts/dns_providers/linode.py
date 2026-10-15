@@ -3,7 +3,6 @@
 import os
 import sys
 import json
-import socket
 import requests
 from typing import Dict, List, Optional
 from .base import (
@@ -297,25 +296,10 @@ class LinodeDNSProvider(DNSProvider):
         content: str,
         ttl: int = 60,
         proxied: bool = False,
+        with_caa: bool = False,
     ) -> bool:
-        """Override to use A record instead of CNAME for Linode to avoid CAA conflicts.
-
-        Linode doesn't allow CAA and CNAME records on the same subdomain.
-        Using A records solves this limitation.
-        """
-        # Resolve domain to IP
-        domain = content
-        print(f"Trying to resolve: {domain}")
-        ip_address = socket.gethostbyname(domain)
-        print(f"✅ Resolved {domain} to IP: {ip_address}")
-
-        self.clear_conflicting_alias(name, RecordType.A)
-
-        print(
-            f"Creating A record for {name} pointing to {ip_address} (instead of CNAME to {content})"
-        )
-        # Use the base class's set_a_record method with idempotency
-        return self.set_a_record(name, ip_address, ttl, proxied=False)
+        """Always publish an A record: Linode refuses a CAA beside a CNAME."""
+        return self.set_address_record(name, content, ttl)
 
     def create_caa_record(self, caa_record: CAARecord) -> bool:
         """Create a CAA record."""

@@ -108,7 +108,9 @@ PolicyDocument:
 
 **Important Notes for Route53:**
 - The certbot plugin uses the format `certbot-dns-route53` package
-- CAA will merge AWS & Let's Encrypt CA domains to existing records if they exist
+- CAA values are merged into the existing record set at the name: only values with the same tag are replaced, so `iodef` and other tags are kept
+- Where a CAA record shares the name (`DELEGATION_ZONE`, or `SET_CAA=true` on a non-wildcard domain), the gateway pointer is an A record to the resolved gateway IP instead of a CNAME, replacing any CNAME in the same change. It is refreshed every `RENEW_INTERVAL`
+- Wildcard record names are listed by Route53 as `\052.<domain>`; they are matched as `*.<domain>`
 - It is essential that the AWS service account used can only assume the limited role. See cloudformation example.
 
 ## Docker Compose Examples
