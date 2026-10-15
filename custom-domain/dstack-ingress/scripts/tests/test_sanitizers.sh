@@ -42,6 +42,14 @@ assert_fails() {
 
 # Successful cases
 assert_equal "$(sanitize_port 8080)" "8080" "sanitize_port accepts numeric port"
+assert_equal "$(sanitize_host 127.0.0.1 ADDR)" "127.0.0.1" "sanitize_host accepts IPv4"
+assert_equal "$(sanitize_host localhost ADDR)" "localhost" "sanitize_host accepts hostname"
+assert_equal "$(sanitize_host '[::1]' ADDR)" "[::1]" "sanitize_host accepts bracketed IPv6"
+assert_equal "$(sanitize_nonnegative_integer 0 WAIT)" "0" "sanitize_nonnegative_integer accepts 0"
+assert_equal "$(sanitize_email ops+acme@mail.example.com)" "ops+acme@mail.example.com" "sanitize_email accepts an address"
+assert_equal "$(sanitize_email "o'brien@example.com")" "o'brien@example.com" "sanitize_email accepts an apostrophe"
+assert_equal "$(sanitize_email ops@my_host.example.com)" "ops@my_host.example.com" "sanitize_email accepts _ in the domain"
+assert_equal "$(sanitize_email user@localhost)" "user@localhost" "sanitize_email accepts a single-label domain"
 assert_equal "$(sanitize_domain example.com)" "example.com" "sanitize_domain accepts fqdn"
 assert_equal "$(sanitize_domain '*.example.com')" "*.example.com" "sanitize_domain accepts wildcard"
 assert_equal "$(sanitize_target_endpoint http://service:80/path)" "http://service:80/path" "sanitize_target_endpoint accepts http"
@@ -72,9 +80,31 @@ assert_equal "$(sanitize_alpn '')" "" "sanitize_alpn accepts empty"
 assert_equal "$(sanitize_boolean true FLAG)" "true" "sanitize_boolean accepts true"
 assert_equal "$(sanitize_boolean false FLAG)" "false" "sanitize_boolean accepts false"
 
+
 # Failing cases
 assert_fails "sanitize_port rejects non-numeric" sanitize_port abc
+assert_fails "sanitize_port rejects newlines" sanitize_port $'9443\nfrontend leak' TLSALPN_PORT
+assert_fails "sanitize_port rejects out of range" sanitize_port 65536
+assert_fails "sanitize_host rejects newlines" sanitize_host $'127.0.0.1\nfrontend leak' ADDR
+assert_fails "sanitize_host rejects empty" sanitize_host "" ADDR
+assert_fails "sanitize_host rejects spaces" sanitize_host "a b" ADDR
+assert_fails "sanitize_host rejects newline in IPv6" sanitize_host $'[::1]\nfrontend leak' ADDR
+assert_fails "sanitize_port rejects leading zeros" sanitize_port 0443 PORT
+assert_fails "sanitize_positive_integer rejects leading zeros" sanitize_positive_integer 08 INTERVAL
+assert_fails "sanitize_nonnegative_integer rejects negative" sanitize_nonnegative_integer -1 WAIT
+assert_fails "sanitize_nonnegative_integer rejects a suffix" sanitize_nonnegative_integer 120s WAIT
+assert_fails "sanitize_email rejects path traversal" sanitize_email ../../../../evidences/x@x.com
+assert_fails "sanitize_email rejects a missing domain" sanitize_email ops@
+assert_fails "sanitize_email rejects newlines" sanitize_email $'ops@example.com\nx'
+assert_fails "sanitize_email rejects a missing local part" sanitize_email @example.com
+assert_fails "sanitize_email rejects two @" sanitize_email a@b@example.com
+assert_fails "sanitize_email rejects a leading dot" sanitize_email ..@example.com
+assert_fails "sanitize_email rejects a slash in the domain" sanitize_email ops@example.com/..
+assert_fails "sanitize_email rejects spaces" sanitize_email 'ops @example.com'
+assert_fails "sanitize_email rejects tabs" sanitize_email $'ops@example.com\t'
+assert_fails "sanitize_email rejects control characters" sanitize_email $'ops@exa\x01mple.com'
 assert_fails "sanitize_domain rejects invalid domain" sanitize_domain bad_domain
+assert_fails "sanitize_domain rejects path traversal" sanitize_domain ../etc/passwd
 assert_fails "sanitize_target_endpoint rejects malformed URL" sanitize_target_endpoint "http:///broken"
 warning_output="$(sanitize_client_max_body_size "50mb" 2>&1 || true)"
 if [[ "$warning_output" == "Warning: Ignoring invalid CLIENT_MAX_BODY_SIZE value: 50mb" ]]; then

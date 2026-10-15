@@ -625,14 +625,8 @@ class CertManager:
         scope -- set RENEW_DAYS_BEFORE to the value you want in that case,
         rather than leaving it unset and expecting the file to be left alone.
         """
+        # entrypoint.sh has already rejected anything but a positive integer.
         days = os.environ.get("RENEW_DAYS_BEFORE", "").strip()
-        if days and (not days.isdigit() or int(days) < 1):
-            print(
-                f"Warning: ignoring invalid RENEW_DAYS_BEFORE={days!r} "
-                f"(expected a positive number of days)",
-                file=sys.stderr,
-            )
-            return
 
         path = self._renewal_conf_path(domain)
         if not os.path.isfile(path):

@@ -14,6 +14,17 @@ source /scripts/evidence-lib.sh
 # The zone this container writes into, and the switch that turns delegation on.
 DELEGATION_ZONE=${DELEGATION_ZONE:-}
 export DELEGATION_ZONE
+if [ -n "$DELEGATION_ZONE" ] && [ -n "${DELEGATION_PROPAGATION_SECONDS:-}" ]; then
+    if ! DELEGATION_PROPAGATION_SECONDS=$(sanitize_nonnegative_integer "$DELEGATION_PROPAGATION_SECONDS" "DELEGATION_PROPAGATION_SECONDS"); then
+        exit 1
+    fi
+    export DELEGATION_PROPAGATION_SECONDS
+fi
+
+SET_CAA=${SET_CAA:-false}
+if ! SET_CAA=$(sanitize_boolean "$SET_CAA" "SET_CAA"); then
+    exit 1
+fi
 
 # ACME_EMAIL / ACME_STAGING are normalised by entrypoint.sh and exported. The
 # contact address is optional; certman.py asks for a contactless account when
