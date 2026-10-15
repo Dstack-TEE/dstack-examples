@@ -4,7 +4,14 @@ import os
 import requests
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Optional
-from .base import DNSProvider, DNSRecord, CAARecord, RecordType
+from .base import (
+    HTTP_TIMEOUT,
+    CAARecord,
+    DNSProvider,
+    DNSRecord,
+    RecordType,
+    write_secret_file,
+)
 
 
 class NamecheapDNSProvider(DNSProvider):
@@ -40,12 +47,12 @@ class NamecheapDNSProvider(DNSProvider):
             os.makedirs(cred_dir, exist_ok=True)
             
             cred_file = os.path.join(cred_dir, "namecheap.ini")
-            with open(cred_file, "w") as f:
-                f.write(f"# Namecheap API credentials used by Certbot\n")
-                f.write(f"dns_namecheap_username={self.username}\n")
-                f.write(f"dns_namecheap_api_key={self.api_key}\n")
-            
-            os.chmod(cred_file, 0o600)
+            write_secret_file(
+                cred_file,
+                "# Namecheap API credentials used by Certbot\n"
+                f"dns_namecheap_username={self.username}\n"
+                f"dns_namecheap_api_key={self.api_key}\n",
+            )
             print(f"Credentials file created: {cred_file}")
             return True
         except Exception as e:
@@ -84,7 +91,9 @@ class NamecheapDNSProvider(DNSProvider):
         request_params.update(params)
         
         try:
-            response = requests.post(self.base_url, data=request_params)
+            response = requests.post(
+                self.base_url, data=request_params, timeout=HTTP_TIMEOUT
+            )
             response.raise_for_status()
             
             # Parse XML response

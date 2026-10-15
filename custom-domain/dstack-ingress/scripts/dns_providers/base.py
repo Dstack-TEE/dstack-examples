@@ -8,6 +8,18 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
 from enum import Enum
 
+# Seconds to wait on a DNS provider API before giving up, so a stalled
+# connection fails the call instead of hanging the renewal loop.
+HTTP_TIMEOUT = 30
+
+
+def write_secret_file(path: str, content: str) -> None:
+    """Write `path` readable by the owner only, never exposing it wider."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        os.fchmod(fd, 0o600)
+        f.write(content)
+
 
 class RecordType(Enum):
     A = "A"

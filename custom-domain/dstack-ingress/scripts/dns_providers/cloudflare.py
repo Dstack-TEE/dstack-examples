@@ -5,7 +5,14 @@ import sys
 import json
 import requests
 from typing import Dict, List, Optional
-from .base import DNSProvider, DNSRecord, CAARecord, RecordType
+from .base import (
+    HTTP_TIMEOUT,
+    CAARecord,
+    DNSProvider,
+    DNSRecord,
+    RecordType,
+    write_secret_file,
+)
 
 
 class CloudflareDNSProvider(DNSProvider):
@@ -42,12 +49,9 @@ class CloudflareDNSProvider(DNSProvider):
             # Create credentials directory
             os.makedirs(credentials_dir, exist_ok=True)
 
-            # Write credentials file
-            with open(credentials_file, "w") as f:
-                f.write(f"dns_cloudflare_api_token = {self.api_token}\n")
-
-            # Set secure permissions
-            os.chmod(credentials_file, 0o600)
+            write_secret_file(
+                credentials_file, f"dns_cloudflare_api_token = {self.api_token}\n"
+            )
             print(f"Cloudflare credentials file created: {credentials_file}")
 
             # Pre-fetch zone ID if we have a domain
@@ -67,14 +71,9 @@ class CloudflareDNSProvider(DNSProvider):
         """Make a request to the Cloudflare API with error handling."""
         url = f"{self.base_url}/{endpoint}"
         try:
-            if method.upper() == "GET":
-                response = requests.get(url, headers=self.headers)
-            elif method.upper() == "POST":
-                response = requests.post(url, headers=self.headers, json=data)
-            elif method.upper() == "DELETE":
-                response = requests.delete(url, headers=self.headers)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+            response = requests.request(
+                method, url, headers=self.headers, json=data, timeout=HTTP_TIMEOUT
+            )
 
             response.raise_for_status()
             result = response.json()

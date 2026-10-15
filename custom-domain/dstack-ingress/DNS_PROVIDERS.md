@@ -52,9 +52,9 @@ LINODE_API_TOKEN=your-api-token
 
 **Important Note for Linode:**
 - Linode has a limitation where CAA and CNAME records cannot coexist on the same subdomain
-- To work around this, the system will attempt to use A records instead of CNAME records
-- If the gateway domain can be resolved to an IP, an A record will be created
-- If resolution fails, it falls back to CNAME (but CAA records won't work on that subdomain)
+- To work around this, the system uses A records instead of CNAME records
+- The gateway domain is resolved to an IP and an A record is created for it
+- If resolution fails, the alias step fails and the existing records are left untouched
 - This is a Linode-specific limitation not present in other providers
 
 ### Namecheap

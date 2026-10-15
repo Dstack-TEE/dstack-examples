@@ -69,11 +69,15 @@ source_profile=certbot-source
 region=${AWS_REGION:-us-east-1}
 EOF
 
-      cat <<EOF >/root/.aws/credentials
+      rm -f /root/.aws/credentials
+      (
+        umask 077
+        cat <<EOF >/root/.aws/credentials
 [certbot-source]
 aws_access_key_id=${AWS_ACCESS_KEY_ID}
 aws_secret_access_key=${AWS_SECRET_ACCESS_KEY}
 EOF
+      )
 
       unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
       export AWS_PROFILE=certbot
