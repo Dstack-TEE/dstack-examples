@@ -79,11 +79,6 @@ RUN --mount=type=bind,source=scripts,target=/tmp/scripts,ro \
     /bin/bash -o pipefail -c 'set -euo pipefail; \
         rm -rf /scripts && mkdir -p /scripts && chmod 755 /scripts && \
         cd /tmp/scripts && \
-        find . -type d -print0 | while IFS= read -r -d "" dir; do \
-            rel="${dir#./}"; \
-            [[ -z "$rel" ]] && continue; \
-            install -d -m 755 "/scripts/$rel"; \
-        done && \
         find . -type f -print0 | while IFS= read -r -d "" file; do \
             rel="${file#./}"; \
             perm=644; \
@@ -91,7 +86,7 @@ RUN --mount=type=bind,source=scripts,target=/tmp/scripts,ro \
                 *.sh) perm=755 ;; \
                 *.py) case "$rel" in */*) perm=644 ;; *) perm=755 ;; esac ;; \
             esac; \
-            install -m "$perm" "$file" "/scripts/$rel"; \
+            install -D -m "$perm" "$file" "/scripts/$rel"; \
         done'
 
 ENV PATH="/scripts:$PATH"
