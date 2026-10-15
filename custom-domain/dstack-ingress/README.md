@@ -171,8 +171,8 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `443` | HAProxy listen port |
-| `DOMAINS` | | Multiple domains, one per line |
-| `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line |
+| `DOMAINS` | | Multiple domains, one per line or one comma-separated line. Without `ROUTING_MAP`, all of them go to `TARGET_ENDPOINT` |
+| `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line. A wildcard entry (`*.example.com=host:port`) matches one label, and exact entries take precedence over it. Unmatched names go to the first entry |
 | `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `ACME_EMAIL` | | ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See [below](#the-acme-contact-address-is-optional-and-public) — it is optional, and published |
@@ -198,7 +198,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `TIMEOUT_CONNECT` | `10s` | Backend connect timeout |
 | `TIMEOUT_CLIENT` | `86400s` | Client-side timeout (24h for long-lived connections) |
 | `TIMEOUT_SERVER` | `86400s` | Server-side timeout |
-| `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port |
+| `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port. Set `false` for backends whose server speaks first — see [Evidence & Attestation](#evidence--attestation) |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
 | `ACCEPT_PROXY_PROTOCOL` | `false` | Read the client's address from a PROXY protocol header (v1 or v2) on every connection to `PORT`, as the dstack gateway sends when the app's `port_policy` sets `pp` for it. A connection without one is refused. See [Client address](#client-address-proxy-protocol) |
@@ -328,6 +328,14 @@ without ARI. In tls-alpn-01 mode lego renews them on its normal schedule.
 Evidence files are served at `https://your-domain.com/evidences/` by default (via payload inspection in HAProxy's TCP mode). They can also be accessed by the backend application through the shared `/evidences` volume.
 
 To disable the built-in evidence endpoint and serve evidence files only through your backend, set `EVIDENCE_SERVER=false`.
+
+The endpoint matches the first bytes of an HTTP/1.x request, so:
+
+- With `ALPN` including `h2`, clients that negotiate HTTP/2 (curl's default) send their evidence requests to the
+  backend instead. Use `curl --http1.1`, or serve `/evidences` from the backend too.
+- haproxy waits up to 5 seconds for a request that could start with `GET` or `HEAD`. A backend whose server speaks
+  first (SMTP, MySQL, ...), or whose client's first message starts with `G` or `H` and is shorter than 16 bytes,
+  sees that delay on every connection. Set `EVIDENCE_SERVER=false` for such backends.
 
 ### Evidence Files
 

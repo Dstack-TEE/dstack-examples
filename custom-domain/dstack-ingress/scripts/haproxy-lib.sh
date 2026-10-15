@@ -67,17 +67,24 @@ EOF
     if [ "$EVIDENCE_SERVER" = "true" ]; then
         cat <<'EVIDENCE_BLOCK' >>/etc/haproxy/haproxy.cfg
 
-    # Route /evidences requests to the local evidence HTTP server.
+    # Route /evidences and /evidences/... to the local evidence HTTP
+    # server. The byte after the path has to be checked too, or an app
+    # path such as /evidences-report would be taken.
     # accept fires once 16 bytes have arrived — enough for the
-    # longest prefix we match ("HEAD /evidences" = 16 chars).
+    # longest prefix we match ("HEAD /evidences/" = 16 chars).
     # Using req.len with a concrete threshold is critical: the
     # previous payload(0,0) (length 0 = "whole buffer") deferred
     # evaluation until the full inspect-delay because HAProxy
-    # cannot know when a TCP stream ends.
+    # cannot know when a TCP stream ends. A first byte that cannot
+    # start either request is accepted at once, so short messages
+    # of other protocols are not held for the full delay; that rule
+    # comes first because a rule still waiting for data stops the
+    # evaluation of the ones after it.
     tcp-request inspect-delay 5s
+    tcp-request content accept if !{ req.payload(0,1) -m str G H }
     tcp-request content accept if { req.len ge 16 }
-    acl is_evidence payload(0,16) -m beg "GET /evidences"
-    acl is_evidence payload(0,16) -m beg "HEAD /evidences"
+    acl is_evidence payload(0,16) -m beg "GET /evidences/" "GET /evidences " "GET /evidences?"
+    acl is_evidence payload(0,16) -m beg "HEAD /evidences/" "HEAD /evidences " "HEAD /evidences?"
     use_backend be_evidence if is_evidence
 EVIDENCE_BLOCK
     fi
@@ -90,7 +97,7 @@ haproxy_emit_evidence_backend() {
 
 backend be_evidence
     mode http
-    http-request replace-path /evidences(.*) \1
+    http-request replace-path ^/evidences/?(.*) /\1
     server evidence 127.0.0.1:${EVIDENCE_PORT}
 EOF
     fi
@@ -117,10 +124,12 @@ haproxy_emit_backends_multi() {
     local routing_map_normalized
     routing_map_normalized=$(echo "$ROUTING_MAP" | tr ',' '\n')
 
-    local backend_rules=""
+    local exact_rules=""
+    local wildcard_rules=""
     local backend_sections=""
     local first_be_name=""
-    local domain target be_name
+    local domain target be_name suffix
+    local index=0
 
     while IFS= read -r line; do
         [[ -n "$line" ]] || continue
@@ -144,22 +153,32 @@ haproxy_emit_backends_multi() {
         # Strip protocol prefix from target if present
         target=$(parse_target_endpoint "$target")
 
-        # Generate safe backend name from domain
-        be_name="be_$(echo "$domain" | sed 's/[^A-Za-z0-9]/_/g')"
+        # Generate safe backend name from domain; the index keeps names
+        # unique when two domains map to the same one (a-b.x vs a.b.x)
+        index=$((index + 1))
+        be_name="be_${index}_${domain//[^A-Za-z0-9]/_}"
 
         if [ -z "$first_be_name" ]; then
             first_be_name="$be_name"
         fi
 
-        backend_rules="${backend_rules}
+        # A wildcard covers exactly one label, like its certificate. Exact
+        # names are matched first, so they win over a wildcard covering them.
+        if [[ "$domain" == \*.* ]]; then
+            suffix="${domain#\*.}"
+            wildcard_rules="${wildcard_rules}
+    use_backend ${be_name} if { ssl_fc_sni -i -m reg '^[^.]+[.]${suffix//./[.]}\$' }"
+        else
+            exact_rules="${exact_rules}
     use_backend ${be_name} if { ssl_fc_sni -i ${domain} }"
+        fi
         backend_sections="${backend_sections}
 
 backend ${be_name}
     server s1 ${target}$(haproxy_send_proxy)"
     done <<< "$routing_map_normalized"
 
-    echo "$backend_rules" >> /etc/haproxy/haproxy.cfg
+    echo "${exact_rules}${wildcard_rules}" >> /etc/haproxy/haproxy.cfg
 
     # Default to first backend in ROUTING_MAP
     if [ -n "$first_be_name" ]; then
@@ -174,7 +193,7 @@ backend ${be_name}
 haproxy_emit_backends() {
     if [ -n "${ROUTING_MAP:-}" ]; then
         haproxy_emit_backends_multi
-    elif [ -n "${DOMAIN:-}" ] && [ -n "${TARGET_ENDPOINT:-}" ]; then
+    elif [ -n "${TARGET_ENDPOINT:-}" ]; then
         haproxy_emit_backends_single
     fi
     haproxy_emit_evidence_backend
