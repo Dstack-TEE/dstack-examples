@@ -530,8 +530,8 @@ class CertManager:
                     match = re.match(r"\s*server\s*=\s*(\S+)", line)
                     if match:
                         return match.group(1)
-        except OSError:
-            pass
+        except OSError as err:
+            print(f"Warning: unable to read issuing server for {domain}: {err}", file=sys.stderr)
         return None
 
     def _certbot_timeout(self) -> int:
