@@ -13,15 +13,15 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 
 ### Common Variables (Required for all providers)
 
-- `DOMAIN` - Your custom domain (e.g., `app.example.com`)
+- `DOMAIN` or `DOMAINS` - Your custom domain(s) (e.g., `app.example.com`)
 - `GATEWAY_DOMAIN` - dstack gateway domain (e.g., `gateway.dstack-prod5.phala.network`)
-- `TARGET_ENDPOINT` - Backend application endpoint to proxy to
+- `TARGET_ENDPOINT` - Backend application endpoint to proxy to, unless `ROUTING_MAP` is set
 
 ### Optional Variables
 
 - `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`, `route53`). Detected from the provider's credential variable when unset; set it explicitly for `route53`
 - `ACME_EMAIL` - Contact address for the ACME account (`CERTBOT_EMAIL` still works). Published in the evidence, so leave it unset unless you want one
-- `SET_CAA` - Enable CAA record setup (default: false)
+- `SET_CAA` - Enable CAA record setup: `true` or `false` (default). Except on Cloudflare, this makes a non-wildcard domain's pointer an A record; see the README
 - `PORT` - HTTPS port (default: 443)
 - `TXT_PREFIX` - Prefix for TXT records (default: "_dstack-app-address")
 
@@ -55,7 +55,7 @@ LINODE_API_TOKEN=your-api-token
 - To work around this, the system uses A records instead of CNAME records
 - The gateway domain is resolved to an IP and an A record is created for it
 - If resolution fails, the alias step fails and the existing records are left untouched
-- This is a Linode-specific limitation not present in other providers
+- Route53 refuses the pair too, and on every provider except Cloudflare a name that carries a CAA gets an A record. Linode is the one that uses an A record even without a CAA
 
 ### Namecheap
 
@@ -69,12 +69,14 @@ NAMECHEAP_CLIENT_IP=your-client-ip
 **Required Credentials:**
 - `NAMECHEAP_USERNAME` - Your Namecheap account username
 - `NAMECHEAP_API_KEY` - Your Namecheap API key (from https://ap.www.namecheap.com/settings/tools/apiaccess/)
-- `NAMECHEAP_CLIENT_IP` - The IP address of the node (required for Namecheap API authentication)
+- `NAMECHEAP_CLIENT_IP` - The IP address of the node, whitelisted for the Namecheap API. Defaults to `127.0.0.1`, which Namecheap rejects, so set it
 - `NAMECHEAP_SANDBOX` - Set to `true` to use the Namecheap sandbox API (default: false)
 
 **Important Notes for Namecheap:**
 - Namecheap API requires node IP address for authentication, and you need add it to whitelist IP first.
-- CAA records are written through `setHosts`, which replaces the whole zone. The rest of the zone is read first and written back unchanged.
+- Every record write goes through `setHosts`, which replaces the whole zone. The zone is read first and written back with only the intended change, including its `EmailType`; if the read fails, nothing is written.
+- With `SET_CAA=true` on a non-wildcard domain, or any CAA already at the name, the pointer is an A record instead of a CNAME.
+- The zone is taken to be the last two labels of the name, so domains under a public suffix like `co.uk` are not supported.
 - The certbot plugin uses the format `certbot-dns-namecheap` package
 
 ### Route53
@@ -104,12 +106,13 @@ PolicyDocument:
         - route53:ListHostedZones
         - route53:GetChange
         - route53:ListResourceRecordSets
+      Resource: "*"
 ```
 
 **Important Notes for Route53:**
 - The certbot plugin uses the format `certbot-dns-route53` package
 - CAA values are merged into the existing record set at the name: only values with the same tag are replaced, so `iodef` and other tags are kept
-- Where a CAA record shares the name (`DELEGATION_ZONE`, or `SET_CAA=true` on a non-wildcard domain), the gateway pointer is an A record to the resolved gateway IP instead of a CNAME, replacing any CNAME in the same change. It is refreshed every `RENEW_INTERVAL`
+- Where a CAA record shares the name (`DELEGATION_ZONE`, `SET_CAA=true` on a non-wildcard domain, or any CAA already there), the gateway pointer is an A record to the resolved gateway IP instead of a CNAME, replacing any CNAME or AAAA in the same change. It is refreshed every `RENEW_INTERVAL`
 - Wildcard record names are listed by Route53 as `\052.<domain>`; they are matched as `*.<domain>`
 - It is essential that the AWS service account used can only assume the limited role. See cloudformation example.
 
@@ -118,11 +121,9 @@ PolicyDocument:
 ### Linode Example
 
 ```yaml
-version: '3.8'
-
 services:
   ingress:
-    image: dstack-ingress:latest
+    image: ghcr.io/dstack-tee/dstack-ingress:<version>
     ports:
       - "443:443"
     environment:
@@ -136,6 +137,7 @@ services:
       # Linode specific
       - LINODE_API_TOKEN=your-api-token
     volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
       - ./letsencrypt:/etc/letsencrypt
       - ./evidences:/evidences
 ```
@@ -143,11 +145,9 @@ services:
 ### Namecheap Example
 
 ```yaml
-version: '3.8'
-
 services:
   ingress:
-    image: dstack-ingress:latest
+    image: ghcr.io/dstack-tee/dstack-ingress:<version>
     ports:
       - "443:443"
     environment:
@@ -163,6 +163,7 @@ services:
       - NAMECHEAP_API_KEY=your-api-key
       - NAMECHEAP_CLIENT_IP=your-public-ip
     volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
       - ./letsencrypt:/etc/letsencrypt
       - ./evidences:/evidences
 ```
@@ -172,7 +173,7 @@ services:
 ```yaml
 services:
   dstack-ingress:
-    image: dstack-ingress:latest
+    image: ghcr.io/dstack-tee/dstack-ingress:<version>
     restart: unless-stopped
     volumes:
     - /var/run/dstack.sock:/var/run/dstack.sock

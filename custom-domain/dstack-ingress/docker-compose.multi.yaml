@@ -17,6 +17,7 @@ services:
         api.example.com=app-api:8080
 
     volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
       - /var/run/tappd.sock:/var/run/tappd.sock
       - letsencrypt:/etc/letsencrypt
       - evidences:/evidences

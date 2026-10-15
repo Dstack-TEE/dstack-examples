@@ -209,14 +209,15 @@ first issuance.
 
 - `wait` — the default. Start the container *before* creating the records and
   confirm it blocks and says which record is missing. Then create them and
-  confirm it proceeds. This is also the only mode that runs the CAA
-  compatibility check.
+  confirm it proceeds. `wait` and `webhook` both verify the records, CAA
+  included.
 - `print` — skips all verification, including CAA. Confirm it continues
   immediately.
 - `webhook` — set `DNS_WEBHOOK_URL` and `DNS_WEBHOOK_TOKEN` and point them at a
   throwaway HTTP server. The body carries the records, an HMAC-SHA256 over the
-  payload, and a TDX quote whose `report_data` is `sha256(payload)`. Verify both:
-  the HMAC proves the shared secret, the quote proves the enclave.
+  payload, and a TDX quote and, on dstack 0.6+, a dstack attestation, whose
+  `report_data` is `sha256(payload)` followed by 32 zero bytes. Verify both:
+  the HMAC proves the shared secret, the attestation proves the enclave.
 
 ### Challenge delegation (dns-01)
 
@@ -231,7 +232,7 @@ the provider resolves a zone by longest-suffix match on the record name. With
 `_acme-challenge.svc.example.com.deleg.example.com`, which lands in
 `example.com` — the same zone, but through the delegation code path.
 
-Play the operator and create the three CNAMEs the container prints:
+Play the operator and create the three CNAMEs (four for a wildcard) the container prints:
 
 ```
 svc.example.com                      CNAME  svc.example.com.deleg.example.com
@@ -243,15 +244,15 @@ Everything they point at is published by the container, so this is the whole of
 the operator's job — the app id can change afterwards and no DNS edit follows.
 
 Then start the container with a real provider token and `ACME_STAGING=true`, and
-watch for: the three records verifying, `Executing (challenge-delegation):` with
+watch for: the records verifying, `Executing (challenge-delegation):` with
 `--manual` and both hooks, the certificate arriving, and the challenge TXT being
 cleaned up afterwards (query `_acme-challenge.<domain>.<alias>` at the
 authoritative nameserver — it should be gone).
 
 The CAA comes last and needs nothing from you: it names the ACME account, so the
 account has to exist first, and the container publishes it into the delegation
-zone itself once it does. Expect `Adding CAA record for <domain>.<zone> with tag
-issue` on the first pass — `issue` and `issuewild` for a wildcard, on the base name. Confirm
+zone itself once it does. Expect a CAA write for `<domain>.<zone>` with tag
+`issue` on the first pass (the log line differs per provider) — `issue` and `issuewild` for a wildcard, on the base name. Confirm
 it at the authoritative nameserver, and confirm it resolves *through* the
 operator's CNAME, since that is what the CA follows:
 
@@ -287,7 +288,7 @@ These fail fast and are cheap, so run them on every change:
 | Delegation with no CAA record at all | Proceeds, reporting `no CAA record set; issuance is unrestricted` — see below |
 | Delegation, later pass, gateway CNAME broken | Renewal proceeds — that record is for serving, and dns-01 does not use it |
 | A CAA record with `validationmethods=dns-01`, mode tls-alpn-01 | Blocked with the restriction quoted back |
-| TXT holding the wrong value | Reported as `want <x>, saw <y>`, not "missing" |
+| TXT holding the wrong value | Reported as `TXT present but wrong value`, not "missing" |
 | An instance ID the gateway does not know | The CA reports a connection error — the gateway will not route to it |
 
 The last one is worth keeping: it is the cross-tenant impersonation defence, and
@@ -311,7 +312,8 @@ operator's CNAME. Expect the reason quoted back, e.g. `issue allows
 
 Note also that the first pass on a fresh deployment necessarily runs before any
 CAA exists: the record names the ACME account, so the account has to exist
-first. `process_domain` issues, writes the CAA, then issues again.
+first. `process_domain` issues, writes the CAA, and issues again only if the
+first attempt failed.
 
 ## Traps
 
@@ -352,6 +354,8 @@ this before suspecting the proxy.
 ```bash
 python3 scripts/tests/test_dnsguide.py     # DNS/CAA parsing and record building
 python3 scripts/tests/test_route53.py      # Route53 record names and changes
+python3 scripts/tests/test_certman.py      # certbot commands, lineages, renewal window
+python3 scripts/tests/test_deterministic_key.py
 bash    scripts/tests/test_sanitizers.sh   # env var validation
 ```
 
@@ -359,6 +363,7 @@ Against a built image:
 
 ```bash
 bash scripts/tests/test_proxy_protocol.sh <image>     # ACCEPT_/SEND_PROXY_PROTOCOL end to end
+bash scripts/tests/test_x25519mlkem768.sh <image>     # TLS 1.3 key-exchange groups
 ```
 
 The parsing tests are built from rdata real resolvers actually returned, in both
