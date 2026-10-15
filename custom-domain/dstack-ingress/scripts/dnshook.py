@@ -11,11 +11,12 @@ would hand domain hijacking to anyone who can reach the endpoint. So every
 request carries:
 
   * an HMAC-SHA256 over the exact payload string, keyed by a shared secret; and
-  * optionally a TDX quote whose report_data commits to that same payload.
+  * optionally an attestation whose report_data commits to that same payload:
+    a TDX quote, and on dstack 0.6+ a dstack attestation (`/v1/Attest`).
 
 Verify both on the receiving end. The HMAC alone only proves the caller knows
-the secret; the quote proves the caller is the enclave you expect, so check the
-app_id / measurements in it before touching DNS.
+the secret; the attestation proves the caller is the enclave you expect, so
+check the app_id / measurements in it before touching DNS.
 
 Payload is sent as a *string* field rather than a nested object on purpose: the
 receiver signs and hashes exactly the bytes it was given, with no JSON
@@ -37,10 +38,8 @@ import requests
 
 DEFAULT_TIMEOUT = 15
 DEFAULT_RETRIES = 3
-DSTACK_SOCKETS = (
-    ("/var/run/dstack.sock", "http://localhost/GetQuote?report_data={rd}"),
-    ("/var/run/tappd.sock", "http://localhost/prpc/Tappd.RawQuote?report_data={rd}"),
-)
+DSTACK_SOCKET = "/var/run/dstack.sock"
+TAPPD_SOCKET = "/var/run/tappd.sock"
 
 
 def _canonical(payload: Dict[str, Any]) -> str:
@@ -51,31 +50,54 @@ def _sign(payload_str: str, secret: str) -> str:
     return hmac.new(secret.encode(), payload_str.encode(), hashlib.sha256).hexdigest()
 
 
-def get_quote(payload_str: str) -> Optional[Dict[str, Any]]:
-    """Fetch a TDX quote committing to payload_str, or None if unavailable."""
-    report_data = hashlib.sha256(payload_str.encode()).hexdigest()
-    for sock, url_tpl in DSTACK_SOCKETS:
-        if not os.path.exists(sock):
-            continue
-        try:
-            out = subprocess.run(
-                ["curl", "-s", "--unix-socket", sock, url_tpl.format(rd=report_data)],
-                capture_output=True,
-                text=True,
-                timeout=30,
+def _agent_get(sock: str, path: str) -> Optional[Dict[str, Any]]:
+    """GET path from the agent on sock, or None if it has no such socket or call."""
+    if not os.path.exists(sock):
+        return None
+    try:
+        out = subprocess.run(
+            ["curl", "-sS", "-w", "\n%{http_code}", "--unix-socket", sock,
+             f"http://localhost{path}"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        body, _, status = out.stdout.rpartition("\n")
+        if out.returncode == 0 and status == "200":
+            return json.loads(body)
+        # 404: an agent older than the call, not a failure.
+        if status != "404":
+            print(
+                f"Warning: {sock}{path.split('?')[0]} failed "
+                f"(rc={out.returncode}, HTTP {status or '-'})",
+                file=sys.stderr,
             )
-            if out.returncode != 0 or not out.stdout.strip():
-                print(
-                    f"Warning: quote fetch via {sock} failed (rc={out.returncode})",
-                    file=sys.stderr,
-                )
-                continue
-            quote = json.loads(out.stdout)
-            quote["report_data"] = report_data
-            return quote
-        except (subprocess.SubprocessError, ValueError) as exc:
-            print(f"Warning: quote fetch via {sock} failed: {exc}", file=sys.stderr)
+    except (subprocess.SubprocessError, ValueError) as exc:
+        print(f"Warning: {sock}{path.split('?')[0]} failed: {exc}", file=sys.stderr)
     return None
+
+
+def get_attestation(payload_str: str) -> Optional[Dict[str, Any]]:
+    """Fetch evidence committing to payload_str, or None if unavailable.
+
+    The TDX quote fields (`quote`, `event_log`, `vm_config`) as before, plus
+    `attestation` from dstack 0.6's /v1/Attest, which covers every platform
+    (GetQuote is TDX-only). dstack-verifier takes either and prefers the
+    latter.
+    """
+    report_data = hashlib.sha256(payload_str.encode()).hexdigest()
+    # Tappd.RawQuote takes exactly 64 bytes; the others zero-pad to that.
+    padded = report_data.ljust(128, "0")
+    quote = (_agent_get(DSTACK_SOCKET, f"/GetQuote?report_data={padded}")
+             or _agent_get(TAPPD_SOCKET, f"/prpc/Tappd.RawQuote?report_data={padded}"))
+    attest = _agent_get(DSTACK_SOCKET, f"/v1/Attest?report_data={padded}")
+    evidence = dict(quote or {})
+    if attest:
+        evidence["attestation"] = attest["attestation"]
+    if not evidence:
+        return None
+    evidence["report_data"] = report_data
+    return evidence
 
 
 def build_envelope(
@@ -108,9 +130,9 @@ def build_envelope(
         )
 
     if with_quote:
-        quote = get_quote(payload_str)
-        if quote is not None:
-            envelope["attestation"] = quote
+        attestation = get_attestation(payload_str)
+        if attestation is not None:
+            envelope["attestation"] = attestation
     return envelope
 
 

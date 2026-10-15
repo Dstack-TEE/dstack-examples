@@ -373,7 +373,7 @@ else
 fi
 
 log "Test: Evidence files"
-for file in acme-account.json sha256sum.txt quote.json; do
+for file in acme-account.json sha256sum.txt; do
     FILE_STATUS=$(do_curl -s -o /dev/null -w '%{http_code}' --http1.1 "https://${DOMAIN}/evidences/${file}")
     if [ "$FILE_STATUS" = "200" ]; then
         pass "Evidence file /${file} exists"
@@ -381,6 +381,14 @@ for file in acme-account.json sha256sum.txt quote.json; do
         fail "Evidence file /${file} returned $FILE_STATUS"
     fi
 done
+
+# quote.json on TDX, attestation.json on dstack 0.6+; at least one of them.
+if [ "$(do_curl -s -o /dev/null -w '%{http_code}' --http1.1 "https://${DOMAIN}/evidences/quote.json")" = "200" ] ||
+   [ "$(do_curl -s -o /dev/null -w '%{http_code}' --http1.1 "https://${DOMAIN}/evidences/attestation.json")" = "200" ]; then
+    pass "Evidence file /quote.json or /attestation.json exists"
+else
+    fail "Neither /quote.json nor /attestation.json is served"
+fi
 
 log "Test: Evidence integrity"
 SHA256_CONTENT=$(do_curl -sf --http1.1 "https://${DOMAIN}/evidences/sha256sum.txt" || echo "")

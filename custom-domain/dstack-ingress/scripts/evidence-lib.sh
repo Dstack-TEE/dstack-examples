@@ -40,7 +40,7 @@ evidence_collect_cert() {
     chmod 644 "$EVIDENCE_STAGE/cert-${domain}.pem"
 }
 
-# Hash whatever was collected, bind it into a TDX quote, and publish it.
+# Hash whatever was collected, bind it into an attestation, and publish it.
 evidence_finalize() {
     local stage="$EVIDENCE_STAGE" quoted_hash
     if ! (cd "$stage" && sha256sum acme-account.json cert-*.pem > sha256sum.txt) 2>/dev/null; then
@@ -54,12 +54,12 @@ evidence_finalize() {
         quoted_hash="${quoted_hash}0"
     done
 
-    if ! evidence_get_quote "$quoted_hash" > "$stage/quote.json"; then
+    if ! evidence_attest "$quoted_hash" "$stage"; then
         echo "Error: Failed to generate evidences"
         rm -rf "$stage"
         return 1
     fi
-    chmod 644 "$stage/sha256sum.txt" "$stage/quote.json"
+    chmod 644 "$stage"/*
     if ! evidence_publish "$stage"; then
         echo "Error: Failed to publish evidences"
         rm -rf "$stage"
@@ -68,27 +68,49 @@ evidence_finalize() {
     echo "Generated evidences successfully"
 }
 
-# -f: the guest agent reports errors as an HTTP status with a body, and that
-# body must not be published as the quote.
-evidence_get_quote() {
+# Attest report_data ($1) into the stage directory ($2): quote.json from
+# GetQuote as before, and attestation.json from dstack 0.6's /v1/Attest, which
+# carries the quote and event log on every platform. An older agent answers
+# 404 there. GetQuote is TDX-only, so once Attest has answered, a GetQuote
+# failure means another platform and attestation.json stands alone.
+evidence_attest() {
+    local report_data="$1" stage="$2" status
     if [[ -S /var/run/dstack.sock ]]; then
-        curl -sSf --unix-socket /var/run/dstack.sock "http://localhost/GetQuote?report_data=$1"
-    else
-        curl -sSf --unix-socket /var/run/tappd.sock "http://localhost/prpc/Tappd.RawQuote?report_data=$1"
+        status=$(curl -sS -o "$stage/attestation.json" -w '%{http_code}' \
+            --unix-socket /var/run/dstack.sock \
+            "http://localhost/v1/Attest?report_data=$report_data") || return 1
+        case $status in
+            200) ;;
+            404) rm -f "$stage/attestation.json" ;;
+            *)
+                echo "Error: Attest answered HTTP $status: $(head -c 300 "$stage/attestation.json")" >&2
+                return 1
+                ;;
+        esac
     fi
+    # -f: the guest agent reports errors as an HTTP status with a body, and
+    # that body must not be published as the quote.
+    if [[ -S /var/run/dstack.sock ]]; then
+        curl -sSf --unix-socket /var/run/dstack.sock "http://localhost/GetQuote?report_data=$report_data"
+    else
+        curl -sSf --unix-socket /var/run/tappd.sock "http://localhost/prpc/Tappd.RawQuote?report_data=$report_data"
+    fi > "$stage/quote.json" && return 0
+    rm -f "$stage/quote.json"
+    [ -e "$stage/attestation.json" ]
 }
 
-# Each rename is atomic. The manifest and quote go last, so they never list a
-# file that is not yet in place, and certificates of removed domains go after.
+# Each rename is atomic. The manifest and attestations go last, so they never
+# list a file that is not yet in place; certificates of removed domains, and
+# an attestation file this run did not produce, go after.
 evidence_publish() {
     local stage="$1" f stale=()
-    for f in "$EVIDENCE_DIR"/cert-*.pem; do
+    for f in "$EVIDENCE_DIR"/cert-*.pem "$EVIDENCE_DIR"/attestation.json "$EVIDENCE_DIR"/quote.json; do
         if [ -e "$f" ] && [ ! -e "$stage/${f##*/}" ]; then
             stale+=("$f")
         fi
     done
     mv -f "$stage"/acme-account.json "$stage"/cert-*.pem "$EVIDENCE_DIR"/ || return 1
-    mv -f "$stage"/sha256sum.txt "$stage"/quote.json "$EVIDENCE_DIR"/ || return 1
+    mv -f "$stage"/* "$EVIDENCE_DIR"/ || return 1
     rm -f "${stale[@]}"
     rm -rf "$stage"
 }
