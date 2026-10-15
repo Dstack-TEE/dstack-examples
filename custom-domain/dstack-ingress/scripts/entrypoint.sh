@@ -20,6 +20,7 @@ if [ -r /etc/dstack-ingress/build-info ]; then
 fi
 
 source /scripts/functions.sh
+source /scripts/haproxy-lib.sh
 
 PORT=${PORT:-443}
 TXT_PREFIX=${TXT_PREFIX:-"_dstack-app-address"}
@@ -89,6 +90,9 @@ if ! ACCEPT_PROXY_PROTOCOL=$(sanitize_boolean "$ACCEPT_PROXY_PROTOCOL" "ACCEPT_P
     exit 1
 fi
 if ! SEND_PROXY_PROTOCOL=$(sanitize_boolean "$SEND_PROXY_PROTOCOL" "SEND_PROXY_PROTOCOL"); then
+    exit 1
+fi
+if [ -n "$ROUTING_MAP" ] && ! routing_map_entries >/dev/null; then
     exit 1
 fi
 
