@@ -19,19 +19,8 @@ export DELEGATION_ZONE
 # contact address is optional; certman.py asks for a contactless account when
 # none is given.
 
-# certbot stores certificates under /etc/letsencrypt/live/<domain>/; certman.py
-# keeps those for derived keys (DETERMINISTIC_TLS_KEY) apart from its lineages.
-cert_dir() {
-    if [ "${DETERMINISTIC_TLS_KEY,,}" = "true" ]; then
-        local name="$1"
-        [[ "$name" == \*.* ]] && name="_wildcard.${name#\*.}"
-        echo "/etc/letsencrypt/deterministic/$name"
-    else
-        echo "/etc/letsencrypt/live/$(cert_dir_name "$1")"
-    fi
-}
-cert_fullchain_path() { echo "$(cert_dir "$1")/fullchain.pem"; }
-cert_privkey_path()   { echo "$(cert_dir "$1")/privkey.pem"; }
+cert_fullchain_path() { echo "$(certman.py cert-dir --domain "$1")/fullchain.pem"; }
+cert_privkey_path()   { echo "$(certman.py cert-dir --domain "$1")/privkey.pem"; }
 
 setup_py_env() {
     if [ ! -d /opt/app-venv ]; then

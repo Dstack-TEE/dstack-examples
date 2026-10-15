@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 
-from dns_providers import DNSProviderFactory
 import deterministic_key
 import argparse
 import os
@@ -14,15 +13,11 @@ from importlib import metadata
 from typing import List, Optional, Tuple
 
 from cryptography import x509
-from cryptography.hazmat.primitives import serialization
 
 # Add script directory to path to import dns_providers
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# certbot cannot keep a lineage for a key it did not generate, so certificates
-# for derived keys live here, apart from its lineages, and certman.py renews
-# them itself.
-DETERMINISTIC_DIR = "/etc/letsencrypt/deterministic"
+LETSENCRYPT_DIR = "/etc/letsencrypt"
 
 
 def renewal_due(cert: x509.Certificate, now: datetime) -> bool:
@@ -37,27 +32,6 @@ def renewal_due(cert: x509.Certificate, now: datetime) -> bool:
         return now >= not_after - timedelta(days=int(days))
     lifetime = not_after - not_before
     return now >= not_before + (lifetime / 2 if lifetime < timedelta(days=10) else lifetime * 2 / 3)
-
-
-def _cert_names(path: str) -> Optional[List[str]]:
-    """The DNS names a certificate file is for, or None if it cannot be read."""
-    try:
-        with open(path, "rb") as fh:
-            cert = x509.load_pem_x509_certificate(fh.read())
-        return cert.extensions.get_extension_for_class(
-            x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
-    except (OSError, ValueError, x509.ExtensionNotFound):
-        return None
-
-
-def _key_matches(directory: str) -> bool:
-    """Whether privkey.pem in directory is the key of cert.pem there."""
-    try:
-        with open(os.path.join(directory, "privkey.pem"), "rb") as fh:
-            key = serialization.load_pem_private_key(fh.read(), None)
-    except (OSError, ValueError, TypeError):
-        return False
-    return deterministic_key.cert_matches(os.path.join(directory, "cert.pem"), key)
 
 
 def staging_enabled() -> bool:
@@ -87,13 +61,12 @@ class CertManager:
 
     def __init__(self, provider_type: Optional[str] = None):
         """Initialize cert manager with DNS provider."""
-        # Use the same DNS provider factory
-        self.provider_type = provider_type or self._detect_provider_type()
+        # Imported here: the provider SDKs take most of a second to load, and
+        # cert-dir, which dns01.sh runs for every certificate path, does not
+        # need them.
+        from dns_providers import DNSProviderFactory
+        self.provider_type = provider_type or DNSProviderFactory._detect_provider_type()
         self.provider = DNSProviderFactory.create_provider(self.provider_type)
-
-    def _detect_provider_type(self) -> str:
-        """Detect provider type (reuse factory logic)."""
-        return DNSProviderFactory._detect_provider_type()
 
     def install_plugin(self) -> bool:
         """Install certbot plugin for the current provider."""
@@ -319,8 +292,9 @@ class CertManager:
             key = deterministic_key.private_key(domain)
             # certbot refuses to overwrite an explicit --cert-path, so issue
             # into a fresh directory and move the result into place.
-            os.makedirs(DETERMINISTIC_DIR, exist_ok=True)
-            staging = tempfile.mkdtemp(dir=DETERMINISTIC_DIR, prefix=".issue-")
+            root = os.path.dirname(self.cert_dir(domain))
+            os.makedirs(root, exist_ok=True)
+            staging = tempfile.mkdtemp(dir=root, prefix=".issue-")
             csr = os.path.join(staging, "request.csr")
             deterministic_key.write_file(csr, deterministic_key.csr_pem(key, domain))
             csr_args = ("--csr", csr) + tuple(
@@ -373,63 +347,45 @@ class CertManager:
             if key is not None:
                 shutil.rmtree(staging, ignore_errors=True)
 
-    def _deterministic_dir(self, domain: str) -> str:
-        """A wildcard's is apart from its base domain's, which may be served too."""
-        name = f"_wildcard.{domain[2:]}" if domain.startswith("*.") else domain
-        return os.path.join(DETERMINISTIC_DIR, name)
-
     def _install_deterministic(self, domain: str, staging: str, key) -> bool:
         if not deterministic_key.cert_matches(os.path.join(staging, "cert.pem"), key):
             print(f"✗ Certificate issued for {domain} does not carry the derived key",
                   file=sys.stderr)
             return False
-        target = self._deterministic_dir(domain)
+        target = self.cert_dir(domain)
         deterministic_key.write_file(os.path.join(target, "privkey.pem"),
                                      deterministic_key.key_pem(key))
         for name in ("cert.pem", "chain.pem", "fullchain.pem"):
             os.replace(os.path.join(staging, name), os.path.join(target, name))
         return True
 
-    def _adopt_legacy_deterministic(self, domain: str) -> None:
+    def _clear_legacy_live(self, domain: str) -> None:
         """Clear the plain files 2.4-2.6 wrote into live/ for derived keys.
 
-        certbot links a lineage's files into live/ from archive/; plain files
-        there come from the old `--csr` issuance, which nothing renews and which
-        blocks certbot from creating the lineage. 2.6 wrote privkey.pem before
-        issuing, so a failed issuance left it alone there. 2.4-2.6 put a
-        wildcard's there under the base name too, so the certificate's name
-        tells whose it is. Keep a complete certificate as that domain's
-        deterministic one if there is none yet and the key matches, otherwise
-        drop the files. certbot's failed attempts to create the lineage over
-        them left an empty renewal config, which would push the next lineage
-        to <name>-0001; drop that too.
+        certbot only links files into live/, so plain ones there come from the
+        old `--csr` issuance, which nothing renews and which blocks certbot from
+        creating the lineage. With the flag on they move to the deterministic
+        directory, which keeps them served until the next pass re-issues them if
+        they do not carry this domain's derived key. certbot's failed attempts
+        to create the lineage over them left an empty renewal config, which
+        would push the next lineage to <name>-0001.
         """
         conf = self._renewal_conf_path(domain)
         if os.path.isfile(conf) and os.path.getsize(conf) == 0:
             os.remove(conf)
-            print(f"Removed the empty renewal config {conf}")
-        live = f"/etc/letsencrypt/live/{self._lineage_name(domain)}"
+        live = self._live_dir(domain)
         privkey = os.path.join(live, "privkey.pem")
         if not os.path.isfile(privkey) or os.path.islink(privkey):
             return
-        fullchain = os.path.join(live, "fullchain.pem")
-        base = self._lineage_name(domain)
-        names = _cert_names(os.path.join(live, "cert.pem"))
-        target = None
-        if names in ([base], [f"*.{base}"]):
-            target = self._deterministic_dir(names[0])
-        if (deterministic_key.enabled() and target and not os.path.exists(target)
-                and os.path.isfile(fullchain) and not os.path.islink(fullchain)
-                and _key_matches(live)):
-            os.makedirs(DETERMINISTIC_DIR, exist_ok=True)
+        target = self.cert_dir(domain)
+        if deterministic_key.enabled() and not os.path.exists(target):
+            os.makedirs(os.path.dirname(target), exist_ok=True)
             os.replace(live, target)
-            print(f"Moved the certificate in {live} to {target}")
         else:
             shutil.rmtree(live)
-            print(f"Removed the unmanaged certificate in {live}")
 
     def _deterministic_renewal_due(self, domain: str) -> bool:
-        fullchain = self._fullchain_path(domain)
+        fullchain = os.path.join(self.cert_dir(domain), "fullchain.pem")
         if not deterministic_key.cert_matches(fullchain, deterministic_key.private_key(domain)):
             print(f"Certificate for {domain} does not carry the derived key, re-issuing")
             return True
@@ -507,23 +463,34 @@ class CertManager:
             print(f"Error running certbot: {e}", file=sys.stderr)
             return False, False
 
-    def _fullchain_path(self, domain: str) -> str:
-        if deterministic_key.enabled():
-            return os.path.join(self._deterministic_dir(domain), "fullchain.pem")
-        return f"/etc/letsencrypt/live/{self._lineage_name(domain)}/fullchain.pem"
+    @classmethod
+    def cert_dir(cls, domain: str) -> str:
+        """Where the certificate served for domain lives."""
+        if not deterministic_key.enabled():
+            return cls._live_dir(domain)
+        # certbot cannot keep a lineage for a key it did not generate, so
+        # certificates for derived keys live apart from its lineages, and
+        # certman.py renews them itself. A wildcard's is apart from its base
+        # domain's, which may be served too.
+        name = f"_wildcard.{domain[2:]}" if domain.startswith("*.") else domain
+        return os.path.join(LETSENCRYPT_DIR, "deterministic", name)
 
     def certificate_exists(self, domain: str) -> bool:
         """Check if certificate already exists for domain."""
-        return os.path.isfile(self._fullchain_path(domain))
+        return os.path.isfile(os.path.join(self.cert_dir(domain), "fullchain.pem"))
 
     @staticmethod
     def _lineage_name(domain: str) -> str:
         """certbot stores a wildcard lineage under the bare name."""
         return domain[2:] if domain.startswith("*.") else domain
 
+    @classmethod
+    def _live_dir(cls, domain: str) -> str:
+        return os.path.join(LETSENCRYPT_DIR, "live", cls._lineage_name(domain))
+
     def _renewal_conf_path(self, domain: str) -> str:
         """Where certbot keeps this lineage's renewal config."""
-        return f"/etc/letsencrypt/renewal/{self._lineage_name(domain)}.conf"
+        return os.path.join(LETSENCRYPT_DIR, "renewal", f"{self._lineage_name(domain)}.conf")
 
     def _certbot_timeout(self) -> int:
         """How long one certbot run may take.
@@ -677,7 +644,7 @@ class CertManager:
         api_endpoint = "acme-v02.api.letsencrypt.org"
         if staging_enabled():
             api_endpoint = "acme-staging-v02.api.letsencrypt.org"
-        pattern = f"/etc/letsencrypt/accounts/{api_endpoint}/directory/*/regr.json"
+        pattern = os.path.join(LETSENCRYPT_DIR, "accounts", api_endpoint, "directory", "*", "regr.json")
         return len(glob.glob(pattern)) > 0
 
     def run_action(
@@ -688,7 +655,7 @@ class CertManager:
         Returns:
             (success, needs_evidence): success status and whether evidence should be generated
         """
-        self._adopt_legacy_deterministic(domain)
+        self._clear_legacy_live(domain)
         if action == "auto":
             if self.certificate_exists(domain) and self.acme_account_exists():
                 success, renewed = self.renew_certificate(domain, email)
@@ -714,7 +681,8 @@ def main():
         description="Manage SSL certificates with certbot using DNS providers"
     )
     parser.add_argument(
-        "action", choices=["obtain", "renew", "auto", "setup"], help="Action to perform"
+        "action", choices=["obtain", "renew", "auto", "setup", "cert-dir"],
+        help="Action to perform"
     )
     parser.add_argument("--domain", help="Domain name")
     parser.add_argument("--email", help="Email for Let's Encrypt registration")
@@ -722,6 +690,12 @@ def main():
         "--provider", help="DNS provider (cloudflare, linode, etc)")
 
     args = parser.parse_args()
+
+    if args.action == "cert-dir":
+        if not args.domain:
+            parser.error("--domain is required")
+        print(CertManager.cert_dir(args.domain))
+        return
 
     try:
         manager = CertManager(args.provider)

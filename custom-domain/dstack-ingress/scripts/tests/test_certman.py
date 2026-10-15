@@ -9,6 +9,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -149,11 +150,11 @@ class RenewalWindowTest(unittest.TestCase):
         )
 
     def test_wildcard_has_its_own_deterministic_dir(self):
-        mgr = object.__new__(certman.CertManager)
-        self.assertEqual(os.path.basename(mgr._deterministic_dir("*.example.com")),
-                         "_wildcard.example.com")
-        self.assertEqual(os.path.basename(mgr._deterministic_dir("example.com")),
-                         "example.com")
+        with mock.patch.dict(os.environ, {"DETERMINISTIC_TLS_KEY": "true"}):
+            self.assertEqual(certman.CertManager.cert_dir("*.example.com"),
+                             "/etc/letsencrypt/deterministic/_wildcard.example.com")
+            self.assertEqual(certman.CertManager.cert_dir("example.com"),
+                             "/etc/letsencrypt/deterministic/example.com")
 
 
 class FakeProvider:
