@@ -42,13 +42,9 @@ esac
 cert_fullchain_path() { echo "${LEGO_PATH}/certificates/${1}.crt"; }
 cert_privkey_path()   { echo "${LEGO_PATH}/certificates/${1}.key"; }
 
+# The account for the configured server and email, as legoman.py resolves it.
 acme_account_file() {
-    local files=( "${LEGO_PATH}"/accounts/*/*/account.json )
-    if [[ ! -f "${files[0]}" ]]; then
-        echo "Error: lego account file not found under ${LEGO_PATH}/accounts" >&2
-        return 1
-    fi
-    echo "${files[0]}"
+    legoman.py account-file ${ACME_EMAIL:+--email "$ACME_EMAIL"}
 }
 
 setup_py_env() {

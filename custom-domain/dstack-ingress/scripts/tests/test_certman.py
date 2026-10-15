@@ -183,6 +183,8 @@ class EnvTestCase(unittest.TestCase):
         "DELEGATION_PROPAGATION_SECONDS",
         "ACME_STAGING",
         "CERTBOT_STAGING",
+        "ACME_DIRECTORY_URL",
+        "DETERMINISTIC_TLS_KEY",
     )
 
     def setUp(self):
@@ -227,6 +229,74 @@ class RenewScopeTest(EnvTestCase):
         self.assertEqual(cmd[cmd.index("--cert-name") + 1], "a.example.com")
         # renew must not re-specify the authenticator; it is in the lineage.
         self.assertNotIn("--manual", cmd)
+
+
+class AcmeServerTest(EnvTestCase):
+    """The configured ACME server, not the one saved in a lineage, decides.
+
+    The certificate volume outlives the configuration, so after a switch
+    between staging and production the certificate in place, its renewal
+    config and its account all belong to the other server.
+    """
+
+    COMMANDS = (("certonly", False), ("renew", False), ("certonly", True), ("renew", True))
+
+    def servers(self):
+        out = []
+        for action, delegated in self.COMMANDS:
+            if delegated:
+                os.environ["DELEGATION_ZONE"] = "deleg.example.net"
+            else:
+                os.environ.pop("DELEGATION_ZONE", None)
+            cmd = _command_manager()._build_certbot_command(action, "a.example.com", "")
+            self.assertNotIn("--staging", cmd)
+            out.append(cmd[cmd.index("--server") + 1])
+        return set(out)
+
+    def test_every_command_names_the_server(self):
+        self.assertEqual(self.servers(), {certman.ACME_PROD})
+        os.environ["ACME_STAGING"] = "true"
+        self.assertEqual(self.servers(), {certman.ACME_STAGING})
+
+    def test_directory_url_applies_to_every_command(self):
+        os.environ["ACME_STAGING"] = "true"
+        os.environ["ACME_DIRECTORY_URL"] = "https://pebble:14000/dir"
+        self.assertEqual(self.servers(), {"https://pebble:14000/dir"})
+
+    def run_auto(self, lineage_server, account=True):
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        conf = os.path.join(tmp, "a.example.com.conf")
+        with open(conf, "w", encoding="utf-8") as fh:
+            if lineage_server:
+                fh.write(f"version = 5.8.0\n[renewalparams]\nserver = {lineage_server}\n")
+        calls = []
+        mgr = object.__new__(certman.CertManager)
+        mgr._renewal_conf_path = lambda domain: conf  # noqa: SLF001
+        mgr.certificate_exists = lambda domain: True
+        mgr.acme_account_exists = lambda: account
+        mgr.renew_certificate = lambda d, e: calls.append("renew") or (True, False)
+        mgr.obtain_certificate = lambda d, e, replace=False: calls.append(
+            ("obtain", replace)) or True
+        mgr.run_action("a.example.com", "", "auto")
+        return calls
+
+    def test_same_server_renews(self):
+        self.assertEqual(self.run_auto(certman.ACME_PROD), ["renew"])
+
+    def test_staging_to_production_replaces_the_certificate(self):
+        self.assertEqual(self.run_auto(certman.ACME_STAGING), [("obtain", True)])
+
+    def test_production_to_staging_replaces_the_certificate(self):
+        os.environ["ACME_STAGING"] = "true"
+        self.assertEqual(self.run_auto(certman.ACME_PROD), [("obtain", True)])
+
+    def test_missing_account_replaces_the_certificate(self):
+        self.assertEqual(self.run_auto(certman.ACME_PROD, account=False),
+                         [("obtain", True)])
+
+    def test_unknown_server_does_not_replace_every_pass(self):
+        self.assertEqual(self.run_auto(None), ["renew"])
 
 
 class CertbotTimeoutTest(EnvTestCase):

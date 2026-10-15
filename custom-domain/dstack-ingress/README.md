@@ -178,6 +178,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode. `CERTBOT_STAGING` is the historical name and still works |
+| `ACME_DIRECTORY_URL` | | ACME directory of a test server such as Pebble, used instead of Let's Encrypt in either mode (CAA records always name `letsencrypt.org`, so other public CAs are not supported); takes precedence over `ACME_STAGING` |
 | `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
 | `DNS_SETUP_MODE` | `wait` | How to handle operator-managed records: `wait`, `print` or `webhook` — see below. Applies to tls-alpn-01 and to dns-01 challenge delegation |
 | `DNS_SETUP_TIMEOUT` | `1800` | Seconds to wait for those records to appear |
