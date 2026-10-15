@@ -6,7 +6,14 @@ import json
 import socket
 import requests
 from typing import Dict, List, Optional
-from .base import DNSProvider, DNSRecord, CAARecord, RecordType
+from .base import (
+    HTTP_TIMEOUT,
+    CAARecord,
+    DNSProvider,
+    DNSRecord,
+    RecordType,
+    write_secret_file,
+)
 
 
 class LinodeDNSProvider(DNSProvider):
@@ -20,6 +27,9 @@ class LinodeDNSProvider(DNSProvider):
     CERTBOT_PACKAGE = "certbot-dns-linode"
     CERTBOT_PROPAGATION_SECONDS = 300
     CERTBOT_CREDENTIALS_FILE = "~/.linode/credentials.ini"
+
+    # Linode's maximum; most zones then fit in a single request.
+    PAGE_SIZE = 500
 
     def __init__(self):
         super().__init__()
@@ -43,14 +53,12 @@ class LinodeDNSProvider(DNSProvider):
             # Create credentials directory
             os.makedirs(credentials_dir, exist_ok=True)
 
-            # Write credentials file
-            with open(credentials_file, "w") as f:
-                f.write("# WARNING: This file contains sensitive credentials for Linode DNS API.\n")
-                f.write("# Ensure this file is kept secure and not shared.\n")
-                f.write(f"dns_linode_key = {self.api_token}\n")
-
-            # Set secure permissions
-            os.chmod(credentials_file, 0o600)
+            write_secret_file(
+                credentials_file,
+                "# WARNING: This file contains sensitive credentials for Linode DNS API.\n"
+                "# Ensure this file is kept secure and not shared.\n"
+                f"dns_linode_key = {self.api_token}\n",
+            )
             print(f"Linode credentials file created: {credentials_file}")
 
             # Pre-fetch zone ID if we have a domain
@@ -70,16 +78,9 @@ class LinodeDNSProvider(DNSProvider):
         """Make a request to the Linode API with error handling."""
         url = f"{self.base_url}/{endpoint}"
         try:
-            if method.upper() == "GET":
-                response = requests.get(url, headers=self.headers)
-            elif method.upper() == "POST":
-                response = requests.post(url, headers=self.headers, json=data)
-            elif method.upper() == "PUT":
-                response = requests.put(url, headers=self.headers, json=data)
-            elif method.upper() == "DELETE":
-                response = requests.delete(url, headers=self.headers)
-            else:
-                raise ValueError(f"Unsupported HTTP method: {method}")
+            response = requests.request(
+                method, url, headers=self.headers, json=data, timeout=HTTP_TIMEOUT
+            )
 
             if response.status_code == 404:
                 return {
@@ -115,14 +116,28 @@ class LinodeDNSProvider(DNSProvider):
             print(f"Unexpected Error: {str(e)}", file=sys.stderr)
             return {"success": False, "errors": [{"reason": str(e)}]}
 
+    def _get_all(self, endpoint: str) -> Optional[List[Dict]]:
+        """GET every page of a paginated Linode collection, or None on failure."""
+        items: List[Dict] = []
+        page = 1
+        pages = 1
+        while page <= pages:
+            result = self._make_request(
+                "GET", f"{endpoint}?page={page}&page_size={self.PAGE_SIZE}"
+            )
+            if not result.get("success", False):
+                return None
+            body = result.get("data", {})
+            items.extend(body.get("data", []))
+            pages = body.get("pages", 1)
+            page += 1
+        return items
+
     def _get_zone_id(self, domain: str) -> Optional[str]:
         """Get the domain ID for a domain in Linode."""
-        result = self._make_request("GET", "domains")
-
-        if not result.get("success", False):
+        domains = self._get_all("domains")
+        if domains is None:
             return None
-
-        domains = result.get("data", {}).get("data", [])
 
         best_match_domain = None
         best_match_length = 0
@@ -186,9 +201,8 @@ class LinodeDNSProvider(DNSProvider):
             print(f"Error: Could not find zone for domain {name}", file=sys.stderr)
             return []
 
-        result = self._make_request("GET", f"domains/{zone_id}/records")
-
-        if not result.get("success", False):
+        all_records = self._get_all(f"domains/{zone_id}/records")
+        if all_records is None:
             return []
 
         print(f"Checking for existing DNS records for {name}")
@@ -196,7 +210,7 @@ class LinodeDNSProvider(DNSProvider):
         records = []
         subdomain = self._get_subdomain(name, zone_id)
 
-        for record_data in result.get("data", {}).get("data", []):
+        for record_data in all_records:
             record_name = record_data.get("name", "")
 
             # Match records by subdomain
@@ -292,19 +306,11 @@ class LinodeDNSProvider(DNSProvider):
         """
         # Resolve domain to IP
         domain = content
-        self.clear_conflicting_alias(name, RecordType.A)
         print(f"Trying to resolve: {domain}")
         ip_address = socket.gethostbyname(domain)
         print(f"✅ Resolved {domain} to IP: {ip_address}")
 
-        if not ip_address:
-            raise socket.gaierror("Could not resolve any variant of the domain")
-
-        # Delete any existing CNAME records for this name (clean transition)
-        existing_cname_records = self.get_dns_records(name, RecordType.CNAME)
-        for record in existing_cname_records:
-            if record.id:
-                self.delete_dns_record(record.id, name)
+        self.clear_conflicting_alias(name, RecordType.A)
 
         print(
             f"Creating A record for {name} pointing to {ip_address} (instead of CNAME to {content})"

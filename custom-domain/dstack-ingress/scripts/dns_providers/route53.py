@@ -129,8 +129,9 @@ class Route53DNSProvider(DNSProvider):
 
         # Fetch zone info
         zone_info = self._get_hosted_zone_info(domain)
-        if zone_info:
-            self.hosted_zone_id, self.hosted_zone_name = zone_info
+        if not zone_info:
+            return None
+        self.hosted_zone_id, self.hosted_zone_name = zone_info
         return self.hosted_zone_id
 
     def _normalize_record_name(self, name: str) -> str:
