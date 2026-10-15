@@ -16,11 +16,11 @@ dstack-ingress is a HAProxy-based L4 (TCP) proxy that provides:
 
 ## How It Works
 
-1. **Bootstrap**: On first start, obtains SSL certificates from Let's Encrypt using DNS-01 validation and configures DNS records (CNAME, TXT, optional CAA).
+1. **Bootstrap**: On first start, obtains SSL certificates from Let's Encrypt using DNS-01 validation and configures DNS records: the alias (a CNAME, or an A record where a CAA shares the name), TXT and optional CAA. In tls-alpn-01 mode it prints them for you to create instead.
 
 2. **TLS Termination**: HAProxy terminates TLS and forwards the decrypted TCP stream to your backend. No HTTP inspection — the proxy operates entirely at L4.
 
-3. **Certificate Renewal**: A background daemon checks for renewal every 12 hours. On renewal, HAProxy is gracefully reloaded with zero downtime.
+3. **Certificate Renewal**: A background daemon checks for renewal every 12 hours. On renewal, HAProxy is gracefully reloaded with zero downtime. A failed pass is retried after 60s, backing off by 60s per attempt up to 30 minutes. A domain that fails does not stop the others from being served: in dns-01 mode the container exits at startup only if no domain has a certificate yet, and in tls-alpn-01 mode it serves a placeholder certificate until issuance succeeds.
 
 4. **Evidence Generation**: Generates cryptographically linked attestation evidence (ACME account, certificates, TDX quote / dstack attestation) for TEE verification.
 
@@ -120,6 +120,7 @@ services:
         app.example.com=app-main:80
         api.example.com=app-api:8080
     volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
       - /var/run/tappd.sock:/var/run/tappd.sock
       - letsencrypt:/etc/letsencrypt
       - evidences:/evidences
@@ -158,8 +159,8 @@ environment:
 
 | Variable | Description |
 |----------|-------------|
-| `DOMAIN` or `DOMAINS` | The domain to serve, or several in `DOMAINS`; both may be set. `DOMAINS` takes one domain per line, or a single comma-separated line (commas in a multi-line value are not separators). Supports wildcards (`*.example.com`) |
-| `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80`. Not needed with `ROUTING_MAP` |
+| `DOMAIN` or `DOMAINS` | The domain to serve, or several in `DOMAINS`; both may be set. `DOMAINS` takes one domain per line, or a single comma-separated line (commas in a multi-line value are not separators). Supports wildcards (`*.example.com`). Lines starting with `#` are ignored. Without `ROUTING_MAP`, all of them go to `TARGET_ENDPOINT` |
+| `TARGET_ENDPOINT` | Backend address, e.g. `app:80` or `http://app:80`. Required unless `ROUTING_MAP` is set |
 | `GATEWAY_DOMAIN` | dstack gateway domain (e.g. `gateway.dstack-prod5.phala.network`) |
 
 `GATEWAY_DOMAIN` is published as your domain's CNAME target, so its first label
@@ -173,12 +174,11 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | `443` | HAProxy listen port |
-| `DOMAINS` | | Multiple domains, one per line or one comma-separated line. Without `ROUTING_MAP`, all of them go to `TARGET_ENDPOINT` |
-| `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line. A wildcard entry (`*.example.com=host:port`) matches one label, and exact entries take precedence over it. Unmatched names go to the first entry |
-| `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS). Replaces existing values with the same tag; for a wildcard whose base is a zone apex this restricts the whole zone (see [Wildcard Domain Support](#wildcard-domain-support)). Except on Cloudflare, a non-wildcard domain is then published as an A record to the gateway's current address instead of a CNAME, because a CNAME would hide the CAA beside it; the address is refreshed every `RENEW_INTERVAL`. Turning `SET_CAA` off later leaves the CAA record in place, so the A record stays until you delete the CAA |
+| `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line. A wildcard entry (`*.example.com=host:port`) matches one label, and exact entries take precedence over it. Unmatched names go to the first entry. It routes only: every name still needs to be in `DOMAIN`/`DOMAINS` to get a certificate |
+| `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS). Replaces existing values with the same tag; for a wildcard whose base is a zone apex this restricts the whole zone (see [Wildcard Domain Support](#wildcard-domain-support)). Except on Cloudflare, a non-wildcard domain is then published as an A record to the gateway's current address instead of a CNAME, because a CNAME would hide the CAA beside it; the address is refreshed every `RENEW_INTERVAL`. The same happens whenever a CAA record already exists at the name, whoever wrote it, so turning `SET_CAA` off later keeps the A record until you delete the CAA. Linode always uses an A record. With `DELEGATION_ZONE` the CAA is always published, whatever this says |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `ACME_EMAIL` | | ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See [below](#the-acme-contact-address-is-optional-and-public) — it is optional, and published |
-| `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode. `CERTBOT_STAGING` is the historical name and still works |
+| `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode, when exactly `true`. `CERTBOT_STAGING` is the historical name and still works |
 | `ACME_DIRECTORY_URL` | | ACME directory of a test server such as Pebble, used instead of Let's Encrypt in either mode (CAA records always name `letsencrypt.org`, so other public CAs are not supported); takes precedence over `ACME_STAGING` |
 | `CHALLENGE_TYPE` | `dns-01` | `dns-01` (certbot + DNS credentials) or `tls-alpn-01` (lego, no DNS credentials) |
 | `DNS_PROVIDER` | detected | dns-01: `cloudflare`, `linode`, `namecheap` or `route53`. Detected from the provider's credential variable when unset; set it explicitly for `route53`, whose role setup depends on it |
@@ -188,13 +188,13 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `DNS_WEBHOOK_URL` | | `DNS_SETUP_MODE=webhook`: endpoint to notify |
 | `DNS_WEBHOOK_TOKEN` | | Shared secret; the payload is HMAC-SHA256 signed with it |
 | `DNS_WEBHOOK_TIMEOUT` | `15` | Seconds per webhook POST attempt |
-| `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records |
+| `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records. `DOH_RESOLVER` is the historical name and still works |
 | `TLSALPN_ADDRESS` | `127.0.0.1` | Address lego's ACME responder binds to, and haproxy forwards `acme-tls/1` connections to |
 | `TLSALPN_PORT` | `9443` | Loopback port lego's ACME responder binds to |
 | `TLS_TERMINATE_PORT` | `9444` | Loopback port the TLS frontend moves to in tls-alpn-01 mode |
 | `RENEW_DAYS_BEFORE` | client default | Days of remaining lifetime that trigger renewal. Applies to both modes: passed to lego as `--renew-days`, and written to certbot's `renew_before_expiry`. Unsetting it removes that setting again, so the client's own default applies |
-| `DETERMINISTIC_TLS_KEY` | `false` | Derive a stable TLS key from the dstack KMS so clients can pin it; see [Deterministic TLS keys](#deterministic-tls-keys-spki-pinning) |
-| `RENEW_INTERVAL` | `43200` | Seconds between successful certificate passes |
+| `DETERMINISTIC_TLS_KEY` | `false` | Derive a stable TLS key from the dstack KMS so clients can pin it; needs `/var/run/dstack.sock`; see [Deterministic TLS keys](#deterministic-tls-keys-spki-pinning) |
+| `RENEW_INTERVAL` | `43200` | Seconds between successful certificate passes. A failed pass is retried after 60s, growing by 60s per attempt up to 30 minutes |
 | `DNS_SETTLE_SECONDS` | `30` | tls-alpn-01: wait after DNS verifies, so the gateway's own TXT cache expires |
 | `MAXCONN` | `4096` | HAProxy max connections |
 | `TIMEOUT_CONNECT` | `10s` | Backend connect timeout |
@@ -207,7 +207,9 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `SEND_PROXY_PROTOCOL` | `false` | Pass the client's address to the backends (`TARGET_ENDPOINT`, `ROUTING_MAP`) with PROXY protocol v2. Only for backends that read it |
 | `DELEGATION_ZONE` | | Zone this container writes into, so the DNS token needs no access to the served domain's own zone (see below) |
 | `DELEGATION_PROPAGATION_SECONDS` | `120` | Wait after writing the delegated challenge TXT before validation. Must outlast the record TTL (60s), or a resolver still serving the previous attempt's value fails validation. The certbot run timeout is sized from this, so raising it is safe |
-| `CERTBOT_TIMEOUT` | propagation wait + 180s, never below 300s | Seconds a single certbot run may take. The default is derived from the provider's propagation wait (or `DELEGATION_PROPAGATION_SECONDS`), which is what dominates it. Set this only if a run needs longer still; an explicit value is used as given, floor included |
+| `CERTBOT_TIMEOUT` | propagation wait + 180s, never below 300s | Seconds a single certbot run may take. The default is derived from the provider's propagation wait (or `DELEGATION_PROPAGATION_SECONDS`), which is what dominates it. Set this only if a run needs longer still; an explicit value is used as given, even below 300s |
+
+Settings are checked at startup, and a bad value stops the container with an error naming the variable: booleans must be exactly `true` or `false`, ports 1-65535 without leading zeros, counts and intervals whole numbers, and every `DOMAINS` entry a valid hostname or `*.` wildcard.
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
@@ -274,7 +276,7 @@ The records above are checked the same way tls-alpn-01 checks its own: two DoH
 resolvers, both CAA wire formats, and `DNS_SETUP_MODE` deciding what happens
 while they are missing.
 
-Only the `_acme-challenge` CNAME is checked on later passes. Under dns-01 the CA
+Later passes check only the `_acme-challenge` CNAME, plus that no CAA record forbids issuance. Under dns-01 the CA
 reads a TXT record and never connects here, so the other two records are about
 serving rather than issuance, and a renewal is not blocked on them — a routing
 problem can be fixed at any time, an expired certificate cannot. They are still
@@ -438,18 +440,6 @@ A release is not finished when the image is pushed. The compose files and the sn
    ./custom-domain/dstack-ingress/pin-release.sh ghcr.io/dstack-tee/dstack-ingress:<version>@sha256:<digest>
    ```
 
-## License
-
-MIT License
-
-Copyright (c) 2025
-
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-
 ## Certificates without DNS credentials (tls-alpn-01)
 
 The default `dns-01` flow needs a DNS API token inside the CVM: the container
@@ -544,8 +534,9 @@ Encrypt dropping expiry mail, and the container passes it for you.
   whatever the CNAME resolves to; the port is fixed by the protocol.
 - **CAA must permit `tls-alpn-01`.** A record left over from a `dns-01`
   deployment says `validationmethods=dns-01` and will make the CA refuse. The
-  container checks this before asking for a certificate, so you get a clear
-  message instead of a failed validation.
+  container checks this before asking for a certificate (except with
+  `DNS_SETUP_MODE=print`), so you get a clear message instead of a failed
+  validation.
 - **Losing the `cert-data` volume changes the account URI.** With `dns-01` the
   container just rewrites the CAA record; here it cannot, so a pinned
   `accounturi` would start rejecting issuance until you update it by hand.
@@ -602,3 +593,15 @@ and renewal therefore never interrupt serving traffic. In this mode haproxy
 starts on a self-signed placeholder certificate — it has to be listening before
 the first certificate can be issued — and reloads onto the real one as soon as
 it arrives.
+
+## License
+
+MIT License
+
+Copyright (c) 2025
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
