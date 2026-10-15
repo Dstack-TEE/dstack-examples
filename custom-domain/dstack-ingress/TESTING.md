@@ -166,7 +166,7 @@ behaviour — test the observable effect (reload / no reload), not the prose.
 `/evidences/` is served on the TLS port. The chain to verify:
 
 ```
-quote.report_data == sha256(sha256sum.txt)
+attestation.report_data == sha256(sha256sum.txt)
 sha256sum.txt     covers acme-account.json and every cert-<domain>.pem
 cert-<domain>.pem == the certificate actually served
 ```
@@ -175,16 +175,22 @@ so:
 
 ```bash
 curl -sk https://<domain>/evidences/sha256sum.txt -o s.txt && sha256sum -c s.txt
-python3 -c "import json,hashlib;print(json.load(open('quote.json'))['report_data'][:64] \
-  == hashlib.sha256(open('s.txt','rb').read()).hexdigest())"
+# attestation.json (dstack 0.6+), or quote.json from an older agent;
+# dstack-verifier decodes either and reports report_data
+curl -skf https://<domain>/evidences/attestation.json -o a.json ||
+  curl -skf https://<domain>/evidences/quote.json -o a.json
+curl -s -H 'Content-Type: application/json' --data-binary @a.json http://<verifier>/verify |
+  jq -r .details.report_data | cut -c1-64
+sha256sum s.txt   # must match
 ```
 
 Compare the evidence copy against a live `openssl s_client` fingerprint — the
 point of the chain is that the quote commits to what is *being served*, and only
 that comparison tests it.
 
-To verify the quote itself rather than trusting it, run it through `dcap-qvl`
-against Intel collateral and expect `status = UpToDate`. Re-run the whole chain
+dstack-verifier also checks the attestation itself (`is_valid`). For a
+`quote.json`, run the quote through `dcap-qvl` against Intel collateral and
+expect `status = UpToDate`. Re-run the whole chain
 after a renewal: the evidence must track the new certificates, not go stale at
 first issuance.
 

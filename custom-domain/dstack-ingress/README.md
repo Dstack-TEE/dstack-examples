@@ -22,7 +22,7 @@ dstack-ingress is a HAProxy-based L4 (TCP) proxy that provides:
 
 3. **Certificate Renewal**: A background daemon checks for renewal every 12 hours. On renewal, HAProxy is gracefully reloaded with zero downtime.
 
-4. **Evidence Generation**: Generates cryptographically linked attestation evidence (ACME account, certificates, TDX quote) for TEE verification.
+4. **Evidence Generation**: Generates cryptographically linked attestation evidence (ACME account, certificates, TDX quote / dstack attestation) for TEE verification.
 
 ### Wildcard Domain Support
 
@@ -344,11 +344,12 @@ The endpoint matches the first bytes of an HTTP/1.x request, so:
 | `acme-account.json` | ACME account used to request certificates |
 | `cert-{domain}.pem` | Let's Encrypt certificate for each domain |
 | `sha256sum.txt` | SHA-256 checksums of all evidence files |
-| `quote.json` | TDX quote with `sha256sum.txt` digest in report_data |
+| `quote.json` | TDX quote with `sha256sum.txt` digest in report_data (TDX only) |
+| `attestation.json` | dstack attestation (`/v1/Attest`) with the same report_data, on dstack 0.6+ on every platform |
 
 ### Verification Chain
 
-1. Verify the TDX quote in `quote.json`
+1. Verify `attestation.json` or `quote.json`, e.g. by POSTing it to [dstack-verifier](https://github.com/Dstack-TEE/dstack/tree/master/dstack/verifier)'s `/verify`
 2. Extract `report_data` — it contains the SHA-256 of `sha256sum.txt`
 3. Verify checksums in `sha256sum.txt` against `acme-account.json` and `cert-*.pem`
 4. This proves the certificates were obtained within the TEE
@@ -528,14 +529,17 @@ Encrypt dropping expiry mail, and the container passes it for you.
 {
   "payload": "{\"app_id\":\"…\",\"challenge\":\"tls-alpn-01\",\"domain\":\"app.example.com\",\"instance_id\":\"…\",\"records\":[…],\"timestamp\":1234567890,\"version\":1}",
   "hmac_sha256": "…",
-  "attestation": { "quote": "…", "report_data": "…" }
+  "attestation": { "quote": "…", "event_log": "…", "attestation": "…", "report_data": "…" }
 }
 ```
 
+`attestation` holds the `GetQuote` response (TDX only) and, on dstack 0.6+, the
+`/v1/Attest` response's `attestation` field.
+
 `payload` is a *string* so you sign and hash exactly the bytes you received.
 Verify `hmac_sha256` with `DNS_WEBHOOK_TOKEN`, and — since this request asks you
-to point a hostname at the instance it names — verify `attestation` too: the
-quote's `report_data` is `sha256(payload)`, so it proves which enclave produced
+to point a hostname at the instance it names — verify `attestation` too (dstack-verifier `/verify` takes it as is): its
+`report_data` is `sha256(payload)`, so it proves which enclave produced
 those records. Check the app ID and measurements in it before changing DNS.
 
 ### Why lego and not certbot
