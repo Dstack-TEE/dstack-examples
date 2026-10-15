@@ -141,14 +141,6 @@ class RenewalWindowTest(unittest.TestCase):
             os.chmod(self.dir, 0o700)
         self.assertEqual(self.read(), original)
 
-    def test_wildcard_uses_the_bare_lineage_name(self):
-        self.assertEqual(
-            certman.CertManager._lineage_name("*.example.com"), "example.com"
-        )
-        self.assertEqual(
-            certman.CertManager._lineage_name("example.com"), "example.com"
-        )
-
     def test_wildcard_has_its_own_deterministic_dir(self):
         with mock.patch.dict(os.environ, {"DETERMINISTIC_TLS_KEY": "true"}):
             self.assertEqual(certman.CertManager.cert_dir("*.example.com"),
@@ -191,6 +183,10 @@ class EnvTestCase(unittest.TestCase):
         self._saved = {v: os.environ.get(v) for v in self.VARS}
         for v in self.VARS:
             os.environ.pop(v, None)
+        self.root = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.root)
+        self.addCleanup(setattr, certman, "LETSENCRYPT_DIR", certman.LETSENCRYPT_DIR)
+        certman.LETSENCRYPT_DIR = self.root
 
     def tearDown(self):
         for v, old in self._saved.items():
@@ -213,15 +209,38 @@ class RenewScopeTest(EnvTestCase):
         self.assertIn("--cert-name", cmd)
         self.assertEqual(cmd[cmd.index("--cert-name") + 1], "a.example.com")
 
-    def test_renew_uses_the_bare_name_for_a_wildcard(self):
+    def test_renew_uses_the_wildcard_lineage(self):
         cmd = _command_manager()._build_certbot_command("renew", "*.example.com", "")
-        self.assertEqual(cmd[cmd.index("--cert-name") + 1], "example.com")
+        self.assertEqual(cmd[cmd.index("--cert-name") + 1], "_wildcard.example.com")
 
-    def test_certonly_is_scoped_by_d_not_cert_name(self):
+    def test_certonly_names_the_lineage(self):
+        """certbot's own pick for a wildcard is the base domain's name."""
+        for delegation in ("", "deleg.example.net"):
+            os.environ["DELEGATION_ZONE"] = delegation
+            cmd = _command_manager()._build_certbot_command(
+                "certonly", "*.example.com", "")
+            self.assertEqual(cmd[cmd.index("--cert-name") + 1], "_wildcard.example.com")
+            self.assertEqual(cmd[cmd.index("-d") + 1], "*.example.com")
+
+    def test_csr_issuance_has_no_lineage(self):
+        os.environ["DETERMINISTIC_TLS_KEY"] = "true"
         cmd = _command_manager()._build_certbot_command(
-            "certonly", "a.example.com", "")
+            "certonly", "*.example.com", "", ("--csr", "x.csr"))
         self.assertNotIn("--cert-name", cmd)
-        self.assertIn("-d", cmd)
+
+    def test_replacing_keeps_the_lineage(self):
+        mgr = _command_manager()
+        mgr.install_plugin = lambda: True
+        mgr.provider.validate_credentials = lambda: True
+        mgr.setup_credentials = lambda: True
+        cmds = []
+        with mock.patch.object(certman.subprocess, "run",
+                               lambda cmd, **kw: cmds.append(cmd) or mock.Mock(returncode=0)):
+            self.assertTrue(mgr.obtain_certificate("*.x.com", "", replace=True))
+        cmd = cmds[0]
+        self.assertIn("--force-renewal", cmd)
+        self.assertIn("--break-my-certs", cmd)
+        self.assertEqual(cmd[cmd.index("--cert-name") + 1], "_wildcard.x.com")
 
     def test_delegation_renew_is_scoped_too(self):
         os.environ["DELEGATION_ZONE"] = "deleg.example.net"
@@ -311,6 +330,68 @@ class RenewRandomSleepTest(EnvTestCase):
         os.environ["DELEGATION_ZONE"] = "deleg.example.net"
         cmd = _command_manager()._build_certbot_command("renew", "a.example.com", "")
         self.assertIn("--no-random-sleep-on-renew", cmd)
+
+
+def _cert_pem(name, key):
+    from datetime import datetime, timedelta, timezone
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.x509.oid import NameOID
+
+    now = datetime.now(timezone.utc)
+    subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, name)])
+    return (x509.CertificateBuilder()
+            .subject_name(subject).issuer_name(subject)
+            .public_key(key.public_key()).serial_number(1)
+            .not_valid_before(now).not_valid_after(now + timedelta(days=90))
+            .add_extension(x509.SubjectAlternativeName([x509.DNSName(name)]), critical=False)
+            .sign(key, hashes.SHA256())
+            .public_bytes(serialization.Encoding.PEM))
+
+
+class LineageNameTest(EnvTestCase):
+    """Existing lineages are found by content; new ones get a name of their own."""
+
+    def setUp(self):
+        super().setUp()
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        self.key = ec.generate_private_key(ec.SECP256R1())
+        self.mgr = object.__new__(certman.CertManager)
+
+    def lineage(self, lineage, name):
+        os.makedirs(f"{self.root}/live/{lineage}")
+        os.makedirs(f"{self.root}/renewal", exist_ok=True)
+        with open(f"{self.root}/live/{lineage}/cert.pem", "wb") as fh:
+            fh.write(_cert_pem(name, self.key))
+        open(f"{self.root}/renewal/{lineage}.conf", "w").close()
+
+    def test_new_wildcard_lineage_is_apart_from_the_base(self):
+        self.assertEqual(self.mgr._lineage_name("*.x.com"), "_wildcard.x.com")
+        self.assertEqual(self.mgr._lineage_name("x.com"), "x.com")
+
+    def test_lineages_certbot_named_itself_are_found(self):
+        self.lineage("x.com", "*.x.com")
+        self.lineage("x.com-0001", "x.com")
+        self.assertEqual(self.mgr._lineage_name("*.x.com"), "x.com")
+        self.assertEqual(self.mgr._lineage_name("x.com"), "x.com-0001")
+
+    def test_a_name_taken_by_another_certificate_is_not_reused(self):
+        self.lineage("x.com", "*.x.com")
+        self.assertEqual(self.mgr._lineage_name("x.com"), "x.com-0001")
+
+    def test_legacy_wildcard_files_under_the_bare_name_move_to_the_wildcards(self):
+        os.environ["DETERMINISTIC_TLS_KEY"] = "true"
+        live = f"{self.root}/live/x.com"
+        os.makedirs(live)
+        for item in ("cert", "fullchain"):
+            with open(f"{live}/{item}.pem", "wb") as fh:
+                fh.write(_cert_pem("*.x.com", self.key))
+        with open(f"{live}/privkey.pem", "wb") as fh:
+            fh.write(certman.deterministic_key.key_pem(self.key))
+        self.mgr._clear_legacy_live("*.x.com")
+        self.assertFalse(os.path.exists(live))
+        self.assertTrue(os.path.exists(f"{self.root}/deterministic/_wildcard.x.com/fullchain.pem"))
 
 
 class CertbotTimeoutTest(EnvTestCase):

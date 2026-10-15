@@ -36,6 +36,17 @@ def renewal_due(cert: x509.Certificate, now: datetime) -> bool:
     return now >= not_before + (lifetime / 2 if lifetime < timedelta(days=10) else lifetime * 2 / 3)
 
 
+def _cert_names(path: str) -> Optional[List[str]]:
+    """The DNS names a certificate file is for, or None if it cannot be read."""
+    try:
+        with open(path, "rb") as fh:
+            cert = x509.load_pem_x509_certificate(fh.read())
+        return cert.extensions.get_extension_for_class(
+            x509.SubjectAlternativeName).value.get_values_for_type(x509.DNSName)
+    except (OSError, ValueError, x509.ExtensionNotFound):
+        return None
+
+
 def staging_enabled() -> bool:
     """Whether to use Let's Encrypt staging.
 
@@ -219,9 +230,10 @@ class CertManager:
             # For `renew`, certbot reuses the authenticator + hooks saved in the
             # renewal config from the initial `certonly`, so we don't re-specify
             # them here (and must not fall back to the DNS plugin).
+            if "--csr" not in extra_args:
+                base_cmd.extend(["--cert-name", self._lineage_name(domain)])
             if action == "renew":
-                base_cmd.extend(["--cert-name", self._lineage_name(domain),
-                                 "--no-random-sleep-on-renew"])
+                base_cmd.append("--no-random-sleep-on-renew")
             # Explicit on `renew` too: certbot would otherwise take the server
             # saved in the lineage, whatever the configuration says now.
             base_cmd.extend(["--server", acme_server()])
@@ -263,16 +275,18 @@ class CertManager:
             else:
                 base_cmd.append("--register-unsafely-without-email")
             base_cmd.extend(["-d", domain])
-        if action == "renew":
+        if "--csr" not in extra_args:
             # Without this, `certbot renew` renews *every* lineage in
             # /etc/letsencrypt/renewal. run_pass calls this once per domain, so
             # N domains meant N passes over all N lineages, and the result was
-            # then reported against whichever domain happened to ask.
-            #
+            # then reported against whichever domain happened to ask. On
+            # `certonly` it picks the lineage (see _lineage_name); --csr
+            # issues outside any lineage.
+            base_cmd.extend(["--cert-name", self._lineage_name(domain)])
+        if action == "renew":
             # Without a TTY, certbot also sleeps up to 8 minutes before a due
             # renewal, which overruns _certbot_timeout and gets the run killed.
-            base_cmd.extend(["--cert-name", self._lineage_name(domain),
-                             "--no-random-sleep-on-renew"])
+            base_cmd.append("--no-random-sleep-on-renew")
         base_cmd.extend(["--server", acme_server()])
 
         if getattr(self.provider, 'CERTBOT_PROPAGATION_SECONDS'):
@@ -401,10 +415,11 @@ class CertManager:
         to create the lineage over them left an empty renewal config, which
         would push the next lineage to <name>-0001.
         """
-        conf = self._renewal_conf_path(domain)
+        base = domain[2:] if domain.startswith("*.") else domain
+        conf = os.path.join(LETSENCRYPT_DIR, "renewal", f"{base}.conf")
         if os.path.isfile(conf) and os.path.getsize(conf) == 0:
             os.remove(conf)
-        live = self._live_dir(domain)
+        live = os.path.join(LETSENCRYPT_DIR, "live", base)
         privkey = os.path.join(live, "privkey.pem")
         if not os.path.isfile(privkey) or os.path.islink(privkey):
             return
@@ -512,8 +527,28 @@ class CertManager:
 
     @staticmethod
     def _lineage_name(domain: str) -> str:
-        """certbot stores a wildcard lineage under the bare name."""
-        return domain[2:] if domain.startswith("*.") else domain
+        """The lineage holding exactly this domain, else the name to create.
+
+        Left to itself certbot named a wildcard's lineage after the bare name,
+        the same as the base domain's, so with both in DOMAINS one became
+        <name>-0001. Existing lineages are therefore found by content. A new
+        wildcard lineage is _wildcard.<name>: an underscore cannot appear in a
+        certificate host name, so it never collides with a domain.
+        """
+        base = domain[2:] if domain.startswith("*.") else domain
+        new = f"_wildcard.{base}" if domain.startswith("*.") else domain
+        renewal = os.path.join(LETSENCRYPT_DIR, "renewal")
+        pattern = re.compile(rf"(_wildcard\.)?{re.escape(base)}(-\d{{4}})?")
+        existing = sorted(os.path.basename(p)[:-len(".conf")]
+                          for p in glob.glob(os.path.join(renewal, "*.conf")))
+        for name in [new] + [n for n in existing if pattern.fullmatch(n)]:
+            if _cert_names(os.path.join(LETSENCRYPT_DIR, "live", name, "cert.pem")) == [domain]:
+                return name
+        name, n = new, 0
+        while name in existing:
+            n += 1
+            name = f"{new}-{n:04d}"
+        return name
 
     @classmethod
     def _live_dir(cls, domain: str) -> str:
