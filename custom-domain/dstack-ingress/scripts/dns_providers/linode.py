@@ -164,7 +164,7 @@ class LinodeDNSProvider(DNSProvider):
         # First, get the domain name
         result = self._make_request("GET", f"domains/{domain_id}")
         if not result.get("success", False):
-            return fqdn
+            raise RuntimeError(f"Failed to look up Linode domain {domain_id}")
 
         domain_name = result.get("data", {}).get("domain", "")
 
@@ -198,12 +198,11 @@ class LinodeDNSProvider(DNSProvider):
         """Get DNS records for a domain."""
         zone_id = self._ensure_zone_id(name)
         if not zone_id:
-            print(f"Error: Could not find zone for domain {name}", file=sys.stderr)
-            return []
+            raise RuntimeError(f"Could not find zone for domain {name}")
 
         all_records = self._get_all(f"domains/{zone_id}/records")
         if all_records is None:
-            return []
+            raise RuntimeError(f"Failed to list DNS records for {name}")
 
         print(f"Checking for existing DNS records for {name}")
 

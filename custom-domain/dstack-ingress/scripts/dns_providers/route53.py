@@ -146,10 +146,7 @@ class Route53DNSProvider(DNSProvider):
         """Get DNS records for a domain."""
         hosted_zone_id = self._ensure_hosted_zone_id(name)
         if not hosted_zone_id:
-            print(
-                f"Error: Could not find hosted zone for domain {name}", file=sys.stderr
-            )
-            return []
+            raise RuntimeError(f"Could not find hosted zone for domain {name}")
 
         normalized_name = self._normalize_record_name(name)
 
@@ -220,8 +217,7 @@ class Route53DNSProvider(DNSProvider):
             return records
 
         except Exception as e:
-            print(f"Error getting DNS records: {e}", file=sys.stderr)
-            return []
+            raise RuntimeError(f"Failed to list DNS records for {name}: {e}") from e
 
     def create_dns_record(self, record: DNSRecord) -> bool:
         """Create a DNS record."""
