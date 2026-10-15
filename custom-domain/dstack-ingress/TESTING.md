@@ -174,23 +174,34 @@ cert-<domain>.pem == the certificate actually served
 so:
 
 ```bash
-curl -sk https://<domain>/evidences/sha256sum.txt -o s.txt && sha256sum -c s.txt
-# attestation.json (dstack 0.6+), or quote.json from an older agent;
-# dstack-verifier decodes either and reports report_data
-curl -skf https://<domain>/evidences/attestation.json -o a.json ||
-  curl -skf https://<domain>/evidences/quote.json -o a.json
+E=https://<domain>/evidences
+curl --http1.1 -fsSk "$E/sha256sum.txt" -O
+(while read -r _ f; do
+  [[ $f =~ ^(acme-account\.json|cert-[A-Za-z0-9*.-]+\.pem)$ ]] || { echo "bad name: $f" >&2; exit 1; }
+  curl --http1.1 -fsSk "$E/$f" -o "$f" || exit 1
+done < sha256sum.txt) &&
+sha256sum -c sha256sum.txt &&
+# attestation.json (dstack 0.6+), or quote.json from an older agent
+{ curl --http1.1 -fsk "$E/attestation.json" -o a.json ||
+  curl --http1.1 -fsSk "$E/quote.json" -o a.json; } &&
 curl -s -H 'Content-Type: application/json' --data-binary @a.json http://<verifier>/verify |
-  jq -r .details.report_data | cut -c1-64
-sha256sum s.txt   # must match
+  jq -r '.is_valid, .details.report_data[:64]' &&
+sha256sum sha256sum.txt   # is_valid true, and the two hashes match
 ```
+
+`--http1.1` because with ALPN `h2` the request would go to the app backend.
+`sha256sum.txt` is untrusted until the attestation checks out, hence the name
+filter. During a renewal the files are replaced one by one, so `sha256sum -c`
+can fail transiently; retry after a few seconds. dstack-verifier fills
+`details.report_data` only once the quote verifies, so `null` means it did not;
+`is_valid` also covers the OS image and the event log.
 
 Compare the evidence copy against a live `openssl s_client` fingerprint — the
 point of the chain is that the quote commits to what is *being served*, and only
 that comparison tests it.
 
-dstack-verifier also checks the attestation itself (`is_valid`). For a
-`quote.json`, run the quote through `dcap-qvl` against Intel collateral and
-expect `status = UpToDate`. Re-run the whole chain
+To check a `quote.json` without the verifier, run the quote through `dcap-qvl`
+against Intel collateral and expect `status = UpToDate`. Re-run the whole chain
 after a renewal: the evidence must track the new certificates, not go stale at
 first issuance.
 

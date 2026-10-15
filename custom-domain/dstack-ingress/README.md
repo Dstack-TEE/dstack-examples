@@ -349,10 +349,36 @@ The endpoint matches the first bytes of an HTTP/1.x request, so:
 
 ### Verification Chain
 
-1. Verify `attestation.json` or `quote.json`, e.g. by POSTing it to [dstack-verifier](https://github.com/Dstack-TEE/dstack/tree/master/dstack/verifier)'s `/verify`
-2. Extract `report_data` — it contains the SHA-256 of `sha256sum.txt`
-3. Verify checksums in `sha256sum.txt` against `acme-account.json` and `cert-*.pem`
-4. This proves the certificates were obtained within the TEE
+The attestation's 64-byte `report_data` is the SHA-256 of `sha256sum.txt` followed by 32 zero bytes, and
+`sha256sum.txt` lists `acme-account.json` and every `cert-<domain>.pem`. That is all it covers: no nonce, no
+timestamp, no TLS key, nothing about the connection. Anyone can fetch these files and relay them, so an
+attestation that matches the files only proves that *some* CVM published them. All of the following are needed:
+
+1. **The attestation is genuine.** POST `attestation.json` (or `quote.json`) to
+   [dstack-verifier](https://github.com/Dstack-TEE/dstack/tree/HEAD/dstack/verifier)'s `/verify`, or check a
+   `quote.json` quote against Intel collateral with `dcap-qvl`. The verifier's `is_valid` must be `true`; take
+   `report_data` from its `details.report_data`, not from the `report_data` field in `quote.json`, which the agent
+   echoes back.
+2. **It is your app.** The verifier replays the event log into `details.app_info`; check that `app_id` and
+   `compose_hash` there are the app you expect, and `os_image_hash` a known dstack OS image. A genuine attestation
+   from someone else's CVM proves nothing about yours.
+3. **The files are the attested ones.** `sha256(sha256sum.txt)` is the first 32 bytes of `report_data`, and
+   `sha256sum -c sha256sum.txt` passes.
+4. **The connection uses the attested certificate.** The leaf certificate served on your TLS connection is the
+   first certificate in `cert-<domain>.pem` (compare fingerprints, or the SPKI hash to tolerate renewals with
+   `DETERMINISTIC_TLS_KEY=true`). Otherwise a man in the middle can serve its own certificate and relay the real
+   `/evidences`.
+5. **No one else can get a certificate.** The CAA records the container publishes for the domain (at the base
+   name for a wildcard) pin `accounturi` to the account URI in `acme-account.json` — `.uri` for certbot,
+   `.registration.uri` or `.registration.accountURL` for lego — and no other `issue`/`issuewild` record at that
+   name allows another CA or account. The account key never leaves the CVM, so while these records are in place
+   only the CVM can obtain a certificate for the domain, and step 4 holds for every client, not just the one that
+   checked. A CAA lookup only shows the current state: whoever controls the DNS zone can remove the pin, get a
+   certificate and put it back. Monitor Certificate Transparency logs (e.g. crt.sh) for certificates of the
+   domain that are not in the evidence.
+   Without the pin (`SET_CAA=false`, or tls-alpn-01 without the printed CAA record) anyone who can pass ACME
+   validation for the domain — whoever controls its DNS or the route to it — can get a valid certificate, and
+   the evidence cannot rule that out.
 
 ## Building
 
@@ -541,6 +567,15 @@ Verify `hmac_sha256` with `DNS_WEBHOOK_TOKEN`, and — since this request asks y
 to point a hostname at the instance it names — verify `attestation` too (dstack-verifier `/verify` takes it as is): its
 `report_data` is `sha256(payload)`, so it proves which enclave produced
 those records. Check the app ID and measurements in it before changing DNS.
+Take `report_data` from the verified result — `sha256(payload)` in its first
+32 bytes, then 32 zero bytes — not from `attestation.report_data`, which the
+container fills in itself.
+
+Neither the HMAC nor the attestation expires, so a captured envelope stays valid forever; replaying an old one
+would point the hostname back at an instance that no longer serves it. The `timestamp` inside `payload` is covered
+by both, so use it: reject envelopes more than a few minutes old, and remember, per `domain`, the `timestamp` of
+the last one you applied. Reject anything older. A failed POST is retried with the identical envelope, so treat a
+byte-identical `payload` as a retry of the one already applied rather than a new request.
 
 ### Why lego and not certbot
 
