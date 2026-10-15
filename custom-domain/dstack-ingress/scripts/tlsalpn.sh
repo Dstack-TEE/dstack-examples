@@ -183,7 +183,7 @@ collect_evidence() {
         echo "Error: cannot generate evidence without the ACME account file" >&2
         return 1
     fi
-    evidence_reset
+    evidence_reset || return 1
     evidence_collect_account "$account"
     while IFS= read -r domain; do
         [[ -n "$domain" ]] || continue
@@ -256,8 +256,11 @@ process_domain() {
 }
 
 # Set when certificates have been renewed but not yet applied to haproxy.
-# Survives across passes, so a failed apply is retried on the next one.
-APPLY_PENDING=false
+# Survives across passes, so a failed apply is retried on the next one. Starts
+# set so every container start republishes the evidence: what a previous run
+# left in /evidences may list removed domains or an old account, or be half
+# published.
+APPLY_PENDING=true
 
 # One pass over every domain: make sure the records exist, then issue or renew.
 # Idempotent, so the first pass and every later one are the same code. There is
@@ -302,7 +305,9 @@ run_pass() {
         fi
     fi
     FIRST_PASS=false
-    [ "$failed" -eq 0 ]
+    [ "$failed" -eq 0 ] || return 1
+    # Not a quiet pass either: wait the retry backoff, not RENEW_INTERVAL.
+    [ "$APPLY_PENDING" = false ] || return 3
 }
 
 cert_loop() {

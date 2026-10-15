@@ -113,6 +113,9 @@ export TIMEOUT_CONNECT TIMEOUT_CLIENT TIMEOUT_SERVER EVIDENCE_SERVER EVIDENCE_PO
 export ACCEPT_PROXY_PROTOCOL SEND_PROXY_PROTOCOL
 export ACME_EMAIL ACME_STAGING
 
+# A container restart keeps the filesystem, and with it the last run's pidfile.
+rm -f /var/run/haproxy/haproxy.pid
+
 case "$CHALLENGE_TYPE" in
     dns-01)
         exec /scripts/dns01.sh "$@"

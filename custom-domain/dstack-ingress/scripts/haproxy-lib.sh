@@ -217,16 +217,20 @@ haproxy_emit_backends() {
 }
 
 haproxy_reload() {
-    if [ ! -f /var/run/haproxy/haproxy.pid ]; then
+    local pid
+    pid=$(cat /var/run/haproxy/haproxy.pid 2>/dev/null) || pid=
+    # Checked by name: a pidfile left by a previous run can name a PID that now
+    # belongs to the startup script, which haproxy is about to replace.
+    if [ -z "$pid" ] || [ "$(cat "/proc/$pid/comm" 2>/dev/null)" != haproxy ]; then
         # Normal during a startup pass: haproxy has not been exec'd yet and will
         # read the fresh certificates when it starts.
         echo "HAProxy is not running yet; certificates will be picked up at start"
         return 0
     fi
-    if kill -USR2 "$(cat /var/run/haproxy/haproxy.pid)"; then
+    if kill -USR2 "$pid"; then
         echo "HAProxy reloaded with the new certificates"
     else
-        echo "HAProxy reload failed: SIGUSR2 to PID $(cat /var/run/haproxy/haproxy.pid) failed" >&2
+        echo "HAProxy reload failed: SIGUSR2 to PID $pid failed" >&2
         return 1
     fi
 }

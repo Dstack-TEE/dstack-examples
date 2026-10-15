@@ -311,7 +311,7 @@ collect_evidence() {
         echo "Error: cannot generate evidence without the ACME account file" >&2
         return 1
     fi
-    evidence_reset
+    evidence_reset || return 1
     evidence_collect_account "$account"
     while IFS= read -r domain; do
         [[ -n "$domain" ]] || continue
@@ -326,8 +326,11 @@ collect_evidence() {
 FIRST_PASS=true
 
 # Set when certificates have been renewed but not yet applied to haproxy.
-# Survives across passes, so a failed apply is retried on the next one.
-APPLY_PENDING=false
+# Survives across passes, so a failed apply is retried on the next one. Starts
+# set so every container start republishes the evidence: what a previous run
+# left in /evidences may list removed domains or an old account, or be half
+# published.
+APPLY_PENDING=true
 
 # One pass over every domain: make the DNS records right, then issue or renew.
 # Idempotent, so the first pass and every later one are the same code.
@@ -367,7 +370,9 @@ run_pass() {
         fi
     fi
     FIRST_PASS=false
-    [ "$failed" -eq 0 ]
+    [ "$failed" -eq 0 ] || return 1
+    # Not a quiet pass either: wait the retry backoff, not RENEW_INTERVAL.
+    [ "$APPLY_PENDING" = false ] || return 3
 }
 
 # $1: seconds to wait before the first pass. dns-01 issues before it serves, so
@@ -398,8 +403,15 @@ setup_certbot_env
 load_dstack_identity
 
 # dns-01 needs no inbound traffic, so keep the original order: certificate
-# first, serving second. A failure here is fatal, as it always was.
-run_pass
+# first, serving second. A certificate failure here is fatal, as it always
+# was; an apply failure is left to the loop to retry.
+startup_status=0
+run_pass || startup_status=$?
+case $startup_status in
+    0) next_check=${RENEW_INTERVAL:-43200} ;;
+    3) next_check=60 ;;
+    *) exit "$startup_status" ;;
+esac
 build_combined_pems
 
 haproxy_emit_global
@@ -407,6 +419,6 @@ haproxy_emit_tls_frontend ":${PORT}$(haproxy_accept_proxy)"
 haproxy_emit_backends
 
 evidence_start_server
-cert_loop "${RENEW_INTERVAL:-43200}" &
+cert_loop "$next_check" &
 
 exec "$@"
