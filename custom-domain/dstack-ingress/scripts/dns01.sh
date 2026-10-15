@@ -332,16 +332,24 @@ FIRST_PASS=true
 # published.
 APPLY_PENDING=true
 
+# Empty when the domain has no certificate yet.
+cert_checksum() { sha256sum "$(cert_fullchain_path "$1")" 2>/dev/null || true; }
+
 # One pass over every domain: make the DNS records right, then issue or renew.
 # Idempotent, so the first pass and every later one are the same code.
 run_pass() {
-    local domain status failed=0 changed=0
+    local domain status failed=0 changed=0 before
     while IFS= read -r domain; do
         [[ -n "$domain" ]] || continue
+        before=$(cert_checksum "$domain")
         # `if` context, not a bare command: process_domain returns 2 for
         # "nothing to do", and under `set -e` a bare non-zero would kill the
         # whole script on every quiet renewal pass.
         if ( process_domain "$domain" ); then status=0; else status=$?; fi
+        # A step after issuance can still fail (a CAA write, a timeout). The
+        # new certificate is on disk by then and the next pass will find it
+        # current, so apply it now or never.
+        [ "$(cert_checksum "$domain")" = "$before" ] || changed=1
         case $status in
             0) changed=1 ;;
             2) ;;
@@ -403,14 +411,31 @@ setup_certbot_env
 load_dstack_identity
 
 # dns-01 needs no inbound traffic, so keep the original order: certificate
-# first, serving second. A certificate failure here is fatal, as it always
-# was; an apply failure is left to the loop to retry.
+# first, serving second. A certificate failure here is fatal only when there is
+# nothing to serve. Otherwise exiting would just restart into the same failure
+# -- hitting the CA again on every restart -- while every domain goes unserved,
+# including those whose certificates are fine (a newly added domain failing its
+# first issuance would take down the others). Serve what there is and let the
+# loop retry with backoff instead.
+have_any_cert() {
+    local domain
+    while IFS= read -r domain; do
+        [[ -n "$domain" ]] || continue
+        [ -f "$(cert_fullchain_path "$domain")" ] && [ -f "$(cert_privkey_path "$domain")" ] && return 0
+    done <<<"$(get-all-domains.sh)"
+    return 1
+}
+
 startup_status=0
 run_pass || startup_status=$?
 case $startup_status in
     0) next_check=${RENEW_INTERVAL:-43200} ;;
     3) next_check=60 ;;
-    *) exit "$startup_status" ;;
+    *)
+        have_any_cert || exit "$startup_status"
+        echo "Certificate pass failed; serving the certificates there are and retrying" >&2
+        next_check=60
+        ;;
 esac
 build_combined_pems
 

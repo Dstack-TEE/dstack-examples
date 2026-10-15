@@ -269,14 +269,22 @@ APPLY_PENDING=true
 # still spent one of Let's Encrypt's five failed validations per hostname/hour.
 FIRST_PASS=true
 
+# Empty when the domain has no certificate yet.
+cert_checksum() { sha256sum "$(cert_fullchain_path "$1")" 2>/dev/null || true; }
+
 run_pass() {
-    local domain status failed=0 changed=0
+    local domain status failed=0 changed=0 before
     while IFS= read -r domain; do
         [[ -n "$domain" ]] || continue
+        before=$(cert_checksum "$domain")
         # `if` context, not a bare command: process_domain returns 2 for
         # "nothing to do", and under `set -e` a bare non-zero would kill the
         # whole script on every quiet renewal pass.
         if ( process_domain "$domain" ); then status=0; else status=$?; fi
+        # lego can be killed by the timeout after saving a certificate. The
+        # new certificate is on disk by then and the next pass will find it
+        # current, so apply it now or never.
+        [ "$(cert_checksum "$domain")" = "$before" ] || changed=1
         case $status in
             0) changed=1 ;;
             2) ;;
