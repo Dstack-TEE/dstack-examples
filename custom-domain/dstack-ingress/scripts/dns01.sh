@@ -226,7 +226,7 @@ set_caa_record() {
 }
 
 process_domain() {
-    local domain="$1" first status
+    local domain="$1" status
 
     if [ -n "${DELEGATION_ZONE:-}" ]; then
         # Delegation: the operator created three CNAMEs once, before deploying.
@@ -263,22 +263,19 @@ process_domain() {
 
     # The CAA record names our ACME account, so the account has to exist first:
     # try once, write CAA, try again. The first attempt is expected to fail when
-    # a CAA record from an earlier account is still in place.
-    if issue_certificate "$domain"; then first=0; else first=$?; fi
-    if [ "$first" -eq 1 ]; then
-        echo "First certificate attempt failed for $domain, retrying after the CAA record is set"
-    fi
+    # a CAA record from an earlier account is still in place. Retry only then:
+    # after a success (0) or "nothing to renew" (2) a second attempt would
+    # issue another certificate whenever renewal is due on every check.
+    if issue_certificate "$domain"; then status=0; else status=$?; fi
 
     set_caa_record "$domain"
 
-    if issue_certificate "$domain"; then status=0; else status=$?; fi
-
-    # Either attempt producing a certificate counts as a change. Reporting only
-    # the second one hid the common case: on a clean first deployment attempt
-    # one obtains the certificate and attempt two reports "nothing to renew",
-    # so the pass looked quiet and skipped evidence generation entirely.
-    if [ "$first" -eq 0 ] || [ "$status" -eq 0 ]; then
-        return 0
+    if [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
+        echo "First certificate attempt failed for $domain, retrying after the CAA record is set"
+        if issue_certificate "$domain"; then status=0; else status=$?; fi
+        # The failed attempt may still have saved a certificate (e.g. killed by
+        # the timeout after writing it), so "nothing to renew" now is a change.
+        [ "$status" -ne 2 ] || status=0
     fi
     return "$status"
 }
@@ -376,7 +373,7 @@ run_pass() {
 # $1: seconds to wait before the first pass. dns-01 issues before it serves, so
 # the caller has already run a pass by the time we get here; without this the
 # loop would immediately repeat it -- two full passes, and for a single domain
-# four certbot invocations plus a duplicate round of DNS writes, on every start.
+# two certbot invocations plus a duplicate round of DNS writes, on every start.
 cert_loop() {
     local attempt=0 delay="${1:-0}"
     while true; do
