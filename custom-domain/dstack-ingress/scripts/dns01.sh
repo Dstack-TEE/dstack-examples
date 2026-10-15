@@ -93,9 +93,13 @@ EOF
 }
 
 set_alias_record() {
-    local domain="$1"
+    local domain="$1" with_caa=()
+    # A plain name gets its CAA beside this record.
+    if [ "$SET_CAA" = "true" ] && [[ "$domain" != \*.* ]]; then
+        with_caa=(--with-caa)
+    fi
     echo "Setting alias record for $domain"
-    dnsman.py set_alias \
+    dnsman.py set_alias "${with_caa[@]}" \
         --domain "$domain" \
         --content "$GATEWAY_DOMAIN"
 
@@ -130,10 +134,9 @@ set_txt_record() {
 # never needs touching again -- not when the app id changes with the compose,
 # not when the ACME account is recreated, not when the gateway moves.
 #
-# The gateway pointer and the CAA end up on one name, which DNS does not allow
-# for a CNAME. Which form works is a provider property -- Cloudflare tolerates
-# the pair, Linode publishes an address record instead -- and set_alias_record
-# is where that knowledge lives, so ask for an alias and let the provider pick.
+# The gateway pointer and the CAA end up on one name. Which form of pointer
+# lets the CAA take effect is a provider property, so tell the provider and let
+# it pick (an address record unless its servers answer CAA beside a CNAME).
 delegated_name() {
     local domain="${1#\*.}"
     echo "${domain}.${DELEGATION_ZONE}"
@@ -143,7 +146,7 @@ delegation_publish() {
     local domain="$1" target txt_name
     target=$(delegated_name "$domain")
 
-    dnsman.py set_alias --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
+    dnsman.py set_alias --with-caa --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
 
     txt_name="$(txt_record_name "$domain").${DELEGATION_ZONE}"
     dnsman.py set_txt --domain "$txt_name" --content "$(txt_record_value)" || return 1
@@ -152,18 +155,21 @@ delegation_publish() {
 # The accounturi CAA goes on the delegated name, beside the gateway pointer.
 #
 # A wildcard is evaluated at its base (RFC 8659), so it needs the `issuewild`
-# tag and it needs the operator to have aliased the base as well -- dnsguide
+# tag (beside `issue`) and it needs the operator to have aliased the base as well -- dnsguide
 # asks for that fourth CNAME. A base that is a zone apex cannot be aliased at
 # all, so such a domain is not a fit for delegation; the CAA check reports the
 # record missing rather than the container pretending to have set it.
 delegation_publish_caa() {
-    local domain="$1" account_file account_uri
+    local domain="$1" account_file account_uri tag
     account_file=$(get_letsencrypt_account_file) || return 1
     account_uri=$(jq -j '.uri' "$account_file")
-    dnsman.py set_caa \
-        --domain "$(delegated_name "$domain")" \
-        --caa-tag "$(caa_tag_for "$domain")" \
-        --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri"
+    for tag in $(caa_tags_for "$domain"); do
+        dnsman.py set_caa \
+            --domain "$(delegated_name "$domain")" \
+            --caa-tag "$tag" \
+            --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri" ||
+            return 1
+    done
 }
 
 # Challenge delegation: this container holds no token for the served domain's
@@ -192,6 +198,16 @@ delegation_guide() {
         --mode "${DNS_SETUP_MODE:-wait}" \
         --include "$include" \
         "$@"
+}
+
+# Only a zone apex answers SOA for itself. Best effort: a failed lookup says no.
+is_zone_apex() {
+    local resolvers="${DOH_RESOLVERS:-${DOH_RESOLVER:-https://dns.google/resolve}}"
+    curl -fsS --max-time 10 -H 'accept: application/dns-json' \
+        "${resolvers%%,*}?name=$1&type=SOA" 2>/dev/null |
+        jq -e --arg name "${1,,}" \
+            'any(.Answer[]?; .type == 6 and (.name | ascii_downcase | rtrimstr(".")) == $name)' \
+            >/dev/null
 }
 
 set_caa_record() {
@@ -224,20 +240,26 @@ set_caa_record() {
 
     local caa_domain caa_tag
     caa_domain="${domain#\*.}"
-    caa_tag=$(caa_tag_for "$domain")
+
+    if [ "$FIRST_PASS" = "true" ] && [[ "$domain" == \*.* ]] && is_zone_apex "$caa_domain"; then
+        echo "Warning: $caa_domain is a zone apex. The CAA issue record published there for $domain"
+        echo "replaces every existing issue value and governs every name in the zone that has no CAA"
+        echo "record of its own, so other CAs and ACME accounts can no longer issue for them."
+        echo "Give those names their own CAA records, or set SET_CAA=false."
+    fi
 
     ACCOUNT_URI=$(jq -j '.uri' "$account_file")
-    echo "Adding CAA record ($caa_tag) for $caa_domain, accounturi=$ACCOUNT_URI"
-    dnsman.py set_caa \
-        --domain "$caa_domain" \
-        --caa-tag "$caa_tag" \
-        --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"
-
-    if [ $? -ne 0 ]; then
-        echo "Warning: Failed to set CAA record for $domain"
-        echo "This is not critical - certificates can still be issued without CAA records"
-        echo "Consider disabling CAA records by setting SET_CAA=false if this continues to fail"
-    fi
+    for caa_tag in $(caa_tags_for "$domain"); do
+        echo "Adding CAA record ($caa_tag) for $caa_domain, accounturi=$ACCOUNT_URI"
+        if ! dnsman.py set_caa \
+            --domain "$caa_domain" \
+            --caa-tag "$caa_tag" \
+            --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"; then
+            echo "Warning: Failed to set CAA record for $domain"
+            echo "This is not critical - certificates can still be issued without CAA records"
+            echo "Consider disabling CAA records by setting SET_CAA=false if this continues to fail"
+        fi
+    done
 }
 
 process_domain() {

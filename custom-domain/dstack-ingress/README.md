@@ -29,7 +29,9 @@ dstack-ingress is a HAProxy-based L4 (TCP) proxy that provides:
 You can use a wildcard domain (e.g. `*.myapp.com`) to route all subdomains to a single dstack application:
 
 - The TXT record is automatically set as `_dstack-app-address-wildcard.myapp.com` (instead of `_dstack-app-address.*.myapp.com`)
-- CAA records use the `issuewild` tag on the base domain
+- CAA records use both the `issuewild` and `issue` tags on the base domain: `issuewild` alone would leave other CAs free to issue for non-wildcard subdomains
+- If the base domain is a zone apex (`*.myapp.com` served off the `myapp.com` zone), that `issue` record replaces any existing `issue` values there and governs every name in the zone without its own CAA record, so other CAs or ACME accounts can no longer issue for them. The container warns about this; give those names their own CAA records, or set `SET_CAA=false`. On Route53 this also removes the Amazon `issue` values that older versions wrongly added at the apex
+- Two deployments with different ACME accounts, one serving `myapp.com` and one `*.myapp.com`, both write the `issue` record at `myapp.com` and overwrite each other's on every pass. Serve both names from one deployment, or set `SET_CAA=false` on one of them
 - Requires dstack-gateway with wildcard TXT resolution support ([dstack#545](https://github.com/Dstack-TEE/dstack/pull/545))
 
 ```yaml
@@ -173,7 +175,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `PORT` | `443` | HAProxy listen port |
 | `DOMAINS` | | Multiple domains, one per line or one comma-separated line. Without `ROUTING_MAP`, all of them go to `TARGET_ENDPOINT` |
 | `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line. A wildcard entry (`*.example.com=host:port`) matches one label, and exact entries take precedence over it. Unmatched names go to the first entry |
-| `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS) |
+| `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS). Replaces existing values with the same tag; for a wildcard whose base is a zone apex this restricts the whole zone (see [Wildcard Domain Support](#wildcard-domain-support)). Except on Cloudflare, a non-wildcard domain is then published as an A record to the gateway's current address instead of a CNAME, because a CNAME would hide the CAA beside it; the address is refreshed every `RENEW_INTERVAL`. Turning `SET_CAA` off later leaves the CAA record in place, so the A record stays until you delete the CAA |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `ACME_EMAIL` | | ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See [below](#the-acme-contact-address-is-optional-and-public) — it is optional, and published |
 | `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode. `CERTBOT_STAGING` is the historical name and still works |
@@ -238,22 +240,23 @@ _acme-challenge.svc.example.com      CNAME  _acme-challenge.svc.example.com.dele
 dstack-ingress publishes what they point at, in the delegation zone:
 
 ```
-svc.example.com.deleg.example.net                      CNAME  <GATEWAY_DOMAIN>
+svc.example.com.deleg.example.net                      A      <address of GATEWAY_DOMAIN>
 svc.example.com.deleg.example.net                      CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=…"
 _dstack-app-address.svc.example.com.deleg.example.net  TXT    "<app-id>:<port>"
 _acme-challenge.svc.example.com.deleg.example.net      TXT    <challenge>   (transient)
 ```
 
-The gateway pointer and the CAA share a name, which DNS does not allow for a
-CNAME. Which form works is a property of the provider — Cloudflare tolerates the
-pair, Linode publishes an address record instead — and `set_alias_record` in the
-provider layer is where that choice is made. Delegation asks for an alias and
-takes what it gets. A provider that needs a form other than CNAME overrides that
-method, as Linode does.
+The gateway pointer and the CAA share a name. Cloudflare answers a CAA query
+with the CAA beside a CNAME, so the pointer stays a CNAME there. Elsewhere it is
+an A record: by the DNS rules resolvers follow a CNAME without looking beside it,
+and Route53 and Linode refuse the pair. The address
+is the one `GATEWAY_DOMAIN` resolves to when the container writes it, and it is
+refreshed every `RENEW_INTERVAL`, so a gateway move reaches DNS only then, and
+only one of the gateway's addresses is published.
 
 **A wildcard needs a fourth CNAME.** RFC 8659 evaluates `*.app.example.com` at
-`app.example.com`, so the base gets its own alias and the container publishes an
-`issuewild` CAA behind it:
+`app.example.com`, so the base gets its own alias and the container publishes
+`issuewild` and `issue` CAA records behind it:
 
 ```
 *.app.example.com                            CNAME  app.example.com.deleg.example.net
@@ -576,6 +579,10 @@ would point the hostname back at an instance that no longer serves it. The `time
 by both, so use it: reject envelopes more than a few minutes old, and remember, per `domain`, the `timestamp` of
 the last one you applied. Reject anything older. A failed POST is retried with the identical envelope, so treat a
 byte-identical `payload` as a retry of the one already applied rather than a new request.
+
+`records` can hold several records with the same type and name: a wildcard asks
+for both an `issue` and an `issuewild` CAA at its base. Create each one; do not
+replace by type and name alone.
 
 ### Why lego and not certbot
 

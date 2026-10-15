@@ -27,6 +27,16 @@ def main():
         "--caa-tag", choices=["issue", "issuewild", "iodef"], help="CAA record tag"
     )
     parser.add_argument("--caa-value", help="CAA record value")
+    parser.add_argument(
+        "--tolerate-stale",
+        action="store_true",
+        help="set_txt: succeed even if other values could not be deleted",
+    )
+    parser.add_argument(
+        "--with-caa",
+        action="store_true",
+        help="set_alias: the name also carries a CAA record",
+    )
 
     args = parser.parse_args()
 
@@ -54,7 +64,9 @@ def main():
                 print("Error: --content is required for alias records", file=sys.stderr)
                 sys.exit(1)
 
-            success = provider.set_alias_record(args.domain, args.content)
+            success = provider.set_alias_record(
+                args.domain, args.content, with_caa=args.with_caa
+            )
             if not success:
                 print(f"Failed to set alias record for {args.domain}", file=sys.stderr)
                 sys.exit(1)
@@ -65,7 +77,9 @@ def main():
                 print("Error: --content is required for TXT records", file=sys.stderr)
                 sys.exit(1)
 
-            success = provider.set_txt_record(args.domain, args.content)
+            success = provider.set_txt_record(
+                args.domain, args.content, tolerate_stale=args.tolerate_stale
+            )
             if not success:
                 print(f"Failed to set TXT record for {args.domain}", file=sys.stderr)
                 sys.exit(1)

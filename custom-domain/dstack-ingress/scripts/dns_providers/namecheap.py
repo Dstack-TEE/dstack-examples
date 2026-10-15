@@ -363,13 +363,3 @@ class NamecheapDNSProvider(DNSProvider):
         result = self._make_request("namecheap.domains.dns.setHosts", **params)
         
         return result.get("success", False)
-
-    def set_alias_record(
-        self,
-        name: str,
-        content: str,
-        ttl: int = 60,
-        proxied: bool = False,
-    ) -> bool:
-        """Set an alias record using CNAME."""
-        return self.set_cname_record(name, content, ttl, proxied)

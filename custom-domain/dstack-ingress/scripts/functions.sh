@@ -224,6 +224,12 @@ caa_tag_for() {
     if [[ "$1" == \*.* ]]; then echo "issuewild"; else echo "issue"; fi
 }
 
+# Tags to publish. issuewild governs only the wildcard itself (RFC 8659), so a
+# wildcard also needs `issue`, or any CA could issue for foo.<base>.
+caa_tags_for() {
+    if [[ "$1" == \*.* ]]; then echo "issue issuewild"; else echo "issue"; fi
+}
+
 # Query the guest agent once for this app's identity.
 load_dstack_identity() {
     local info

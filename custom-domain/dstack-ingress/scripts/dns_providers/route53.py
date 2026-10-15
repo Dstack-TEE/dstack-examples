@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 
 import os
+import re
+import socket
 import sys
-from typing import List, Optional
+from typing import Dict, List, Optional
 from .base import DNSProvider, DNSRecord, CAARecord, RecordType
 
 
@@ -120,6 +122,7 @@ class Route53DNSProvider(DNSProvider):
 
     def _ensure_hosted_zone_id(self, domain: str) -> Optional[str]:
         """Ensure we have a hosted zone ID for the domain, fetching if necessary."""
+        domain = domain.lower().rstrip(".")
         # Check if we can reuse cached zone
         if self.hosted_zone_id and self.hosted_zone_name:
             if domain == self.hosted_zone_name or domain.endswith(
@@ -135,10 +138,13 @@ class Route53DNSProvider(DNSProvider):
         return self.hosted_zone_id
 
     def _normalize_record_name(self, name: str) -> str:
-        """Normalize record name to FQDN with trailing dot (Route53 format)."""
-        if not name.endswith("."):
-            return f"{name}."
-        return name
+        """Normalize record name to lowercase FQDN with trailing dot (Route53 format).
+
+        Route53 lists characters outside [a-z0-9-_] as octal escapes, `*` as
+        `\\052`, so decode them to compare with the names we are given.
+        """
+        name = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), name)
+        return f"{name.lower().rstrip('.')}."
 
     def get_dns_records(
         self, name: str, record_type: Optional[RecordType] = None
@@ -163,7 +169,7 @@ class Route53DNSProvider(DNSProvider):
                     record_type_str = record_set["Type"]
 
                     # Filter by name
-                    if record_name != normalized_name:
+                    if self._normalize_record_name(record_name) != normalized_name:
                         continue
 
                     # Filter by type if specified
@@ -298,19 +304,9 @@ class Route53DNSProvider(DNSProvider):
 
         try:
             # First, get the current record to know its full details
-            paginator = self.client.get_paginator("list_resource_record_sets")
-            record_set_to_delete = None
-
-            for page in paginator.paginate(HostedZoneId=hosted_zone_id):
-                for record_set in page["ResourceRecordSets"]:
-                    if (
-                        record_set["Name"] == record_name
-                        and record_set["Type"] == record_type
-                    ):
-                        record_set_to_delete = record_set
-                        break
-                if record_set_to_delete:
-                    break
+            record_set_to_delete = self._find_record_set(
+                hosted_zone_id, record_name, record_type
+            )
 
             if not record_set_to_delete:
                 print(f"Record not found: {record_id}", file=sys.stderr)
@@ -342,15 +338,97 @@ class Route53DNSProvider(DNSProvider):
             print(f"Error deleting DNS record: {e}", file=sys.stderr)
             return False
 
-    def create_caa_record(self, caa_record: CAARecord) -> bool:
-        """
-        Create or merge a CAA record set on the apex of the Route53 hosted zone.
+    def set_address_record(self, name: str, content: str, ttl: int = 60) -> bool:
+        """Replace a CNAME or AAAA at `name` with an A record in one change.
 
-        - Ignores the specific subdomain in caa_record.name for placement
-        - Uses it only to locate the correct hosted zone
-        - Merges hard-coded issuers with any existing CAA values on the apex
+        Deleting the CNAME first, as the generic helper does, would leave the
+        name without an answer in between, and resolvers cache that.
         """
-        # Ensure we know which hosted zone this belongs to
+        ip_address = socket.gethostbyname(content)
+        hosted_zone_id = self._ensure_hosted_zone_id(name)
+        if not hosted_zone_id:
+            print(f"Error: Could not find hosted zone for domain {name}", file=sys.stderr)
+            return False
+
+        try:
+            existing = self._record_sets(hosted_zone_id, name)
+        except Exception as e:
+            print(f"Error getting DNS records: {e}", file=sys.stderr)
+            return False
+
+        wanted = {
+            "Name": self._normalize_record_name(name),
+            "Type": "A",
+            "TTL": ttl,
+            "ResourceRecords": [{"Value": ip_address}],
+        }
+        changes = [
+            {"Action": "DELETE", "ResourceRecordSet": existing[t]}
+            for t in ("CNAME", "AAAA")
+            if t in existing
+        ]
+        current = existing.get("A")
+        if not changes and current and current.get("ResourceRecords") == wanted["ResourceRecords"]:
+            print("A record with the same IP already exists")
+            return True
+        changes.append({"Action": "UPSERT", "ResourceRecordSet": wanted})
+
+        try:
+            print(f"Creating A record for {name} pointing to {ip_address} ({content})")
+            response = self.client.change_resource_record_sets(
+                HostedZoneId=hosted_zone_id, ChangeBatch={"Changes": changes}
+            )
+        except Exception as e:
+            print(f"Error setting A record: {e}", file=sys.stderr)
+            return False
+        status = response.get("ChangeInfo", {}).get("Status")
+        if status in ["PENDING", "INSYNC"]:
+            return True
+        print(f"Unexpected change status: {status}", file=sys.stderr)
+        return False
+
+    def _record_sets(self, hosted_zone_id: str, name: str) -> Dict[str, dict]:
+        """Return the record sets at `name`, keyed by type."""
+        name = self._normalize_record_name(name)
+        found = {}
+        paginator = self.client.get_paginator("list_resource_record_sets")
+        for page in paginator.paginate(HostedZoneId=hosted_zone_id):
+            for record_set in page["ResourceRecordSets"]:
+                if self._normalize_record_name(record_set["Name"]) == name:
+                    found.setdefault(record_set["Type"], record_set)
+        return found
+
+    def _find_record_set(
+        self, hosted_zone_id: str, name: str, record_type: str
+    ) -> Optional[dict]:
+        """Return the record set for (name, type), or None if there is none."""
+        return self._record_sets(hosted_zone_id, name).get(record_type)
+
+    def set_caa_record(
+        self,
+        name: str,
+        tag: str,
+        value: str,
+        flags: int = 0,
+        ttl: int = 60,
+    ) -> bool:
+        """Set a CAA record in one change.
+
+        create_caa_record already replaces the values with the same tag
+        atomically; deleting them first, as the generic helper does, would
+        leave the name briefly without that tag.
+        """
+        return self.create_caa_record(
+            CAARecord(name=name, flags=flags, tag=tag, value=value, ttl=ttl)
+        )
+
+    def create_caa_record(self, caa_record: CAARecord) -> bool:
+        """Merge a CAA value into the record set at caa_record.name.
+
+        Route53 keys a record set by name and type, so iodef and other tags
+        share it with ours: replace only the values carrying the same tag and
+        keep the rest.
+        """
         hosted_zone_id = self._ensure_hosted_zone_id(caa_record.name)
         if not hosted_zone_id:
             print(
@@ -359,73 +437,29 @@ class Route53DNSProvider(DNSProvider):
             )
             return False
 
-        if not self.hosted_zone_name:
-            print("Error: Hosted zone name is not set", file=sys.stderr)
-            return False
-
-        apex_name = self.hosted_zone_name  # apex of the zone
-        normalized_name = self._normalize_record_name(apex_name)
-
-        # Hard-coded issuers for this bridge (Let's Encrypt + AWS ACM)
-        required_issuers = [
-            "letsencrypt.org",
-            "amazon.com",
-            "amazontrust.com",
-            "awstrust.com",
-            "amazonaws.com",
-        ]
-
-        # Build the desired CAA "issue" values from the issuers
-        required_values = [
-            f'{caa_record.flags} {caa_record.tag} "{issuer}"'
-            for issuer in required_issuers
-        ]
-
-        # Look up any existing CAA RRSet on the apex
-        paginator = self.client.get_paginator("list_resource_record_sets")
-        existing_rrset = None
+        normalized_name = self._normalize_record_name(caa_record.name)
+        tag = caa_record.tag.lower()
+        new_value = f'{caa_record.flags} {tag} "{caa_record.value}"'
 
         try:
-            for page in paginator.paginate(HostedZoneId=hosted_zone_id):
-                for record_set in page["ResourceRecordSets"]:
-                    if (
-                        record_set["Name"] == normalized_name
-                        and record_set["Type"] == "CAA"
-                    ):
-                        existing_rrset = record_set
-                        break
-                if existing_rrset:
-                    break
+            existing = self._find_record_set(hosted_zone_id, normalized_name, "CAA")
         except Exception as e:
-            print(f"Error listing existing CAA records: {e}", file=sys.stderr)
-            return False
+            raise RuntimeError(
+                f"Failed to list DNS records for {caa_record.name}: {e}"
+            ) from e
 
-        existing_values: List[str] = []
         ttl = caa_record.ttl
+        values: List[str] = []
+        if existing:
+            ttl = existing.get("TTL", ttl)
+            values = [rr["Value"] for rr in existing.get("ResourceRecords", [])]
 
-        if existing_rrset:
-            existing_values = [
-                rr["Value"] for rr in existing_rrset.get("ResourceRecords", [])
-            ]
-            ttl = existing_rrset.get("TTL", ttl)
-            print(
-                f"Found existing CAA RRSet on apex {apex_name}, merging with "
-                f"required issuers"
-            )
-        else:
-            print(f"No existing CAA RRSet on apex {apex_name}, creating new one")
+        merged = [v for v in values if v.lower().split(" ", 2)[1:2] != [tag]]
+        merged.append(new_value)
+        if sorted(merged) == sorted(values):
+            print("CAA record with the same content already exists")
+            return True
 
-        # Merge: keep all existing values, add any missing required issuer values
-        merged_values = list(existing_values)
-        for value in required_values:
-            if value not in merged_values:
-                merged_values.append(value)
-
-        if not merged_values:
-            print("No CAA values to set on apex after merge; aborting", file=sys.stderr)
-            return False
-
-        # Prepare change batch with the merged RRSet
         change_batch = {
             "Changes": [
                 {
@@ -434,17 +468,14 @@ class Route53DNSProvider(DNSProvider):
                         "Name": normalized_name,
                         "Type": "CAA",
                         "TTL": ttl,
-                        "ResourceRecords": [{"Value": v} for v in merged_values],
+                        "ResourceRecords": [{"Value": v} for v in merged],
                     },
                 }
             ]
         }
 
         try:
-            print(
-                f"Setting merged CAA record set for apex {apex_name}: "
-                f"{', '.join(merged_values)}"
-            )
+            print(f"Setting CAA record set for {caa_record.name}: {', '.join(merged)}")
             response = self.client.change_resource_record_sets(
                 HostedZoneId=hosted_zone_id, ChangeBatch=change_batch
             )
@@ -454,12 +485,12 @@ class Route53DNSProvider(DNSProvider):
                 return True
             else:
                 print(
-                    f"Unexpected change status for CAA apex update: "
+                    f"Unexpected change status for CAA update: "
                     f"{change_info.get('Status')}",
                     file=sys.stderr,
                 )
                 return False
 
         except Exception as e:
-            print(f"Error creating/merging apex CAA record: {e}", file=sys.stderr)
+            print(f"Error setting CAA record: {e}", file=sys.stderr)
             return False

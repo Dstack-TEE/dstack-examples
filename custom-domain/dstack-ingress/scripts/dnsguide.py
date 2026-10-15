@@ -52,6 +52,9 @@ RR_AAAA = 28
 RR_CAA = 257
 
 LE_ISSUER = "letsencrypt.org"
+# Tags Let's Encrypt recognises; any other tag flagged critical forbids
+# issuance (RFC 8659 section 4.1).
+KNOWN_CAA_TAGS = {"issue", "issuewild", "iodef", "issuemail", "issuevmc"}
 
 
 @dataclass
@@ -295,16 +298,24 @@ def check_caa(
             record = _parse_caa(rdata)
             if record is not None and record not in parsed:
                 parsed.append(record)
-        relevant = [p for p in parsed if p[1] == want_tag]
         if not parsed:
             continue  # keep climbing; this level has no CAA record set
 
-        # This is the closest CAA record set; it is the one that governs.
-        if not relevant:
+        # This is the closest CAA record set; it is the one that governs. Like
+        # Let's Encrypt, treat flag bit 1 as an alias of the critical bit 128.
+        critical = [t for f, t, _ in parsed if f & (128 | 1) and t not in KNOWN_CAA_TAGS]
+        if critical:
             return False, (
-                f"{candidate} has a CAA record set but no {want_tag} tag, "
+                f"CAA at {candidate} has an unknown critical {critical[0]} tag, "
                 f"which forbids issuance"
             )
+        # A wildcard falls back to `issue` when there is no `issuewild`; a set
+        # with neither relevant tag (only iodef, say) restricts nothing.
+        relevant = [p for p in parsed if p[1] == want_tag]
+        if not relevant and want_tag == "issuewild":
+            relevant = [p for p in parsed if p[1] == "issue"]
+        if not relevant:
+            return True, f"ok (CAA at {candidate} has no tag restricting {want_tag})"
         reasons = []
         for _flags, tag, value in relevant:
             ok, reason = _caa_permits(value, tag, want_method, account_uri)
@@ -452,14 +463,18 @@ def build_records(args: argparse.Namespace) -> List[Record]:
         note = "optional; restricts issuance for this name to Let's Encrypt"
         if args.account_uri:
             note = "optional, but pins issuance to this enclave's ACME account"
-        records.append(
-            Record(
-                type="CAA",
-                name=args.caa_name,
-                value=f'0 {args.caa_tag} "{args.caa_value}"',
-                note=note,
+        # issuewild leaves every non-wildcard name under the base to `issue`,
+        # so a wildcard needs both to keep other CAs out.
+        tags = ["issue", "issuewild"] if args.caa_tag == "issuewild" else [args.caa_tag]
+        for tag in tags:
+            records.append(
+                Record(
+                    type="CAA",
+                    name=args.caa_name,
+                    value=f'0 {tag} "{args.caa_value}"',
+                    note=note,
+                )
             )
-        )
     return records
 
 
