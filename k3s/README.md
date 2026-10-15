@@ -176,7 +176,7 @@ k3s-node   Ready    control-plane,master   2m    v1.31.6+k3s1
 
 ### 4. Wait for the Wildcard Certificate
 
-The dstack-ingress container issues a Let's Encrypt wildcard certificate via DNS-01 challenge. This takes 5-8 minutes after CVM boot (certbot installation + 120s DNS propagation + issuance). If your domain has existing CAA records, the first attempt may fail and auto-retry after setting the correct `issuewild` CAA record.
+The dstack-ingress container issues a Let's Encrypt wildcard certificate via DNS-01 challenge. This takes 5-8 minutes after CVM boot (image pull + 120s DNS propagation + issuance). If your domain has existing CAA records, the first attempt may fail and auto-retry after setting the correct `issuewild` CAA record.
 
 Check with:
 
@@ -340,10 +340,10 @@ This tutorial targets Phala Cloud, but the same compose file works on a self-hos
 | CVM provision | ~1s |
 | SSH available | ~2-3 min |
 | k3s node Ready | ~1 min after SSH |
-| Wildcard cert issued | ~5-8 min (certbot install + DNS propagation) |
+| Wildcard cert issued | ~5-8 min (DNS propagation + issuance) |
 | **Total to first HTTPS 200** | **~8-10 min** |
 
-Measured on `tdx.medium` with 50GB disk. The wildcard cert is the bottleneck — certbot installs its dependencies on first boot, then waits 120s for DNS propagation. If your domain has existing CAA records, add another ~3 min for the auto-retry.
+Measured on `tdx.medium` with 50GB disk. The wildcard cert is the bottleneck — certbot waits 120s for DNS propagation before the CA validates. If your domain has existing CAA records, add another ~3 min for the auto-retry.
 
 ## Troubleshooting
 

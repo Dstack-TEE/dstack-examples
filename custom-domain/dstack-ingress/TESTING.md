@@ -352,7 +352,9 @@ each mode. When refactoring that assembly, generate the config both before and
 after your change for all four combinations — `dns-01` and `tls-alpn-01`, each
 with a single domain and with `ROUTING_MAP` — and diff them. Byte-identical
 output is a much stronger statement than "the tests still pass", and it is easy
-to obtain because the emitters only write to stdout.
+to obtain because the emitters write nothing but `/etc/haproxy/haproxy.cfg`
+(the global section truncates it, everything else appends): run them in a
+throwaway container and diff that file.
 
 ## Cleanup
 

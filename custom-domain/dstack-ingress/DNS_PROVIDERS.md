@@ -15,15 +15,17 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 
 - `DOMAIN` - Your custom domain (e.g., `app.example.com`)
 - `GATEWAY_DOMAIN` - dstack gateway domain (e.g., `gateway.dstack-prod5.phala.network`)
-- `CERTBOT_EMAIL` - Email for Let's Encrypt registration
 - `TARGET_ENDPOINT` - Backend application endpoint to proxy to
-- `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`)
 
 ### Optional Variables
 
+- `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`, `route53`). Detected from the provider's credential variable when unset; set it explicitly for `route53`
+- `ACME_EMAIL` - Contact address for the ACME account (`CERTBOT_EMAIL` still works). Published in the evidence, so leave it unset unless you want one
 - `SET_CAA` - Enable CAA record setup (default: false)
 - `PORT` - HTTPS port (default: 443)
-- `TXT_PREFIX` - Prefix for TXT records (default: "_tapp-address")
+- `TXT_PREFIX` - Prefix for TXT records (default: "_dstack-app-address")
+
+See the [README](README.md#environment-variables) for the full list.
 
 ## Provider-Specific Configuration
 
@@ -68,6 +70,7 @@ NAMECHEAP_CLIENT_IP=your-client-ip
 - `NAMECHEAP_USERNAME` - Your Namecheap account username
 - `NAMECHEAP_API_KEY` - Your Namecheap API key (from https://ap.www.namecheap.com/settings/tools/apiaccess/)
 - `NAMECHEAP_CLIENT_IP` - The IP address of the node (required for Namecheap API authentication)
+- `NAMECHEAP_SANDBOX` - Set to `true` to use the Namecheap sandbox API (default: false)
 
 **Important Notes for Namecheap:**
 - Namecheap API requires node IP address for authentication, and you need add it to whitelist IP first.
@@ -81,7 +84,7 @@ DNS_PROVIDER=route53
 AWS_ACCESS_KEY_ID=service-account-key-that-can-assume-role
 AWS_SECRET_ACCESS_KEY=service-account-secret-that-can-assume-role
 AWS_ROLE_ARN=role-that-can-mod-route53
-AWS_REGION=your-closest-region
+AWS_REGION=your-closest-region   # default: us-east-1
 ```
 
 **Required Permissions:**
@@ -207,7 +210,7 @@ If you see "Could not detect DNS provider type", ensure you have either:
 
 ### Certificate Generation Issues
 
-Different providers may have different propagation times. The default is 120 seconds, but you may need to adjust based on your provider's behavior.
+Different providers may have different propagation times. certbot waits 120 seconds after writing the challenge record (300 for Linode); Route53 instead waits until the change has synced. With `DELEGATION_ZONE`, the wait is `DELEGATION_PROPAGATION_SECONDS`.
 
 ### Permission Errors
 
