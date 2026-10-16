@@ -303,7 +303,7 @@ process_domain() {
     fi
 
     # The CAA record names our ACME account, so the account has to exist first:
-    # try once, write CAA, and try again if the first attempt failed while
+    # try once, write CAA, and try again if the first attempt failed after
     # creating the account. That is the attempt a CAA record naming an earlier
     # account refuses, and set_caa_record has just replaced it. Any other
     # failure would only fail again, spending another of Let's Encrypt's five
@@ -316,8 +316,11 @@ process_domain() {
     set_caa_record "$domain"
 
     # Never after a success (0) or "nothing to renew" (2): a second attempt
-    # would issue another certificate whenever renewal is due.
-    if [ "$retry" = true ] && [ "$status" -ne 0 ] && [ "$status" -ne 2 ]; then
+    # would issue another certificate whenever renewal is due. Nor when the
+    # attempt did not get as far as creating the account (the CA unreachable,
+    # say): then there is no CAA naming it either.
+    if [ "$retry" = true ] && [ "$status" -ne 0 ] && [ "$status" -ne 2 ] &&
+        acme_account_file >/dev/null 2>&1; then
         echo "First certificate attempt failed for $domain, retrying now that the CAA record names the new account"
         if issue_certificate "$domain"; then status=0; else status=$?; fi
     fi
