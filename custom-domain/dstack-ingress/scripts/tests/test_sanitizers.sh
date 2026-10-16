@@ -104,6 +104,11 @@ assert_fails "sanitize_email rejects spaces" sanitize_email 'ops @example.com'
 assert_fails "sanitize_email rejects tabs" sanitize_email $'ops@example.com\t'
 assert_fails "sanitize_email rejects control characters" sanitize_email $'ops@exa\x01mple.com'
 assert_fails "sanitize_domain rejects invalid domain" sanitize_domain bad_domain
+assert_equal "$(sanitize_gateway_domain gw.example.com)" "gw.example.com" "sanitize_gateway_domain accepts a hostname"
+assert_equal "$(sanitize_gateway_domain _.gw.example.com)" "_.gw.example.com" "sanitize_gateway_domain accepts the older _. form"
+assert_fails "sanitize_gateway_domain rejects an empty value" sanitize_gateway_domain ""
+assert_fails "sanitize_gateway_domain rejects a newline" sanitize_gateway_domain $'gw.example.com\nx'
+assert_fails "sanitize_gateway_domain rejects a space" sanitize_gateway_domain "gw example.com"
 assert_fails "sanitize_domain rejects path traversal" sanitize_domain ../etc/passwd
 assert_fails "sanitize_target_endpoint rejects malformed URL" sanitize_target_endpoint "http:///broken"
 warning_output="$(sanitize_client_max_body_size "50mb" 2>&1 || true)"

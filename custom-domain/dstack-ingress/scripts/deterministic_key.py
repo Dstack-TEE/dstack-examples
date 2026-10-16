@@ -20,7 +20,7 @@ P256_ORDER = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551
 
 
 def enabled() -> bool:
-    return os.environ.get("DETERMINISTIC_TLS_KEY", "false").lower() == "true"
+    return os.environ.get("DETERMINISTIC_TLS_KEY") == "true"
 
 
 def derive_private_key(key: bytes, domain: str) -> ec.EllipticCurvePrivateKey:

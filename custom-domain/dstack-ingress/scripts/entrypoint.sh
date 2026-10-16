@@ -39,6 +39,7 @@ RENEW_DAYS_BEFORE=${RENEW_DAYS_BEFORE:-}
 DNS_SETUP_TIMEOUT=${DNS_SETUP_TIMEOUT:-1800}
 DNS_SETUP_INTERVAL=${DNS_SETUP_INTERVAL:-15}
 DNS_SETUP_MODE=${DNS_SETUP_MODE:-wait}
+DETERMINISTIC_TLS_KEY=${DETERMINISTIC_TLS_KEY:-false}
 
 # ACME account settings, normalised once for both modes. What you are
 # configuring is an ACME account, not a particular client -- which client
@@ -89,6 +90,15 @@ if [ -z "${ROUTING_MAP:-}" ] && [ -z "$TARGET_ENDPOINT" ]; then
     exit 1
 fi
 if [ -n "$ACME_EMAIL" ] && ! ACME_EMAIL=$(sanitize_email "$ACME_EMAIL"); then
+    exit 1
+fi
+if ! ACME_STAGING=$(sanitize_boolean "$ACME_STAGING" "ACME_STAGING/CERTBOT_STAGING"); then
+    exit 1
+fi
+if ! DETERMINISTIC_TLS_KEY=$(sanitize_boolean "$DETERMINISTIC_TLS_KEY" "DETERMINISTIC_TLS_KEY"); then
+    exit 1
+fi
+if ! GATEWAY_DOMAIN=$(sanitize_gateway_domain "${GATEWAY_DOMAIN:-}"); then
     exit 1
 fi
 if ! TXT_PREFIX=$(sanitize_dns_label "$TXT_PREFIX"); then
@@ -160,10 +170,10 @@ fi
 
 # Everything from here on belongs to one mode. Exported so the mode script and
 # the helpers it invokes see the sanitized values.
-export PORT DOMAIN DOMAINS TARGET_ENDPOINT ROUTING_MAP TXT_PREFIX MAXCONN
+export PORT DOMAIN DOMAINS GATEWAY_DOMAIN TARGET_ENDPOINT ROUTING_MAP TXT_PREFIX MAXCONN
 export TIMEOUT_CONNECT TIMEOUT_CLIENT TIMEOUT_SERVER EVIDENCE_SERVER EVIDENCE_PORT ALPN
 export ACCEPT_PROXY_PROTOCOL SEND_PROXY_PROTOCOL
-export ACME_EMAIL ACME_STAGING RENEW_INTERVAL RENEW_DAYS_BEFORE
+export ACME_EMAIL ACME_STAGING DETERMINISTIC_TLS_KEY RENEW_INTERVAL RENEW_DAYS_BEFORE
 export DNS_SETUP_TIMEOUT DNS_SETUP_INTERVAL DNS_SETUP_MODE DNS_WEBHOOK_TIMEOUT
 
 # A container restart keeps the filesystem, and with it the last run's pidfile.
