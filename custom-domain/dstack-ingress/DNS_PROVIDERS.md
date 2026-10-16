@@ -21,7 +21,7 @@ This guide explains how to configure dstack-ingress to work with different DNS p
 
 - `DNS_PROVIDER` - DNS provider to use (`cloudflare`, `linode`, `namecheap`, `route53`). Detected from the provider's credential variable when unset; set it explicitly for `route53`
 - `ACME_EMAIL` - Contact address for the ACME account (`CERTBOT_EMAIL` still works). Published in the evidence, so leave it unset unless you want one
-- `SET_CAA` - Enable CAA record setup: `true` or `false` (default). Except on Cloudflare, this makes a non-wildcard domain's pointer an A record; see the README
+- `SET_CAA` - Enable CAA record setup: `true` or `false` (default `false`; `true` with `DELEGATION_ZONE`). Except on Cloudflare, this makes a non-wildcard domain's pointer an A record; see the README
 - `PORT` - HTTPS port (default: 443)
 - `TXT_PREFIX` - Prefix for TXT records (default: "_dstack-app-address")
 
@@ -112,7 +112,7 @@ PolicyDocument:
 **Important Notes for Route53:**
 - The certbot plugin uses the format `certbot-dns-route53` package
 - CAA values are merged into the existing record set at the name: only values with the same tag are replaced, so `iodef` and other tags are kept
-- Where a CAA record shares the name (`DELEGATION_ZONE`, `SET_CAA=true` on a non-wildcard domain, or any CAA already there), the gateway pointer is an A record to the resolved gateway IP instead of a CNAME, replacing any CNAME or AAAA in the same change. It is refreshed every `RENEW_INTERVAL`
+- Where a CAA record shares the name (`SET_CAA=true` under `DELEGATION_ZONE`, where it is the default, or on a non-wildcard domain, or any CAA already there), the gateway pointer is an A record to the resolved gateway IP instead of a CNAME, replacing any CNAME or AAAA in the same change. It is refreshed every `RENEW_INTERVAL`
 - Wildcard record names are listed by Route53 as `\052.<domain>`; they are matched as `*.<domain>`
 - It is essential that the AWS service account used can only assume the limited role. See cloudformation example.
 

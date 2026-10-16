@@ -356,6 +356,7 @@ def verify_once(
     caa_method: str,
     account_uri: str,
     resolvers: str,
+    with_caa: bool,
 ) -> List[Tuple[str, bool, str]]:
     results = []
     for rec in records:
@@ -368,9 +369,42 @@ def verify_once(
             else:
                 ok, why = check_alias(rec, resolvers)
             results.append((f"CNAME {rec.name}", ok, why))
-    ok, why = check_caa(domain, caa_tag, caa_method, account_uri, resolvers)
-    results.append((f"CAA {domain}", ok, why))
+    if with_caa:
+        ok, why = check_caa(domain, caa_tag, caa_method, account_uri, resolvers)
+        results.append((f"CAA {domain}", ok, why))
     return results
+
+
+# Distinct from 1, which is also what an uncaught exception exits with.
+CAA_FORBIDS = 3
+
+
+def caa_only(args: argparse.Namespace) -> int:
+    """Whether CAA lets this account issue for --domain, for a caller about
+    to ask the CA.
+
+    CAA_FORBIDS means the CA would refuse, so do not spend a failed validation
+    on it. Anything else, DNS that cannot be read included, leaves the decision
+    to the CA. A refusal is retried every --interval until --timeout, for a
+    record the caller has just replaced and resolvers may still cache.
+    """
+    domain = args.domain[2:] if args.domain.startswith("*.") else args.domain
+    deadline = time.monotonic() + args.timeout
+    while True:
+        try:
+            ok, why = check_caa(domain, args.caa_tag, args.challenge, args.account_uri, args.resolver)
+        except ResolveError as exc:
+            print(f"Warning: could not check CAA for {args.domain}: {exc}", file=sys.stderr, flush=True)
+            return 0
+        if ok:
+            print(f"CAA {args.domain}: {why}", flush=True)
+            return 0
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"Error: {why}", file=sys.stderr, flush=True)
+            return CAA_FORBIDS
+        print(f"[caa-check] WAIT {args.domain}: {why}", flush=True)
+        time.sleep(min(args.interval, max(1, int(remaining))))
 
 
 # `delegated` is a shape, not a record kind: it replaces the per-kind records
@@ -513,7 +547,15 @@ def main() -> int:
         help="comma-separated subset of records to handle "
              "(cname,txt,caa,challenge-cname,delegated)",
     )
+    parser.add_argument(
+        "--caa-only",
+        action="store_true",
+        help="only check that CAA permits --challenge for --account-uri, "
+             f"waiting up to --timeout; exit {CAA_FORBIDS} if it forbids issuance",
+    )
     args = parser.parse_args()
+    if args.caa_only:
+        return caa_only(args)
 
     missing = [n for n, v in (("--domain", args.domain),
                               ("--alias-target", args.alias_target),
@@ -551,7 +593,7 @@ def main() -> int:
         try:
             results = verify_once(
                 records, args.domain.lstrip("*."), args.caa_tag, args.challenge,
-                args.account_uri, args.resolver,
+                args.account_uri, args.resolver, "caa" in args.include.split(","),
             )
         except ResolveError as exc:
             print(f"[dns-check #{attempt}] resolver problem: {exc}", flush=True)

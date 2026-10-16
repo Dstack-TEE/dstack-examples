@@ -175,7 +175,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 |----------|---------|-------------|
 | `PORT` | `443` | HAProxy listen port |
 | `ROUTING_MAP` | | Multi-domain routing: `domain=host:port` per line. A wildcard entry (`*.example.com=host:port`) matches one label, and exact entries take precedence over it. Unmatched names go to the first entry. It routes only: every name still needs to be in `DOMAIN`/`DOMAINS` to get a certificate |
-| `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS). Replaces existing values with the same tag; for a wildcard whose base is a zone apex this restricts the whole zone (see [Wildcard Domain Support](#wildcard-domain-support)). Except on Cloudflare, a non-wildcard domain is then published as an A record to the gateway's current address instead of a CNAME, because a CNAME would hide the CAA beside it; the address is refreshed every `RENEW_INTERVAL`. The same happens whenever a CAA record already exists at the name, whoever wrote it, so turning `SET_CAA` off later keeps the A record until you delete the CAA. Linode always uses an A record. With `DELEGATION_ZONE` the CAA is always published, whatever this says |
+| `SET_CAA` | `false` | Enable CAA DNS record (dns-01 only; tls-alpn-01 cannot write DNS). Replaces existing values with the same tag; for a wildcard whose base is a zone apex this restricts the whole zone (see [Wildcard Domain Support](#wildcard-domain-support)). Except on Cloudflare, a non-wildcard domain is then published as an A record to the gateway's current address instead of a CNAME, because a CNAME would hide the CAA beside it; the address is refreshed every `RENEW_INTERVAL`. The same happens whenever a CAA record already exists at the name, whoever wrote it, so turning `SET_CAA` off later keeps the A record until you delete the CAA. Linode always uses an A record. Defaults to `true` with `DELEGATION_ZONE`; turning it off there lets anyone who can write the delegation zone get certificates for the domain. Either way, the CAA in force is checked before every issuance and a domain it refuses is not sent to the CA |
 | `TXT_PREFIX` | `_dstack-app-address` | DNS TXT record prefix |
 | `ACME_EMAIL` | | ACME contact address, in either mode. `CERTBOT_EMAIL` is the historical name and still works. See [below](#the-acme-contact-address-is-optional-and-public) — it is optional, and published |
 | `ACME_STAGING` | `false` | Use Let's Encrypt staging, in either mode. `CERTBOT_STAGING` is the historical name and still works |
@@ -188,7 +188,7 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `DNS_WEBHOOK_URL` | | `DNS_SETUP_MODE=webhook`: endpoint to notify |
 | `DNS_WEBHOOK_TOKEN` | | Shared secret; the payload is HMAC-SHA256 signed with it |
 | `DNS_WEBHOOK_TIMEOUT` | `15` | Seconds per webhook POST attempt |
-| `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records. `DOH_RESOLVER` is the historical name and still works |
+| `DOH_RESOLVERS` | Google + Cloudflare | Comma-separated DoH endpoints used to verify records, and to check CAA before issuing. `DOH_RESOLVER` is the historical name and still works |
 | `TLSALPN_ADDRESS` | `127.0.0.1` | Address lego's ACME responder binds to, and haproxy forwards `acme-tls/1` connections to |
 | `TLSALPN_PORT` | `9443` | Loopback port lego's ACME responder binds to |
 | `TLS_TERMINATE_PORT` | `9444` | Loopback port the TLS frontend moves to in tls-alpn-01 mode |
@@ -243,12 +243,12 @@ dstack-ingress publishes what they point at, in the delegation zone:
 
 ```
 svc.example.com.deleg.example.net                      A      <address of GATEWAY_DOMAIN>
-svc.example.com.deleg.example.net                      CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=…"
+svc.example.com.deleg.example.net                      CAA    0 issue "letsencrypt.org;validationmethods=dns-01;accounturi=…"   (SET_CAA, on by default here)
 _dstack-app-address.svc.example.com.deleg.example.net  TXT    "<app-id>:<port>"
 _acme-challenge.svc.example.com.deleg.example.net      TXT    <challenge>   (transient)
 ```
 
-The gateway pointer and the CAA share a name. Cloudflare answers a CAA query
+With `SET_CAA` the gateway pointer and the CAA share a name. Cloudflare answers a CAA query
 with the CAA beside a CNAME, so the pointer stays a CNAME there. Elsewhere it is
 an A record: by the DNS rules resolvers follow a CNAME without looking beside it,
 and Route53 and Linode refuse the pair. The address
