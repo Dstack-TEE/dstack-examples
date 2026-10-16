@@ -465,6 +465,13 @@ class CertbotTimeoutTest(EnvTestCase):
             )
 
 
+class RedactTest(unittest.TestCase):
+    @mock.patch.dict(os.environ, {"NAMECHEAP_API_KEY": "0123abcd", "LINODE_API_TOKEN": ""})
+    def test_masks_configured_secrets(self):
+        out = certman.redact("url: /xml.response?ApiUser=u&ApiKey=0123abcd&Command=x")
+        self.assertEqual(out, "url: /xml.response?ApiUser=u&ApiKey=***&Command=x")
+
+
 class NoDuplicateDefinitionsTest(unittest.TestCase):
     """Python shadows a repeated class or method silently; unittest counts the
     later one and the total still goes up, so a duplicated block looks like
