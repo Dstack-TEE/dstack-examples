@@ -20,7 +20,7 @@ dstack-ingress is a HAProxy-based L4 (TCP) proxy that provides:
 
 2. **TLS Termination**: HAProxy terminates TLS and forwards the decrypted TCP stream to your backend. No HTTP inspection — the proxy operates entirely at L4.
 
-3. **Certificate Renewal**: A background daemon checks for renewal every 12 hours. On renewal, HAProxy is gracefully reloaded with zero downtime. A failed pass is retried after 60s, backing off by 60s per attempt up to 30 minutes. A domain that fails does not stop the others from being served: in dns-01 mode the container exits at startup only if no domain has a certificate yet, and in tls-alpn-01 mode it serves a placeholder certificate until issuance succeeds.
+3. **Certificate Renewal**: A background daemon checks for renewal every 12 hours. On renewal, HAProxy is gracefully reloaded with zero downtime. A failed pass is retried after 60s, backing off by 60s per attempt up to 30 minutes. A domain that fails does not stop the others from being served: in dns-01 mode a restart serves the certificates already on disk right away and checks them in the background, and the container exits at startup only if no domain has a certificate yet. In tls-alpn-01 mode it serves a placeholder certificate until issuance succeeds.
 
 4. **Evidence Generation**: Generates cryptographically linked attestation evidence (ACME account, certificates, TDX quote / dstack attestation) for TEE verification.
 

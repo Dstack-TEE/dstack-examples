@@ -17,10 +17,10 @@ FIRST_PASS=true
 # show them yet. They survive across passes, so a failed step is retried on the
 # next one, and only that step: evidence that keeps failing must not reload
 # haproxy on every retry, as each reload leaves the old workers holding their
-# connections for up to TIMEOUT_CLIENT. Both start set so every container start
-# republishes the evidence: what a previous run left in /evidences may list
-# removed domains or an old account, or be half published.
-RELOAD_PENDING=true
+# connections for up to TIMEOUT_CLIENT. The evidence starts pending, so every
+# start republishes it (see prepare_serving); haproxy has nothing to reload
+# before it starts.
+RELOAD_PENDING=false
 EVIDENCE_PENDING=true
 
 build_combined_pems() {
@@ -62,6 +62,22 @@ collect_evidence() {
 
 # Empty when the domain has no certificate yet.
 cert_checksum() { sha256sum "$(cert_fullchain_path "$1")" 2>/dev/null || true; }
+
+# Run once, just before haproxy starts. haproxy reads the PEMs itself, so there
+# is nothing to reload yet. What the last run left in /evidences attests a
+# container that may no longer be running, so republish the evidence unless a
+# startup pass already has -- it is local and quick -- or, if that is not
+# possible yet, serve none. A first start has no ACME account to collect yet.
+prepare_serving() {
+    build_combined_pems
+    RELOAD_PENDING=false
+    [ "$EVIDENCE_PENDING" = true ] || return 0
+    if acme_account_file >/dev/null 2>&1 && collect_evidence; then
+        EVIDENCE_PENDING=false
+    else
+        evidence_withdraw
+    fi
+}
 
 # One pass over every domain: make sure the records are right, then issue or
 # renew. Idempotent, so the first pass and every later one are the same code.

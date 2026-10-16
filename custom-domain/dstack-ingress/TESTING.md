@@ -134,10 +134,10 @@ renewal window, and `RENEW_DAYS_BEFORE` sets it in either mode:
 
 - **not due**: leave `RENEW_DAYS_BEFORE` unset, set a short `RENEW_INTERVAL`,
   and restart the container. Expect lego `Skip renewal` / certbot `No
-  certificates need renewal`. The first pass after a start always republishes
-  the evidence (and reloads haproxy in tls-alpn-01 mode); the passes after it
-  must not. A later pass that reloads or regenerates evidence is a bug — it
-  means the renewal decision is not being read correctly.
+  certificates need renewal`. Every start republishes the evidence before
+  serving; no pass after that may reload haproxy or regenerate the evidence.
+  One that does is a bug — it means the renewal decision is not being read
+  correctly.
 - **due**: set `RENEW_DAYS_BEFORE=365` and restart. Expect a new certificate,
   a reload, and regenerated evidence.
 

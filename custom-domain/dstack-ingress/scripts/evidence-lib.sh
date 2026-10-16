@@ -115,6 +115,12 @@ evidence_publish() {
     rm -rf "$stage"
 }
 
+# Take down what an earlier run published, for when this one cannot replace it
+# yet: no evidence is better than evidence for another container.
+evidence_withdraw() {
+    rm -f "$EVIDENCE_DIR"/{acme-account.json,cert-*.pem,sha256sum.txt,quote.json,attestation.json}
+}
+
 evidence_start_server() {
     [ "${EVIDENCE_SERVER:-true}" = "true" ] || return 0
     # Bind loopback explicitly. Left to itself mini_httpd binds [::]:port first,

@@ -235,7 +235,7 @@ require_instance_id
 # first certificate can exist, so start on a placeholder and let the loop
 # converge behind it.
 ensure_placeholder_certs
-build_combined_pems
+prepare_serving
 
 haproxy_emit_global
 emit_peek_frontend
