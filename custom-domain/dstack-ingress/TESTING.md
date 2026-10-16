@@ -285,6 +285,7 @@ These fail fast and are cheap, so run them on every change:
 |---|---|
 | tls-alpn-01 + a wildcard domain | Refused before any ACME call, citing RFC 8737 |
 | Delegation, CAA in the delegated zone changed to forbid the CA | Blocked before any ACME attempt — proves the published CAA is reachable through the CNAME |
+| Plain dns-01, `SET_CAA=false`, a CAA naming another CA or pinned to another account | Blocked before any ACME attempt with `CAA forbids issuing <domain> with this account` and the reason quoted back — except the first pass of a fresh account, which has no URI to compare yet |
 | Delegation with no CAA record at all | Proceeds, reporting `no CAA record set; issuance is unrestricted` — see below |
 | Delegation, later pass, gateway CNAME broken | Renewal proceeds — that record is for serving, and dns-01 does not use it |
 | A CAA record with `validationmethods=dns-01`, mode tls-alpn-01 | Blocked with the restriction quoted back |

@@ -373,6 +373,28 @@ def verify_once(
     return results
 
 
+# Distinct from 1, which is also what an uncaught exception exits with.
+CAA_FORBIDS = 3
+
+
+def caa_only(args: argparse.Namespace) -> int:
+    """Check once whether CAA lets this account issue for --domain.
+
+    For a caller about to ask the CA: CAA_FORBIDS means the CA would refuse,
+    so do not spend a failed validation on it. Anything else, DNS that cannot
+    be read included, leaves the decision to the CA.
+    """
+    domain = args.domain[2:] if args.domain.startswith("*.") else args.domain
+    try:
+        ok, why = check_caa(domain, args.caa_tag, args.challenge, args.account_uri, args.resolver)
+    except ResolveError as exc:
+        print(f"Warning: could not check CAA for {args.domain}: {exc}", file=sys.stderr, flush=True)
+        return 0
+    if not ok:
+        print(f"Error: {why}", file=sys.stderr, flush=True)
+    return 0 if ok else CAA_FORBIDS
+
+
 # `delegated` is a shape, not a record kind: it replaces the per-kind records
 # rather than adding to them. Asking for both would emit two CNAMEs for the same
 # name -- one at the gateway, one at the delegation zone -- so refuse instead.
@@ -513,7 +535,15 @@ def main() -> int:
         help="comma-separated subset of records to handle "
              "(cname,txt,caa,challenge-cname,delegated)",
     )
+    parser.add_argument(
+        "--caa-only",
+        action="store_true",
+        help="only check, once, that CAA permits --challenge for --account-uri; "
+             f"exit {CAA_FORBIDS} if it forbids issuance",
+    )
     args = parser.parse_args()
+    if args.caa_only:
+        return caa_only(args)
 
     missing = [n for n, v in (("--domain", args.domain),
                               ("--alias-target", args.alias_target),

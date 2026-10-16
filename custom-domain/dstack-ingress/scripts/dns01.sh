@@ -214,6 +214,20 @@ is_zone_apex() {
             >/dev/null
 }
 
+# Exits 3 when the CAA in force forbids this account to issue for $1. A fresh
+# account has no URI yet, so only issuer and method can be checked for it.
+check_caa() {
+    local account_file account_uri=""
+    if account_file=$(acme_account_file 2>/dev/null); then
+        account_uri=$(jq -j '.uri' "$account_file")
+    fi
+    dnsguide.py --caa-only \
+        --domain "$1" \
+        --caa-tag "$(caa_tag_for "$1")" \
+        --challenge dns-01 \
+        --account-uri "$account_uri"
+}
+
 set_caa_record() {
     local domain="$1"
 
@@ -300,6 +314,20 @@ process_domain() {
     else
         set_alias_record "$domain"
         set_txt_record "$domain"
+        # Without SET_CAA nothing here rewrites CAA, so a record that refuses
+        # this account -- one an earlier SET_CAA=true run pinned to a previous
+        # account, or the operator's own -- refuses every attempt, each one of
+        # Let's Encrypt's five failed validations per hostname per hour. Ask
+        # DNS before asking the CA.
+        # Only a definite refusal blocks; a failed check leaves it to the CA.
+        if [ "$SET_CAA" != "true" ]; then
+            local caa=0
+            check_caa "$domain" || caa=$?
+            if [ "$caa" -eq 3 ]; then
+                echo "Error: CAA forbids issuing $domain with this account. Fix or delete that CAA record, or set SET_CAA=true to let this container manage it" >&2
+                return 1
+            fi
+        fi
     fi
 
     # The CAA record names our ACME account, so the account has to exist first:

@@ -4,6 +4,9 @@
 Run: python3 scripts/tests/test_dnsguide.py
 """
 
+import argparse
+import contextlib
+import io
 import os
 import sys
 import unittest
@@ -161,6 +164,39 @@ class TestCaaRelevantTag(unittest.TestCase):
             ['0 issue "letsencrypt.org"', '0 issuewild "ca.example.net"'], "issuewild"
         )
         self.assertFalse(ok)
+
+
+class TestCaaOnly(unittest.TestCase):
+    """--caa-only: the pre-check dns-01 runs before asking the CA."""
+
+    ACCOUNT = "https://acme-v02.api.letsencrypt.org/acme/acct/1"
+
+    def _run(self, query, domain="svc.example.com", tag="issue"):
+        saved = dnsguide.query_union
+        dnsguide.query_union = query
+        self.addCleanup(lambda: setattr(dnsguide, "query_union", saved))
+        args = argparse.Namespace(domain=domain, caa_tag=tag, challenge="dns-01",
+                                  account_uri=self.ACCOUNT, resolver="")
+        with contextlib.redirect_stderr(io.StringIO()):
+            return dnsguide.caa_only(args)
+
+    def test_pinned_to_another_account_fails(self):
+        other = '0 issue "letsencrypt.org;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/2"'
+        self.assertEqual(self._run(lambda n, rr, r: [other] if n == "svc.example.com" else []),
+                         dnsguide.CAA_FORBIDS)
+
+    def test_inherited_other_ca_fails_a_wildcard(self):
+        query = lambda n, rr, r: ['0 issue "digicert.com"'] if n == "example.com" else []
+        self.assertEqual(self._run(query, domain="*.svc.example.com", tag="issuewild"),
+                         dnsguide.CAA_FORBIDS)
+
+    def test_no_caa_passes(self):
+        self.assertEqual(self._run(lambda n, rr, r: []), 0)
+
+    def test_unreadable_dns_does_not_block(self):
+        def broken(name, rr, resolvers):
+            raise dnsguide.ResolveError("all resolvers failed")
+        self.assertEqual(self._run(broken), 0)
 
 
 class TestDelegationRecord(unittest.TestCase):
