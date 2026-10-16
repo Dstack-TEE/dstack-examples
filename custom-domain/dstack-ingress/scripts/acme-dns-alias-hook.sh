@@ -37,7 +37,7 @@ case "$action" in
         echo "acme-dns-alias-hook: writing challenge TXT to delegated record $record"
         # A stale challenge value that cannot be deleted is harmless: the CA
         # accepts the record set as long as one value matches.
-        dnsman.py set_txt --tolerate-stale --domain "$record" --content "$CERTBOT_VALIDATION"
+        dnsman.py set_txt --tolerate-stale --domain "$record" --content="$CERTBOT_VALIDATION"
         # certbot asks Let's Encrypt to validate immediately after this hook
         # returns, so wait for the record to propagate before returning.
         #
