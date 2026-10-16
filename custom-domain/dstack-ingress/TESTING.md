@@ -313,7 +313,7 @@ operator's CNAME. Expect the reason quoted back, e.g. `issue allows
 Note also that the first pass on a fresh deployment necessarily runs before any
 CAA exists: the record names the ACME account, so the account has to exist
 first. `process_domain` issues, writes the CAA, and issues again only if the
-first attempt failed.
+first attempt failed and had to create the account.
 
 ## Traps
 
