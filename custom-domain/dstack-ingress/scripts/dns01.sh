@@ -332,13 +332,6 @@ setup_py_env
 setup_certbot_env
 load_dstack_identity
 
-# dns-01 needs no inbound traffic, so keep the original order: certificate
-# first, serving second. A certificate failure here is fatal only when there is
-# nothing to serve. Otherwise exiting would just restart into the same failure
-# -- hitting the CA again on every restart -- while every domain goes unserved,
-# including those whose certificates are fine (a newly added domain failing its
-# first issuance would take down the others). Serve what there is and let the
-# loop retry with backoff instead.
 have_any_cert() {
     local domain
     while IFS= read -r domain; do
@@ -348,18 +341,29 @@ have_any_cert() {
     return 1
 }
 
-startup_status=0
-run_pass || startup_status=$?
-case $startup_status in
-    0) next_check=${RENEW_INTERVAL:-43200} ;;
-    3) next_check=60 ;;
-    *)
-        have_any_cert || exit "$startup_status"
-        echo "Certificate pass failed; serving the certificates there are and retrying" >&2
-        next_check=60
-        ;;
-esac
-build_combined_pems
+# With a certificate on disk, serve it first and run the pass behind haproxy.
+# Running it first would leave every domain unserved until it finishes, and one
+# new domain can hold it for long: a certbot run up to its timeout, or up to
+# DNS_SETUP_TIMEOUT while its delegation CNAMEs are still being created.
+#
+# With none there is nothing to serve, and dns-01 needs no inbound traffic, so
+# issue first. A pass that ends with still no certificate is fatal; one that
+# got some serves them and leaves the loop to retry the rest with backoff.
+next_check=0
+if ! have_any_cert; then
+    startup_status=0
+    run_pass || startup_status=$?
+    case $startup_status in
+        0) next_check=${RENEW_INTERVAL:-43200} ;;
+        3) next_check=60 ;;
+        *)
+            have_any_cert || exit "$startup_status"
+            echo "Certificate pass failed; serving the certificates there are and retrying" >&2
+            next_check=60
+            ;;
+    esac
+fi
+prepare_serving
 
 haproxy_emit_global
 haproxy_emit_tls_frontend ":${PORT}$(haproxy_accept_proxy)"
