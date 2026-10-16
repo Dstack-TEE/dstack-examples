@@ -28,6 +28,18 @@ sanitize_domain() {
     fi
 }
 
+# The gateway's domain, the alias target in both modes. Required. A leading `_`
+# label is the older gateway form, so allow underscores.
+sanitize_gateway_domain() {
+    local candidate="$1"
+    if [[ "$candidate" =~ ^[A-Za-z0-9_]([A-Za-z0-9_.-]*[A-Za-z0-9])?$ ]]; then
+        echo "$candidate"
+    else
+        echo "Error: Invalid or missing GATEWAY_DOMAIN: $candidate" >&2
+        return 1
+    fi
+}
+
 # A hostname, IPv4 address or bracketed IPv6 address. Only whitespace and
 # other characters that could break out of a haproxy.cfg line matter here.
 sanitize_host() {
