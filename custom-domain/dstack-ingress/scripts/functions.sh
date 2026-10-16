@@ -69,20 +69,6 @@ sanitize_target_endpoint() {
     fi
 }
 
-sanitize_client_max_body_size() {
-    local candidate="$1"
-    if [ -z "$candidate" ]; then
-        echo ""
-        return 0
-    fi
-    if [[ "$candidate" =~ ^[0-9]+[kKmMgG]?$ ]]; then
-        echo "$candidate"
-    else
-        echo "Warning: Ignoring invalid CLIENT_MAX_BODY_SIZE value: $candidate" >&2
-        echo ""
-    fi
-}
-
 sanitize_dns_label() {
     local candidate="$1"
     if [ -z "$candidate" ]; then
@@ -171,49 +157,6 @@ sanitize_boolean() {
             return 1
             ;;
     esac
-}
-
-sanitize_proxy_timeout() {
-    local candidate="$1"
-    if [ -z "$candidate" ]; then
-        echo ""
-        return 0
-    fi
-    if [[ "$candidate" =~ ^[0-9]+[smh]?$ ]]; then
-        echo "$candidate"
-    else
-        echo "Warning: Ignoring invalid proxy timeout value: $candidate" >&2
-        echo ""
-    fi
-}
-
-sanitize_proxy_buffer_size() {
-    local candidate="$1"
-    if [ -z "$candidate" ]; then
-        echo ""
-        return 0
-    fi
-    if [[ "$candidate" =~ ^[0-9]+[kKmM]?$ ]]; then
-        echo "$candidate"
-    else
-        echo "Warning: Ignoring invalid proxy buffer size value: $candidate" >&2
-        echo ""
-    fi
-}
-
-sanitize_proxy_buffers() {
-    local candidate="$1"
-    if [ -z "$candidate" ]; then
-        echo ""
-        return 0
-    fi
-    # Format: number size (e.g., "4 256k")
-    if [[ "$candidate" =~ ^[0-9]+[[:space:]]+[0-9]+[kKmM]?$ ]]; then
-        echo "$candidate"
-    else
-        echo "Warning: Ignoring invalid proxy buffers value: $candidate (expected format: 'number size', e.g., '4 256k')" >&2
-        echo ""
-    fi
 }
 
 txt_record_name() {
