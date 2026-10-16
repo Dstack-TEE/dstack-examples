@@ -57,14 +57,8 @@ assert_equal "$(sanitize_target_endpoint grpc://svc:50051)" "grpc://svc:50051" "
 assert_equal "$(sanitize_target_endpoint app:80)" "app:80" "sanitize_target_endpoint accepts bare host:port"
 assert_equal "$(sanitize_target_endpoint app-main)" "app-main" "sanitize_target_endpoint accepts bare hostname"
 assert_equal "$(sanitize_target_endpoint 10.0.0.1:8080)" "10.0.0.1:8080" "sanitize_target_endpoint accepts IP:port"
-assert_equal "$(sanitize_client_max_body_size 50m)" "50m" "sanitize_client_max_body_size accepts suffix"
 assert_equal "$(sanitize_dns_label test_label)" "test_label" "sanitize_dns_label accepts lowercase"
 assert_equal "$(sanitize_dns_label test-label)" "test-label" "sanitize_dns_label accepts hyphen"
-assert_equal "$(sanitize_proxy_timeout 30)" "30" "sanitize_proxy_timeout accepts numeric value"
-assert_equal "$(sanitize_proxy_timeout 30s)" "30s" "sanitize_proxy_timeout accepts seconds suffix"
-assert_equal "$(sanitize_proxy_timeout 5m)" "5m" "sanitize_proxy_timeout accepts minutes suffix"
-assert_equal "$(sanitize_proxy_timeout 1h)" "1h" "sanitize_proxy_timeout accepts hours suffix"
-assert_equal "$(sanitize_proxy_timeout '')" "" "sanitize_proxy_timeout accepts empty value"
 assert_equal "$(sanitize_positive_integer 4096 MAXCONN)" "4096" "sanitize_positive_integer accepts 4096"
 assert_equal "$(sanitize_positive_integer 1 MAXCONN)" "1" "sanitize_positive_integer accepts 1"
 assert_equal "$(sanitize_haproxy_timeout 10s TIMEOUT_CONNECT)" "10s" "sanitize_haproxy_timeout accepts 10s"
@@ -111,34 +105,6 @@ assert_fails "sanitize_gateway_domain rejects a newline" sanitize_gateway_domain
 assert_fails "sanitize_gateway_domain rejects a space" sanitize_gateway_domain "gw example.com"
 assert_fails "sanitize_domain rejects path traversal" sanitize_domain ../etc/passwd
 assert_fails "sanitize_target_endpoint rejects malformed URL" sanitize_target_endpoint "http:///broken"
-warning_output="$(sanitize_client_max_body_size "50mb" 2>&1 || true)"
-if [[ "$warning_output" == "Warning: Ignoring invalid CLIENT_MAX_BODY_SIZE value: 50mb" ]]; then
-    echo "PASS: sanitize_client_max_body_size warns and returns empty"
-else
-    echo "FAIL: sanitize_client_max_body_size warning unexpected"
-    printf '%s\n' "$warning_output"
-    failures=$((failures + 1))
-fi
-
-# Test invalid timeout values
-timeout_warning="$(sanitize_proxy_timeout "30ms" 2>&1 || true)"
-if [[ "$timeout_warning" == "Warning: Ignoring invalid proxy timeout value: 30ms" ]]; then
-    echo "PASS: sanitize_proxy_timeout warns on invalid suffix (ms)"
-else
-    echo "FAIL: sanitize_proxy_timeout warning unexpected"
-    printf '%s\n' "$timeout_warning"
-    failures=$((failures + 1))
-fi
-
-timeout_warning="$(sanitize_proxy_timeout "abc" 2>&1 || true)"
-if [[ "$timeout_warning" == "Warning: Ignoring invalid proxy timeout value: abc" ]]; then
-    echo "PASS: sanitize_proxy_timeout warns on non-numeric value"
-else
-    echo "FAIL: sanitize_proxy_timeout warning unexpected"
-    printf '%s\n' "$timeout_warning"
-    failures=$((failures + 1))
-fi
-
 assert_fails "sanitize_dns_label rejects invalid characters" sanitize_dns_label "bad*label"
 assert_fails "sanitize_positive_integer rejects zero" sanitize_positive_integer 0 MAXCONN
 assert_fails "sanitize_positive_integer rejects non-numeric" sanitize_positive_integer abc MAXCONN

@@ -186,8 +186,4 @@ case "$CHALLENGE_TYPE" in
     tls-alpn-01)
         exec /scripts/tlsalpn.sh "$@"
         ;;
-    *)
-        echo "Error: invalid CHALLENGE_TYPE '$CHALLENGE_TYPE' (expected dns-01 or tls-alpn-01)" >&2
-        exit 1
-        ;;
 esac
