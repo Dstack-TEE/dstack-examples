@@ -4,9 +4,13 @@
 Run: python3 scripts/tests/test_dnsguide.py
 """
 
+import argparse
+import contextlib
+import io
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
@@ -161,6 +165,72 @@ class TestCaaRelevantTag(unittest.TestCase):
             ['0 issue "letsencrypt.org"', '0 issuewild "ca.example.net"'], "issuewild"
         )
         self.assertFalse(ok)
+
+
+class TestCaaOnly(unittest.TestCase):
+    """--caa-only: the check dns-01 runs before asking the CA."""
+
+    ACCOUNT = "https://acme-v02.api.letsencrypt.org/acme/acct/1"
+
+    def _run(self, query, domain="svc.example.com", tag="issue", timeout=0):
+        saved = dnsguide.query_union, dnsguide.time.sleep
+        dnsguide.query_union = query
+        dnsguide.time.sleep = lambda s: None
+        self.addCleanup(lambda: (setattr(dnsguide, "query_union", saved[0]),
+                                 setattr(dnsguide.time, "sleep", saved[1])))
+        args = argparse.Namespace(domain=domain, caa_tag=tag, challenge="dns-01",
+                                  account_uri=self.ACCOUNT, resolver="",
+                                  timeout=timeout, interval=1)
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return dnsguide.caa_only(args)
+
+    def test_pinned_to_another_account_fails(self):
+        other = '0 issue "letsencrypt.org;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/2"'
+        self.assertEqual(self._run(lambda n, rr, r: [other] if n == "svc.example.com" else []),
+                         dnsguide.CAA_FORBIDS)
+
+    def test_inherited_other_ca_fails_a_wildcard(self):
+        query = lambda n, rr, r: ['0 issue "digicert.com"'] if n == "example.com" else []
+        self.assertEqual(self._run(query, domain="*.svc.example.com", tag="issuewild"),
+                         dnsguide.CAA_FORBIDS)
+
+    def test_waits_for_a_replaced_record(self):
+        old = '0 issue "letsencrypt.org;accounturi=https://acme-v02.api.letsencrypt.org/acme/acct/2"'
+        answers = iter([[old], [old], []])
+        query = lambda n, rr, r: next(answers) if n == "svc.example.com" else []
+        self.assertEqual(self._run(query, timeout=60), 0)
+
+    def test_no_caa_passes(self):
+        self.assertEqual(self._run(lambda n, rr, r: []), 0)
+
+    def test_unreadable_dns_does_not_block(self):
+        def broken(name, rr, resolvers):
+            raise dnsguide.ResolveError("all resolvers failed")
+        self.assertEqual(self._run(broken), 0)
+
+
+class TestMainChecksCaaOnlyWhenAsked(unittest.TestCase):
+    """The record check runs CAA only when `caa` is included."""
+
+    def _main(self, *extra):
+        asked = []
+        union = lambda name, rr, r: asked.append(rr) or (["gw.example."] if rr == dnsguide.RR_CNAME else [])
+        per_resolver = lambda name, rr, r: [("r", ['"x:443"'])]
+        argv = ["dnsguide.py", "--domain", "a.example.com", "--alias-target", "gw.example",
+                "--txt-name", "_dstack-app-address.a.example.com", "--txt-value", "x:443",
+                "--mode", "wait", "--timeout", "0", *extra]
+        with mock.patch.object(sys, "argv", argv), \
+                mock.patch.object(dnsguide, "query_union", union), \
+                mock.patch.object(dnsguide, "query_per_resolver", per_resolver), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            code = dnsguide.main()
+        return code, dnsguide.RR_CAA in asked
+
+    def test_default_include_checks_caa(self):
+        self.assertEqual(self._main(), (0, True))
+
+    def test_without_caa_it_is_not_checked(self):
+        self.assertEqual(self._main("--include", "cname,txt"), (0, False))
 
 
 class TestDelegationRecord(unittest.TestCase):

@@ -706,6 +706,51 @@ class CertManager:
             return
         print(f"Renewal window for {domain} set to {days} days before expiry")
 
+    def register_account(self, email: str) -> bool:
+        """Create the ACME account without issuing, so the CAA can name it
+        before the first order."""
+        cmd = self._get_certbot_command() + [
+            "register", "--non-interactive", "--agree-tos", "--no-eff-email",
+            "--server", acme_server()]
+        # Contactless unless an address is given; see _build_certbot_command.
+        cmd += ["--email", email] if email else ["--register-unsafely-without-email"]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        except subprocess.TimeoutExpired:
+            print("ACME account registration timed out", file=sys.stderr)
+            return False
+        if result.returncode != 0 or not self.acme_account_exists():
+            print(f"ACME account registration failed: {result.stderr.strip()}", file=sys.stderr)
+            return False
+        print(f"✓ ACME account registered with {acme_server()}")
+        return True
+
+    def _lineage_account_current(self, domain: str) -> bool:
+        """Whether `certbot renew` would find the account the lineage names.
+
+        certbot renews with the account recorded in the lineage and fails once
+        that one is gone, and register_account runs before every pass, so
+        "an account exists" no longer tells. Deterministic certificates are
+        issued outside any lineage, with whatever account is current. A
+        lineage that records no account is left to certbot rather than
+        replaced on every pass.
+        """
+        current = account_file()
+        if current is None:
+            return False
+        if deterministic_key.enabled():
+            return True
+        recorded = None
+        try:
+            with open(self._renewal_conf_path(domain), encoding="utf-8") as fh:
+                for line in fh:
+                    match = re.match(r"\s*account\s*=\s*(\S+)", line)
+                    if match:
+                        recorded = match.group(1)
+        except OSError:
+            pass
+        return recorded is None or recorded == os.path.basename(os.path.dirname(current))
+
     def acme_account_exists(self) -> bool:
         """Check if an ACME account exists for the current server."""
         return account_file() is not None
@@ -731,14 +776,14 @@ class CertManager:
                 # certbot always records the server; a lineage without one has
                 # a broken renewal config, which re-issuing would not repair.
                 server = acme_server()
-            if server == acme_server() and self.acme_account_exists():
+            if server == acme_server() and self._lineage_account_current(domain):
                 success, renewed = self.renew_certificate(domain, email)
                 return success, renewed  # Only generate evidence if actually renewed
             if server != acme_server():
                 print(f"Certificate for {domain} came from {server or 'an unknown ACME server'}, "
                       f"replacing it from {acme_server()}")
             else:
-                print(f"Certificate exists for {domain} but the ACME account is missing, "
+                print(f"Certificate for {domain} belongs to an ACME account that is gone, "
                       f"re-obtaining")
             success = self.obtain_certificate(domain, email, replace=True)
             return success, success
@@ -758,7 +803,7 @@ def main():
     )
     parser.add_argument(
         "action", choices=["obtain", "renew", "auto", "setup", "cert-dir",
-                            "account-file"],
+                            "account-file", "register"],
         help="Action to perform"
     )
     parser.add_argument("--domain", help="Domain name")
@@ -775,6 +820,8 @@ def main():
             sys.exit(1)
         print(path)
         return
+    if args.action == "register" and account_file():
+        return  # every pass asks; skip loading the provider SDKs
     if args.action == "cert-dir":
         if not args.domain:
             parser.error("--domain is required")
@@ -793,6 +840,15 @@ def main():
             print(f"Setup completed for {manager.provider_type} provider")
             return
 
+        # The contact address is optional; see _build_certbot_command.
+        if not args.email:
+            args.email = os.environ.get("ACME_EMAIL") or os.environ.get(
+                "CERTBOT_EMAIL", ""
+            )
+
+        if args.action == "register":
+            sys.exit(0 if manager.register_account(args.email) else 1)
+
         # Domain is required for certificate operations
         if not args.domain:
             print(
@@ -800,12 +856,6 @@ def main():
                 file=sys.stderr,
             )
             sys.exit(1)
-
-        # The contact address is optional; see _build_certbot_command.
-        if not args.email:
-            args.email = os.environ.get("ACME_EMAIL") or os.environ.get(
-                "CERTBOT_EMAIL", ""
-            )
 
         success, needs_evidence = manager.run_action(
             args.domain, args.email, args.action

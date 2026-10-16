@@ -90,10 +90,9 @@ run_pass() {
         # "nothing to do", and under `set -e` a bare non-zero would kill the
         # whole script on every quiet renewal pass.
         if ( process_domain "$domain" ); then status=0; else status=$?; fi
-        # A step after issuance can still fail (a CAA write, a timeout that
-        # kills the client after it saved the certificate). The new certificate
-        # is on disk by then and the next pass will find it current, so apply
-        # it now or never.
+        # Issuance can fail after saving the certificate (a timeout that kills
+        # the client). The new certificate is on disk by then and the next pass
+        # will find it current, so apply it now or never.
         [ "$(cert_checksum "$domain")" = "$before" ] || changed=1
         case $status in
             0) changed=1 ;;

@@ -22,9 +22,15 @@ if [ -n "$DELEGATION_ZONE" ] && [ -n "${DELEGATION_PROPAGATION_SECONDS:-}" ]; th
     export DELEGATION_PROPAGATION_SECONDS
 fi
 
-SET_CAA=${SET_CAA:-false}
+# Whether this container publishes the CAA record that pins issuance to its
+# ACME account. On by default under delegation: there, everyone else who can
+# write the delegation zone can also answer the delegated challenge.
+if [ -n "$DELEGATION_ZONE" ]; then SET_CAA=${SET_CAA:-true}; else SET_CAA=${SET_CAA:-false}; fi
 if ! SET_CAA=$(sanitize_boolean "$SET_CAA" "SET_CAA"); then
     exit 1
+fi
+if [ -n "$DELEGATION_ZONE" ] && [ "$SET_CAA" = "false" ]; then
+    echo "Warning: SET_CAA=false with DELEGATION_ZONE: anyone who can write $DELEGATION_ZONE can get certificates for these domains" >&2
 fi
 
 # ACME_EMAIL / ACME_STAGING are normalised by entrypoint.sh and exported. The
@@ -36,6 +42,7 @@ cert_privkey_path()   { echo "$(certman.py cert-dir --domain "$1")/privkey.pem";
 # certman.py decides which ACME server is in use (ACME_STAGING,
 # ACME_DIRECTORY_URL), and so where its account lives.
 acme_account_file()   { certman.py account-file; }
+acme_account_uri()    { jq -j '.uri' "$(acme_account_file)"; }
 
 setup_py_env() {
     if [ ! -d /opt/app-venv ]; then
@@ -97,13 +104,10 @@ EOF
 }
 
 set_alias_record() {
-    local domain="$1" with_caa=()
-    # A plain name gets its CAA beside this record.
-    if [ "$SET_CAA" = "true" ] && [[ "$domain" != \*.* ]]; then
-        with_caa=(--with-caa)
-    fi
+    local domain="$1"
     echo "Setting alias record for $domain"
-    dnsman.py set_alias "${with_caa[@]}" \
+    # shellcheck disable=SC2046 # one flag or none
+    dnsman.py set_alias $(with_caa_flag "$domain") \
         --domain "$domain" \
         --content "$GATEWAY_DOMAIN"
 
@@ -138,7 +142,7 @@ set_txt_record() {
 # never needs touching again -- not when the app id changes with the compose,
 # not when the ACME account is recreated, not when the gateway moves.
 #
-# The gateway pointer and the CAA end up on one name. Which form of pointer
+# With SET_CAA the gateway pointer and the CAA share a name. Which form of pointer
 # lets the CAA take effect is a provider property, so tell the provider and let
 # it pick (an address record unless its servers answer CAA beside a CNAME).
 delegated_name() {
@@ -150,30 +154,11 @@ delegation_publish() {
     local domain="$1" target txt_name
     target=$(delegated_name "$domain")
 
-    dnsman.py set_alias --with-caa --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
+    # shellcheck disable=SC2046 # one flag or none
+    dnsman.py set_alias $(with_caa_flag "$domain") --domain "$target" --content "$GATEWAY_DOMAIN" || return 1
 
     txt_name="$(txt_record_name "$domain").${DELEGATION_ZONE}"
     dnsman.py set_txt --domain "$txt_name" --content "$(txt_record_value)" || return 1
-}
-
-# The accounturi CAA goes on the delegated name, beside the gateway pointer.
-#
-# A wildcard is evaluated at its base (RFC 8659), so it needs the `issuewild`
-# tag (beside `issue`) and it needs the operator to have aliased the base as well -- dnsguide
-# asks for that fourth CNAME. A base that is a zone apex cannot be aliased at
-# all, so such a domain is not a fit for delegation; the CAA check reports the
-# record missing rather than the container pretending to have set it.
-delegation_publish_caa() {
-    local domain="$1" account_file account_uri tag
-    account_file=$(acme_account_file) || return 1
-    account_uri=$(jq -j '.uri' "$account_file")
-    for tag in $(caa_tags_for "$domain"); do
-        dnsman.py set_caa \
-            --domain "$(delegated_name "$domain")" \
-            --caa-tag "$tag" \
-            --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$account_uri" ||
-            return 1
-    done
 }
 
 # Challenge delegation: this container holds no token for the served domain's
@@ -214,81 +199,97 @@ is_zone_apex() {
             >/dev/null
 }
 
-set_caa_record() {
-    local domain="$1"
+# --- CAA -------------------------------------------------------------------
+#
+# The same steps in both dns-01 setups: publish the record (SET_CAA), then check
+# that the CAA in force lets this account issue, then issue once. The account
+# is registered before any of it, so the record can name it and the check can
+# compare against it.
 
-    # Delegation is deliberately NOT gated by SET_CAA: this record is the only
-    # thing stopping anyone else who can satisfy the delegated challenge, so it
-    # is not optional here.
-    if [ -n "${DELEGATION_ZONE:-}" ]; then
-        if ! delegation_publish_caa "$domain"; then
-            echo "Error: could not publish the CAA record for $domain" >&2
-            exit 1
-        fi
-        return
-    fi
+# Where the CAA goes: the base of a wildcard (RFC 8659), in the delegation zone
+# under delegation, behind the operator's CNAME. A wildcard needs the operator
+# to alias its base as well, which dnsguide asks for; a base that is a zone apex
+# cannot be aliased, so such a domain is not a fit for delegation.
+caa_name() {
+    if [ -n "$DELEGATION_ZONE" ]; then delegated_name "$1"; else echo "${1#\*.}"; fi
+}
 
-    if [ "$SET_CAA" != "true" ]; then
-        echo "Skipping CAA record setup"
-        return
-    fi
+# --with-caa when the gateway pointer shares its name with the CAA, so the
+# provider can pick a pointer that leaves the CAA visible.
+with_caa_flag() {
+    [ "$SET_CAA" = "true" ] || return 0
+    if [ -n "$DELEGATION_ZONE" ] || [[ "$1" != \*.* ]]; then echo --with-caa; fi
+}
 
-    local ACCOUNT_URI
-    local account_file
-
-    if ! account_file=$(acme_account_file); then
-        echo "Warning: Cannot set CAA record - account file not found"
-        echo "This is not critical - certificates can still be issued without CAA records"
-        return
-    fi
-
-    local caa_domain caa_tag
-    caa_domain="${domain#\*.}"
-
-    if [ "$FIRST_PASS" = "true" ] && [[ "$domain" == \*.* ]] && is_zone_apex "$caa_domain"; then
-        echo "Warning: $caa_domain is a zone apex. The CAA issue record published there for $domain"
+publish_caa() {
+    local domain="$1" name tag
+    [ "$SET_CAA" = "true" ] || return 0
+    name=$(caa_name "$domain")
+    if [ -z "$DELEGATION_ZONE" ] && [ "$FIRST_PASS" = "true" ] && [[ "$domain" == \*.* ]] && is_zone_apex "$name"; then
+        echo "Warning: $name is a zone apex. The CAA issue record published there for $domain"
         echo "replaces every existing issue value and governs every name in the zone that has no CAA"
         echo "record of its own, so other CAs and ACME accounts can no longer issue for them."
         echo "Give those names their own CAA records, or set SET_CAA=false."
     fi
-
-    ACCOUNT_URI=$(jq -j '.uri' "$account_file")
-    for caa_tag in $(caa_tags_for "$domain"); do
-        echo "Adding CAA record ($caa_tag) for $caa_domain, accounturi=$ACCOUNT_URI"
-        if ! dnsman.py set_caa \
-            --domain "$caa_domain" \
-            --caa-tag "$caa_tag" \
-            --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$ACCOUNT_URI"; then
-            echo "Warning: Failed to set CAA record for $domain"
-            echo "This is not critical - certificates can still be issued without CAA records"
-            echo "Consider disabling CAA records by setting SET_CAA=false if this continues to fail"
-        fi
+    for tag in $(caa_tags_for "$domain"); do
+        echo "Setting CAA record ($tag) for $name"
+        dnsman.py set_caa \
+            --domain "$name" \
+            --caa-tag "$tag" \
+            --caa-value "letsencrypt.org;validationmethods=dns-01;accounturi=$(acme_account_uri)" ||
+            return 1
     done
 }
 
-process_domain() {
-    local domain="$1" status retry=false
+# Exits 3 when the CAA in force forbids this account to issue for $1; anything
+# else leaves the decision to the CA. With SET_CAA the record is our own, just
+# written, and resolvers may still cache the one it replaced, so wait for it;
+# anyone else's will not change by waiting.
+check_caa() {
+    local timeout=0
+    [ "$SET_CAA" = "true" ] && timeout=$DNS_SETUP_TIMEOUT
+    dnsguide.py --caa-only \
+        --domain "$1" \
+        --caa-tag "$(caa_tag_for "$1")" \
+        --challenge dns-01 \
+        --account-uri "$(acme_account_uri)" \
+        --timeout "$timeout"
+}
 
-    if [ -n "${DELEGATION_ZONE:-}" ]; then
-        # Delegation: the operator created three CNAMEs once, before deploying.
-        # Everything they point at is published here. Which of them block
-        # depends on the pass.
-        #
-        # Only the _acme-challenge alias is needed to issue: under dns-01 the CA
-        # reads a TXT record and never connects here, so the gateway CNAME and
-        # the app-address TXT are about serving, not about issuance. Blocking a
-        # renewal on them would turn a routing problem -- fixable at any time --
-        # into an expired certificate, which is not. Renewal wins.
-        #
-        # The first pass still checks all three, because that is setup: the
-        # operator has just been handed a list of records to create and wants to
-        # know whether they got them right.
-        # Publish first: the aliases the operator created point at names that
-        # have to exist before checking them proves anything.
-        if ! delegation_publish "$domain"; then
+process_domain() {
+    local domain="$1" caa=0
+
+    if ! certman.py register ${ACME_EMAIL:+--email "$ACME_EMAIL"}; then
+        echo "Error: could not register the ACME account" >&2
+        return 1
+    fi
+
+    if [ -n "$DELEGATION_ZONE" ]; then
+        # Delegation: the operator created the CNAMEs once, before deploying,
+        # and everything they point at is published here -- first, because
+        # checking the aliases proves nothing until their targets exist.
+        delegation_publish "$domain" || {
             echo "Error: could not publish $domain into $DELEGATION_ZONE" >&2
             return 1
-        fi
+        }
+    else
+        set_alias_record "$domain"
+        set_txt_record "$domain"
+    fi
+    if ! publish_caa "$domain"; then
+        echo "Error: could not publish the CAA record for $domain" >&2
+        return 1
+    fi
+
+    if [ -n "$DELEGATION_ZONE" ]; then
+        # Only the _acme-challenge alias is needed to issue: under dns-01 the
+        # CA reads a TXT record and never connects here, so the gateway CNAME
+        # and the app-address TXT are about serving, not about issuance.
+        # Blocking a renewal on them would turn a routing problem -- fixable at
+        # any time -- into an expired certificate, which is not. Renewal wins.
+        # The first pass still checks all of them, because that is setup: the
+        # operator has just been handed a list of records to create and wants
+        # to know whether they got them right.
         local want=challenge-cname
         if [ "$FIRST_PASS" = "true" ]; then
             want=delegated
@@ -297,34 +298,21 @@ process_domain() {
             echo "Error: required DNS records for $domain are not in place" >&2
             return 1
         fi
-    else
-        set_alias_record "$domain"
-        set_txt_record "$domain"
     fi
 
-    # The CAA record names our ACME account, so the account has to exist first:
-    # try once, write CAA, and try again if the first attempt failed after
-    # creating the account. That is the attempt a CAA record naming an earlier
-    # account refuses, and set_caa_record has just replaced it. Any other
-    # failure would only fail again, spending another of Let's Encrypt's five
-    # failed validations per hostname per hour on every pass.
-    if [ -n "${DELEGATION_ZONE:-}" ] || [ "$SET_CAA" = "true" ]; then
-        acme_account_file >/dev/null 2>&1 || retry=true
+    # A refusal the CA would give anyway costs one of Let's Encrypt's five
+    # failed validations per hostname per hour; ask DNS first.
+    check_caa "$domain" || caa=$?
+    if [ "$caa" -eq 3 ]; then
+        if [ "$SET_CAA" = "true" ]; then
+            echo "Error: the CAA published for $domain was not in force within ${DNS_SETUP_TIMEOUT}s" >&2
+        else
+            echo "Error: CAA forbids issuing $domain with this account. Fix or delete that CAA record, or set SET_CAA=true to have this container publish one" >&2
+        fi
+        return 1
     fi
-    if issue_certificate "$domain"; then status=0; else status=$?; fi
 
-    set_caa_record "$domain"
-
-    # Never after a success (0) or "nothing to renew" (2): a second attempt
-    # would issue another certificate whenever renewal is due. Nor when the
-    # attempt did not get as far as creating the account (the CA unreachable,
-    # say): then there is no CAA naming it either.
-    if [ "$retry" = true ] && [ "$status" -ne 0 ] && [ "$status" -ne 2 ] &&
-        acme_account_file >/dev/null 2>&1; then
-        echo "First certificate attempt failed for $domain, retrying now that the CAA record names the new account"
-        if issue_certificate "$domain"; then status=0; else status=$?; fi
-    fi
-    return "$status"
+    issue_certificate "$domain"
 }
 
 issue_certificate() {

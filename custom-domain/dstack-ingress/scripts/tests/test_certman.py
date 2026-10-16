@@ -275,18 +275,24 @@ class AcmeServerTest(EnvTestCase):
         os.environ["ACME_DIRECTORY_URL"] = "https://pebble:14000/dir"
         self.assertEqual(self.servers(), {"https://pebble:14000/dir"})
 
-    def run_auto(self, lineage_server, account=True):
+    def run_auto(self, lineage_server, lineage_account="abc", account="abc"):
         tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         conf = os.path.join(tmp, "a.example.com.conf")
         with open(conf, "w", encoding="utf-8") as fh:
+            fh.write("version = 5.8.0\n[renewalparams]\n")
             if lineage_server:
-                fh.write(f"version = 5.8.0\n[renewalparams]\nserver = {lineage_server}\n")
+                fh.write(f"server = {lineage_server}\n")
+            if lineage_account:
+                fh.write(f"account = {lineage_account}\n")
+        account_path = os.path.join(tmp, "accounts", account, "regr.json") if account else None
+        saved = certman.account_file
+        certman.account_file = lambda: account_path
+        self.addCleanup(setattr, certman, "account_file", saved)
         calls = []
         mgr = object.__new__(certman.CertManager)
         mgr._renewal_conf_path = lambda domain: conf  # noqa: SLF001
         mgr.certificate_exists = lambda domain: True
-        mgr.acme_account_exists = lambda: account
         mgr.renew_certificate = lambda d, e: calls.append("renew") or (True, False)
         mgr.obtain_certificate = lambda d, e, replace=False: calls.append(
             ("obtain", replace)) or True
@@ -304,11 +310,15 @@ class AcmeServerTest(EnvTestCase):
         self.assertEqual(self.run_auto(certman.ACME_PROD), [("obtain", True)])
 
     def test_missing_account_replaces_the_certificate(self):
-        self.assertEqual(self.run_auto(certman.ACME_PROD, account=False),
+        self.assertEqual(self.run_auto(certman.ACME_PROD, account=None),
+                         [("obtain", True)])
+
+    def test_replaced_account_replaces_the_certificate(self):
+        self.assertEqual(self.run_auto(certman.ACME_PROD, account="new"),
                          [("obtain", True)])
 
     def test_unknown_server_does_not_replace_every_pass(self):
-        self.assertEqual(self.run_auto(None), ["renew"])
+        self.assertEqual(self.run_auto(None, lineage_account=None), ["renew"])
 
 
 class RenewRandomSleepTest(EnvTestCase):

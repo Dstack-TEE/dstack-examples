@@ -284,8 +284,9 @@ These fail fast and are cheap, so run them on every change:
 | Scenario | Expected |
 |---|---|
 | tls-alpn-01 + a wildcard domain | Refused before any ACME call, citing RFC 8737 |
-| Delegation, CAA in the delegated zone changed to forbid the CA | Blocked before any ACME attempt — proves the published CAA is reachable through the CNAME |
-| Delegation with no CAA record at all | Proceeds, reporting `no CAA record set; issuance is unrestricted` — see below |
+| Delegation, `SET_CAA=false`, CAA in the delegated zone changed to forbid the CA | Blocked before any ACME attempt — proves a CAA there is reachable through the CNAME. With `SET_CAA` on, the next pass replaces it instead |
+| dns-01, `SET_CAA=false`, a CAA naming another CA or pinned to another account | Blocked before any ACME attempt with `CAA forbids issuing <domain> with this account` and the reason quoted back |
+| Delegation, `SET_CAA=false`, no CAA record at all | Proceeds, reporting `no CAA record set; issuance is unrestricted` — see below |
 | Delegation, later pass, gateway CNAME broken | Renewal proceeds — that record is for serving, and dns-01 does not use it |
 | A CAA record with `validationmethods=dns-01`, mode tls-alpn-01 | Blocked with the restriction quoted back |
 | TXT holding the wrong value | Reported as `TXT present but wrong value`, not "missing" |
@@ -298,7 +299,7 @@ it is observable rather than merely argued.
 had to create the CAA record, its absence was the state that mattered: nothing
 then stopped anyone else who could satisfy the delegated challenge, and the
 container held no token to create it. Once the container began publishing the
-delegated CAA itself, absence stopped meaning that — it means "not published
+delegated CAA itself (`SET_CAA`, the default under delegation), absence stopped meaning that — it means "not published
 yet", and the next pass fixes it — so the gate was removed along with
 `ALLOW_MISSING_CAA` and dnsguide's `--caa-required`. `check_caa` now follows
 RFC 8659 for delegation as it always did elsewhere: an absent CAA record set
@@ -310,19 +311,20 @@ attempt, which is what proves the published record is reachable through the
 operator's CNAME. Expect the reason quoted back, e.g. `issue allows
 'example.com', not letsencrypt.org`.
 
-Note also that the first pass on a fresh deployment necessarily runs before any
-CAA exists: the record names the ACME account, so the account has to exist
-first. `process_domain` issues, writes the CAA, and issues again only if the
-first attempt failed and had to create the account.
+Note also that the CAA record names the ACME account, so `process_domain`
+registers the account on its own first. Every dns-01 pass runs the same steps
+in the same order — register, publish the records (CAA with `SET_CAA`), check
+that the CAA in force lets this account issue, issue once — so even a fresh
+deployment's first certificate is issued under the pin.
 
 ## Traps
 
-**Start from a clean zone.** Records left over from an earlier run change which
-branch executes. A stale CAA record naming a previous ACME account makes dns-01's
-first issuance attempt fail and the second succeed — which happens to be the path
-where the code was correct, hiding a bug in the ordinary path where the first
-attempt succeeds. Delete test records between runs and verify against the
-authoritative nameserver, not a cached resolver.
+**Start from a clean zone.** Records left over from an earlier run change what a
+pass does. A stale CAA record naming a previous ACME account is rewritten with
+`SET_CAA=true`, but resolvers may keep the old one for its TTL, so the CAA check
+fails a pass or two before issuance; with `SET_CAA=false` it blocks for good.
+Delete test records between runs and verify against the authoritative
+nameserver, not a cached resolver.
 
 **One resolver is not enough to trust either answer.** Public resolvers cache
 negative answers for the zone's SOA minimum, so a resolver queried before a
