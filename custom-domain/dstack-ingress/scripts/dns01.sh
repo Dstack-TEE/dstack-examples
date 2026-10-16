@@ -10,6 +10,7 @@ set -e
 source /scripts/functions.sh
 source /scripts/haproxy-lib.sh
 source /scripts/evidence-lib.sh
+source /scripts/cert-lib.sh
 
 # The zone this container writes into, and the switch that turns delegation on.
 DELEGATION_ZONE=${DELEGATION_ZONE:-}
@@ -32,6 +33,9 @@ fi
 
 cert_fullchain_path() { echo "$(certman.py cert-dir --domain "$1")/fullchain.pem"; }
 cert_privkey_path()   { echo "$(certman.py cert-dir --domain "$1")/privkey.pem"; }
+# certman.py decides which ACME server is in use (ACME_STAGING,
+# ACME_DIRECTORY_URL), and so where its account lives.
+acme_account_file()   { certman.py account-file; }
 
 setup_py_env() {
     if [ ! -d /opt/app-venv ]; then
@@ -161,7 +165,7 @@ delegation_publish() {
 # record missing rather than the container pretending to have set it.
 delegation_publish_caa() {
     local domain="$1" account_file account_uri tag
-    account_file=$(get_letsencrypt_account_file) || return 1
+    account_file=$(acme_account_file) || return 1
     account_uri=$(jq -j '.uri' "$account_file")
     for tag in $(caa_tags_for "$domain"); do
         dnsman.py set_caa \
@@ -232,7 +236,7 @@ set_caa_record() {
     local ACCOUNT_URI
     local account_file
 
-    if ! account_file=$(get_letsencrypt_account_file); then
+    if ! account_file=$(acme_account_file); then
         echo "Warning: Cannot set CAA record - account file not found"
         echo "This is not critical - certificates can still be issued without CAA records"
         return
@@ -322,125 +326,6 @@ issue_certificate() {
     # The contact address is optional; certman.py asks for a contactless
     # account when none is given.
     certman.py auto --domain "$1" ${ACME_EMAIL:+--email "$ACME_EMAIL"}
-}
-
-build_combined_pems() {
-    local domain fullchain privkey combined
-    mkdir -p /etc/haproxy/certs
-    while IFS= read -r domain; do
-        [[ -n "$domain" ]] || continue
-        fullchain=$(cert_fullchain_path "$domain")
-        privkey=$(cert_privkey_path "$domain")
-        combined="/etc/haproxy/certs/${domain}.pem"
-        if [ -f "$fullchain" ] && [ -f "$privkey" ]; then
-            cat "$fullchain" "$privkey" > "$combined"
-            chmod 600 "$combined"
-            echo "Combined PEM created: ${combined}"
-        else
-            echo "Warning: Cert files missing for ${domain}, skipping"
-        fi
-    done <<<"$(get-all-domains.sh)"
-}
-
-collect_evidence() {
-    local account domain
-    if ! account=$(get_letsencrypt_account_file); then
-        echo "Error: cannot generate evidence without the ACME account file" >&2
-        return 1
-    fi
-    evidence_reset || return 1
-    evidence_collect_account "$account"
-    while IFS= read -r domain; do
-        [[ -n "$domain" ]] || continue
-        evidence_collect_cert "$domain" "$(cert_fullchain_path "$domain")"
-    done <<<"$(get-all-domains.sh)"
-    evidence_finalize
-}
-
-# True until the first pass finishes. The first pass is setup and checks more
-# than issuance strictly needs; later passes check only what would stop a
-# renewal.
-FIRST_PASS=true
-
-# Set when certificates have been renewed but not yet applied to haproxy.
-# Survives across passes, so a failed apply is retried on the next one. Starts
-# set so every container start republishes the evidence: what a previous run
-# left in /evidences may list removed domains or an old account, or be half
-# published.
-APPLY_PENDING=true
-
-# Empty when the domain has no certificate yet.
-cert_checksum() { sha256sum "$(cert_fullchain_path "$1")" 2>/dev/null || true; }
-
-# One pass over every domain: make the DNS records right, then issue or renew.
-# Idempotent, so the first pass and every later one are the same code.
-run_pass() {
-    local domain status failed=0 changed=0 before
-    while IFS= read -r domain; do
-        [[ -n "$domain" ]] || continue
-        before=$(cert_checksum "$domain")
-        # `if` context, not a bare command: process_domain returns 2 for
-        # "nothing to do", and under `set -e` a bare non-zero would kill the
-        # whole script on every quiet renewal pass.
-        if ( process_domain "$domain" ); then status=0; else status=$?; fi
-        # A step after issuance can still fail (a CAA write, a timeout). The
-        # new certificate is on disk by then and the next pass will find it
-        # current, so apply it now or never.
-        [ "$(cert_checksum "$domain")" = "$before" ] || changed=1
-        case $status in
-            0) changed=1 ;;
-            2) ;;
-            *) echo "Certificate management failed for $domain" >&2; failed=1 ;;
-        esac
-    done <<<"$(get-all-domains.sh)"
-
-    if [ "$changed" -eq 1 ]; then
-        APPLY_PENDING=true
-    fi
-
-    # Applying is separate from renewing, and retried until it sticks. A
-    # renewal that reaches disk but not haproxy is invisible: the next pass
-    # sees a fresh certificate, reports "nothing to renew", and never reloads
-    # again -- so haproxy would serve the pre-renewal certificate until it
-    # expires, which is soon, because being near expiry is why it renewed.
-    if [ "$APPLY_PENDING" = true ]; then
-        local applied=true
-        collect_evidence || { echo "Evidence generation failed" >&2; applied=false; }
-        build_combined_pems || { echo "Combined PEM build failed" >&2; applied=false; }
-        haproxy_reload || applied=false
-        if [ "$applied" = true ]; then
-            APPLY_PENDING=false
-        else
-            echo "[$(date)] Certificate apply incomplete; retrying on the next pass" >&2
-        fi
-    fi
-    FIRST_PASS=false
-    [ "$failed" -eq 0 ] || return 1
-    # Not a quiet pass either: wait the retry backoff, not RENEW_INTERVAL.
-    [ "$APPLY_PENDING" = false ] || return 3
-}
-
-# $1: seconds to wait before the first pass. dns-01 issues before it serves, so
-# the caller has already run a pass by the time we get here; without this the
-# loop would immediately repeat it -- two full passes, and for a single domain
-# two certbot invocations plus a duplicate round of DNS writes, on every start.
-cert_loop() {
-    local attempt=0 delay="${1:-0}"
-    while true; do
-        if [ "$delay" -gt 0 ]; then
-            echo "[$(date)] Next certificate check in ${delay}s"
-            sleep "$delay"
-        fi
-        if run_pass; then
-            attempt=0
-            delay=${RENEW_INTERVAL:-43200}
-        else
-            attempt=$((attempt + 1))
-            delay=$((60 * attempt))
-            [ "$delay" -gt 1800 ] && delay=1800
-            echo "[$(date)] Pass failed (attempt ${attempt}); retrying" >&2
-        fi
-    done
 }
 
 setup_py_env

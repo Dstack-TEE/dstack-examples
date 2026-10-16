@@ -204,12 +204,6 @@ sanitize_proxy_buffers() {
     fi
 }
 
-# certman.py decides which ACME server is in use (ACME_STAGING,
-# ACME_DIRECTORY_URL), and so where its account lives.
-get_letsencrypt_account_file() {
-    certman.py account-file
-}
-
 txt_record_name() {
     local domain="$1"
     if [[ "$domain" == \*.* ]]; then
