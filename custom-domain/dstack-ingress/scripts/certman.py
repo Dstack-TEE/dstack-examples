@@ -22,6 +22,20 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 LETSENCRYPT_DIR = "/etc/letsencrypt"
 
 
+# DNS credentials certbot plugins may echo back, e.g. lexicon's Namecheap
+# client puts ApiKey in the request URL that ends up in error messages.
+SECRET_ENV_VARS = ("CLOUDFLARE_API_TOKEN", "LINODE_API_TOKEN", "NAMECHEAP_API_KEY")
+
+
+def redact(text: str) -> str:
+    """Mask DNS provider credentials in certbot output before it is logged."""
+    for name in SECRET_ENV_VARS:
+        secret = os.environ.get(name, "").strip()
+        if secret:
+            text = text.replace(secret, "***")
+    return text
+
+
 def renewal_due(cert: x509.Certificate, now: datetime) -> bool:
     """certbot's renewal thresholds, for certificates it does not manage.
 
@@ -374,9 +388,9 @@ class CertManager:
                     print(f"Rate limited by Let's Encrypt")
 
                 if error_output:
-                    print(f"stderr: {error_output}")
+                    print(f"stderr: {redact(error_output)}")
                 if stdout_output:
-                    print(f"stdout: {stdout_output}")
+                    print(f"stdout: {redact(stdout_output)}")
 
                 return False
 
@@ -385,7 +399,7 @@ class CertManager:
                   file=sys.stderr)
             return False
         except Exception as e:
-            print(f"Error running certbot: {e}", file=sys.stderr)
+            print(f"Error running certbot: {redact(str(e))}", file=sys.stderr)
             return False
         finally:
             if key is not None:
@@ -491,9 +505,9 @@ class CertManager:
                     print(f"DNS validation failed during renewal")
 
                 if error_output:
-                    print(f"stderr: {error_output}")
+                    print(f"stderr: {redact(error_output)}")
                 if stdout_output:
-                    print(f"stdout: {stdout_output}")
+                    print(f"stdout: {redact(stdout_output)}")
 
                 return False, False
 
@@ -506,7 +520,7 @@ class CertManager:
             )
             return False, False
         except Exception as e:
-            print(f"Error running certbot: {e}", file=sys.stderr)
+            print(f"Error running certbot: {redact(str(e))}", file=sys.stderr)
             return False, False
 
     @classmethod
@@ -720,7 +734,7 @@ class CertManager:
             print("ACME account registration timed out", file=sys.stderr)
             return False
         if result.returncode != 0 or not self.acme_account_exists():
-            print(f"ACME account registration failed: {result.stderr.strip()}", file=sys.stderr)
+            print(f"ACME account registration failed: {redact(result.stderr.strip())}", file=sys.stderr)
             return False
         print(f"✓ ACME account registered with {acme_server()}")
         return True
