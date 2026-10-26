@@ -1,0 +1,8 @@
+
+dstack dev box: full root on this CVM. Development use only.
+
+  /host          host root filesystem
+  docker         talks to the host Docker daemon
+  host-shell     shell in the host OS (all host namespaces)
+  host-shell CMD run CMD on the host, e.g. host-shell journalctl -u docker
+
