@@ -1,0 +1,8 @@
+#!/bin/sh
+# Run a login shell, or the given command, directly on the host: enter
+# every namespace of host PID 1 and chroot to its root. --wdns resolves
+# the directory inside the host mount namespace.
+if [ $# -eq 0 ]; then
+  exec nsenter --target 1 --all --root --wdns=/root -- /bin/bash -l
+fi
+exec nsenter --target 1 --all --root --wdns=/root -- "$@"

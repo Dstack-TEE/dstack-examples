@@ -1,0 +1,9 @@
+Port 1022
+HostKey /etc/ssh/host-keys/ssh_host_ed25519_key
+AllowUsers root
+PermitRootLogin prohibit-password
+AuthenticationMethods publickey
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+Subsystem sftp internal-sftp

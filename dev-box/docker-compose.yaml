@@ -1,0 +1,29 @@
+# dstack dev box: SSH access to the CVM with a full debugging toolset.
+#
+# Sessions run in this container but share the host's PID, network, and
+# UTS namespaces, see the host filesystem at /host, and drive the host
+# Docker daemon. `host-shell` drops into the host OS itself.
+#
+# This gives full root on the CVM. Development/debugging only.
+services:
+  dev-box:
+    image: ghcr.io/dstack-tee/dstack-dev-box:latest
+    restart: unless-stopped
+    privileged: true
+    pid: host
+    network_mode: host
+    uts: host
+    environment:
+      # One or more public keys, newline-separated (authorized_keys format).
+      - SSH_AUTHORIZED_KEYS=${SSH_AUTHORIZED_KEYS}
+    volumes:
+      - /:/host:rslave
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Share the host's devpts so `host-shell` keeps a working terminal.
+      - /dev/pts:/dev/pts
+      - ssh-host-keys:/etc/ssh/host-keys
+      - home:/root
+
+volumes:
+  ssh-host-keys:
+  home:

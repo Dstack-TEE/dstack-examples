@@ -164,6 +164,7 @@ Development and debugging tools. **Not for production.**
 | Example | Description |
 |---------|-------------|
 | [webshell](./webshell) | Web-based shell access for debugging |
+| [dev-box](./dev-box) | SSH, debugging tools, and a host shell for dstack v0.6 CVMs (replaces the removed dev OS image) |
 | [ssh-over-gateway](./ssh-over-gateway) | SSH tunneling through dstack gateway |
 | [tcp-port-forwarding](./tcp-port-forwarding) | Arbitrary TCP port forwarding |
 
