@@ -12,7 +12,7 @@ Add the `dev-box` service from [`docker-compose.yaml`](./docker-compose.yaml) ne
 ```yaml
 services:
   dev-box:
-    image: ghcr.io/dstack-tee/dstack-dev-box:latest
+    image: ghcr.io/dstack-tee/dstack-dev-box:sha-5a930ae@sha256:2191420a255a0adbf5044700b848b0f5fc29c1c24323a1742054409f5f116d99
     restart: unless-stopped
     privileged: true
     pid: host
@@ -91,7 +91,7 @@ The host rootfs is a read-only, dm-verity-protected image, so tools can't be ins
 
 ## Build your own image
 
-The compose file uses `ghcr.io/dstack-tee/dstack-dev-box:latest`, built from this directory by [`build-dev-box.yml`](../.github/workflows/build-dev-box.yml). To add packages, edit the [`Dockerfile`](./Dockerfile), push the image to a registry, and change `image:`. For a quick test, [ttl.sh](https://ttl.sh) holds anonymous images for up to 24 hours:
+The compose file pins `ghcr.io/dstack-tee/dstack-dev-box` by digest, so the attested `app-compose` identifies the exact image. It's built from this directory by [`build-dev-box.yml`](../.github/workflows/build-dev-box.yml), which tags each `main` build `sha-<commit>` and `latest`. To add packages, edit the [`Dockerfile`](./Dockerfile), push the image to a registry, and change `image:`. For a quick test, [ttl.sh](https://ttl.sh) holds anonymous images for up to 24 hours:
 
 ```bash
 docker buildx build --platform linux/amd64 -t ttl.sh/my-dev-box:24h --push .

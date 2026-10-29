@@ -7,7 +7,7 @@
 # This gives full root on the CVM. Development/debugging only.
 services:
   dev-box:
-    image: ghcr.io/dstack-tee/dstack-dev-box:latest
+    image: ghcr.io/dstack-tee/dstack-dev-box:sha-5a930ae@sha256:2191420a255a0adbf5044700b848b0f5fc29c1c24323a1742054409f5f116d99
     restart: unless-stopped
     privileged: true
     pid: host
