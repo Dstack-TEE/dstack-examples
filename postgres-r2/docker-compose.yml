@@ -1,0 +1,138 @@
+# Postgres in a CVM whose disk is disposable.
+#
+# The data directory is a cache. Durability lives in object storage: wal-g ships every WAL
+# segment to an S3-compatible bucket (Cloudflare R2 here), encrypted under a key this app
+# derives from the KMS. A node that loses its disk re-derives that key from its own identity
+# and rebuilds from the archive — nothing outside the enclave ever held the key.
+#
+# Deploy:
+#   phala deploy -n pg-r2 -c docker-compose.yml \
+#     -e AWS_ENDPOINT=https://<account>.r2.cloudflarestorage.com \
+#     -e AWS_ACCESS_KEY_ID=... -e AWS_SECRET_ACCESS_KEY=... \
+#     -e WALG_S3_PREFIX=s3://<bucket>/pg
+#
+# Note there is no POSTGRES_PASSWORD and no encryption key in that command. Both are derived.
+# PG_ROLE defaults to primary. Deploy or replicate THE SAME app with -e PG_ROLE=standby to
+# build a second copy from the archive alone — on a fresh disk here, or on another node via
+# `phala cvms replicate` — which stays in recovery until you SELECT pg_promote(). A different
+# app derives a different key and cannot read this archive; see the README. That is the
+# intended property, not a limitation to work around casually.
+services:
+  postgres:
+    image: postgres:17
+    restart: always
+    stop_grace_period: 60s
+    ports:
+      - "5432:5432"
+    environment:
+      # Where the WAL goes. R2 speaks S3, so wal-g needs no special support — just the
+      # endpoint, path-style addressing, and a region that R2 ignores.
+      WALG_S3_PREFIX: "${WALG_S3_PREFIX:?set WALG_S3_PREFIX, e.g. s3://my-bucket/pg}"
+      AWS_ENDPOINT: "${AWS_ENDPOINT:?set AWS_ENDPOINT}"
+      AWS_ACCESS_KEY_ID: "${AWS_ACCESS_KEY_ID:?}"
+      AWS_SECRET_ACCESS_KEY: "${AWS_SECRET_ACCESS_KEY:?}"
+      AWS_S3_FORCE_PATH_STYLE: "true"
+      AWS_REGION: auto
+      WALG_COMPRESSION_METHOD: lz4
+      # Force a segment even when writes are slow, so the recovery point stays bounded.
+      # This interval IS the RPO: a failover loses whatever has not been archived yet.
+      ARCHIVE_TIMEOUT: "${ARCHIVE_TIMEOUT:-60}"
+      # primary: initdb and archive. standby: build from the archive on a fresh volume (this
+      # node, or another node via `phala cvms replicate`) and stay in recovery until promoted.
+      PG_ROLE: "${PG_ROLE:-primary}"
+      POSTGRES_DB: app
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # The guest agent. This is what makes the keys derivable rather than supplied.
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+    entrypoint:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        WALG_URL=https://github.com/wal-g/wal-g/releases/download/v3.0.9/wal-g-pg-20.04-amd64
+        WALG_SHA=965a7147852435bc4b54f272799b63df826b54ef65cf7c4fc688c82b96c0c4eb
+        SOCK=/var/run/dstack.sock
+        fatal() { echo "[init] FATAL: $$*" >&2; exit 1; }
+
+        # --- derive a key from this app's identity -------------------------------------
+        # GetKey returns 32 bytes of hex for a given path: the same app and path give the
+        # same key on every boot and after a total rebuild, and a different path gives an
+        # unrelated key. So the derivation path carries the domain separation, and a
+        # restored node re-derives its own archive key instead of being issued one.
+        derive() {
+          curl -sf --unix-socket "$$SOCK" -X POST -H 'Content-Type: application/json' \
+            -d "{\"path\":\"$$1\",\"purpose\":\"$$2\"}" http://dstack/GetKey \
+            | sed -n 's/.*"key":"\([0-9a-f]\{64\}\).*/\1/p'
+        }
+
+        apt-get update -qq
+        apt-get install -y -qq --no-install-recommends curl ca-certificates >/dev/null
+
+        [ -S "$$SOCK" ] || fatal "no dstack socket at $$SOCK — this example derives its keys from it"
+        WALG_LIBSODIUM_KEY=$$(derive /pg-r2/walg/v1 walg)
+        POSTGRES_PASSWORD=$$(derive /pg-r2/superuser/v1 password)
+        export WALG_LIBSODIUM_KEY POSTGRES_PASSWORD
+        # Fail closed. A database that would ship plaintext WAL to someone else's bucket
+        # should not start at all — this is the one failure that cannot be a warning.
+        [ $${#WALG_LIBSODIUM_KEY} -eq 64 ] || fatal "key derivation failed — refusing to ship unencrypted WAL"
+        [ $${#POSTGRES_PASSWORD} -eq 64 ] || fatal "password derivation failed"
+        echo "[init] keys derived from the KMS; nothing outside this enclave has held them"
+
+        # --- wal-g, pinned and verified --------------------------------------------------
+        curl -fsSL -o /usr/local/bin/wal-g "$$WALG_URL"
+        echo "$$WALG_SHA  /usr/local/bin/wal-g" | sha256sum -c - >/dev/null \
+          || fatal "wal-g checksum mismatch — refusing to run an unverified binary in a TEE"
+        chmod +x /usr/local/bin/wal-g
+
+        # --- TLS so the connection terminates inside the enclave, not at the gateway -----
+        mkdir -p /etc/pgtls
+        openssl req -x509 -newkey rsa:2048 -nodes -days 90 -subj "/CN=pg-r2" \
+          -keyout /etc/pgtls/server.key -out /etc/pgtls/server.crt 2>/dev/null
+        chown postgres:postgres /etc/pgtls/server.*
+        chmod 600 /etc/pgtls/server.key
+
+        # --- a standby builds from the archive and owes the primary nothing --------------
+        # backup-fetch + standby.signal (not recovery.signal): it stays in recovery,
+        # replaying each new segment as it lands, until someone runs pg_promote(). No
+        # primary_conninfo — the bucket and this app's derived key are its only inputs, so a
+        # standby on another node survives the primary's node dying with it. The 30s retry
+        # keeps a caught-up standby from polling the bucket ~19 HEAD/s at the 5s default.
+        if [ "$${PG_ROLE}" = standby ] && [ ! -s "$$PGDATA/PG_VERSION" ]; then
+          echo "[init] building standby from $$WALG_S3_PREFIX — no connection to the primary"
+          mkdir -p "$$PGDATA"; chown postgres:postgres "$$PGDATA"; chmod 700 "$$PGDATA"
+          gosu postgres wal-g backup-fetch "$$PGDATA" LATEST
+          gosu postgres touch "$$PGDATA/standby.signal"
+          { echo "restore_command = 'wal-g wal-fetch %f %p'";
+            echo "primary_conninfo = ''";
+            echo "wal_retrieve_retry_interval = '30s'"; } \
+            | gosu postgres tee -a "$$PGDATA/postgresql.auto.conf" >/dev/null
+        fi
+
+        # --- take a base backup once the server is up ------------------------------------
+        # WAL alone restores nothing; it needs a base to replay onto. Loudly, because a
+        # silent archiving failure is invisible for exactly as long as it takes to matter.
+        # Primary only: a standby is in recovery and cannot push one; after you promote it,
+        # push a fresh base so its own standby has something to fetch.
+        if [ "$${PG_ROLE}" != standby ]; then
+        (
+          for _ in $$(seq 1 60); do pg_isready -q -U postgres -d postgres && break; sleep 2; done
+          if gosu postgres wal-g backup-list 2>/dev/null | grep -q base_; then
+            echo "[init] base backup already present"
+          elif gosu postgres wal-g backup-push "$$PGDATA"; then
+            echo "[init] initial base backup pushed"
+          else
+            echo "[init] ERROR: backup-push failed — there is nothing to restore onto" >&2
+          fi
+        ) &
+        fi
+
+        exec docker-entrypoint.sh postgres \
+          -c listen_addresses='*' \
+          -c ssl=on -c ssl_cert_file=/etc/pgtls/server.crt -c ssl_key_file=/etc/pgtls/server.key \
+          -c wal_level=replica \
+          -c archive_mode=on \
+          -c "archive_command=wal-g wal-push %p" \
+          -c "archive_timeout=$${ARCHIVE_TIMEOUT}"
+volumes:
+  pgdata:
