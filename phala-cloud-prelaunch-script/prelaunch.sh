@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.22"
+echo "Running Phala Cloud Pre-Launch Script v0.0.21"
 echo "----------------------------------------------"
 set -e
 
