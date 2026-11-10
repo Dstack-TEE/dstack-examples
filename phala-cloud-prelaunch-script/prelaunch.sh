@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "----------------------------------------------"
-echo "Running Phala Cloud Pre-Launch Script v0.0.20"
+echo "Running Phala Cloud Pre-Launch Script v0.0.22"
 echo "----------------------------------------------"
 set -e
 
@@ -95,6 +95,12 @@ echo "Starting login process..."
 # credentials set. Bare "$VAR" throws "unbound variable" under nounset.
 DOCKER_REGISTRY_TARGET="${DSTACK_DOCKER_REGISTRY:-docker.io}"
 
+# dstack-0.6.1 Debian rootfs is read-only. docker login would create
+# $HOME/.docker (/root/.docker), which is not in the writable overlay.
+export DOCKER_CONFIG=/tmp/.docker
+mkdir -p "$DOCKER_CONFIG"
+chmod 700 "$DOCKER_CONFIG"
+
 # Check if Docker credentials exist
 if [[ -n "${DSTACK_DOCKER_USERNAME-}" && -n "${DSTACK_DOCKER_PASSWORD-}" ]]; then
     echo "Docker credentials found"
@@ -137,7 +143,15 @@ elif [[ -n "${DSTACK_AWS_ACCESS_KEY_ID-}" && -n "${DSTACK_AWS_SECRET_ACCESS_KEY-
             notify_host_hoot_error "awscli install failed"
             exit 1
         fi
-        unzip awscliv2.zip &> /dev/null
+        if command -v unzip >/dev/null 2>&1; then
+            unzip awscliv2.zip >/dev/null 2>&1
+        elif command -v busybox >/dev/null 2>&1; then
+            busybox unzip awscliv2.zip >/dev/null 2>&1
+        else
+            echo "ERROR: unzip is not available"
+            notify_host_hoot_error "awscli install failed"
+            exit 1
+        fi
     else
         echo "AWS CLI is already installed: ./aws/dist/aws"
     fi
