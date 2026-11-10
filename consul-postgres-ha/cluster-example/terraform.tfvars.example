@@ -1,0 +1,36 @@
+# Copy to terraform.tfvars and fill in.
+#
+# Defaults below point at the GHCR-published, Sigstore-attested images
+# produced by .github/workflows/consul-postgres-ha-publish.yml. Pin to a
+# specific commit by replacing `:latest` with `:sha-<full-sha>` (40-char
+# git sha) — preferred for prod since `:latest` floats. Verify a tag
+# came from this repo with:
+#
+#   gh attestation verify \
+#     oci://ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-sidecar:latest \
+#     --repo Dstack-TEE/dstack-examples
+#
+# For dev iteration, replace any single line with a `ttl.sh/...:24h`
+# tag from `docker push ttl.sh/<name>-$(date +%s):24h`.
+
+cluster_name           = "demo"
+coordinator_replicas   = 3
+worker_replicas        = 3
+gateway_domain         = "dstack-pha-prod5.phala.network"
+
+mesh_sidecar_image = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-mesh-sidecar:latest"
+webdemo_image      = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-webdemo:latest"
+patroni_image      = "ghcr.io/dstack-tee/dstack-examples/consul-postgres-ha-patroni:latest"
+
+# external_coordinator_host  = "<vultr-ip>"
+# external_signaling_url     = "http://<vultr-ip>:7000"
+# external_turn_secret       = "<hex>"
+
+# Optional: gate Consul client-agent join and Connect service identity
+# registration on dstack TEE attestation.
+# enable_attestation_admission = true
+# consul_management_token      = "<consul-acl-management-token>"
+# dstack_verifier_image        = "dstacktee/dstack-verifier:0.5.9" # Pin by digest in production.
+# kms                          = "phala"
+# admission_expected_kms_public_key defaults to the public key for the
+# default phala KMS backend. Override it when changing kms.
