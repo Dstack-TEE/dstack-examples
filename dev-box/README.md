@@ -35,7 +35,18 @@ volumes:
   home:
 ```
 
-Deploy with your public key or keys in `SSH_AUTHORIZED_KEYS`, in `authorized_keys` format with one key per line. The container exits with an error if the variable is empty.
+## SSH keys
+
+Two channels feed `/root/.ssh/authorized_keys`. They are merged and de-duplicated when the container starts, so a key in either channel gets you in, a key in both is listed once, and a key the platform manages never displaces the one you deployed with.
+
+| Channel | Source | Use it for |
+|---------|--------|------------|
+| `SSH_AUTHORIZED_KEYS` | Environment variable in the compose file | A key you paste at deploy time |
+| `user_config` | The `ssh_authorized_keys` field of the `user_config` Phala Cloud pushes into the guest; the host root is mounted at `/host`, so it reads `/host/dstack/user_config` | Workspace keys the platform keeps in sync |
+
+Both channels grant root. Setting `SSH_AUTHORIZED_KEYS` and changing this app's workspace SSH keys both hand over the CVM, and the dev box trusts every key the platform delivers through `user_config`; there is no switch to ignore that channel today. Which workspace members and roles may change an app's SSH keys is decided by Phala Cloud's key management, not by this example.
+
+Deploy with your public key or keys in `SSH_AUTHORIZED_KEYS`, in `authorized_keys` format with one key per line:
 
 ```bash
 phala deploy -n my-app -c docker-compose.yaml \
@@ -43,16 +54,20 @@ phala deploy -n my-app -c docker-compose.yaml \
   -e SSH_AUTHORIZED_KEYS="$(cat ~/.ssh/id_ed25519.pub)"
 ```
 
-On a plain dstack deployment, set `SSH_AUTHORIZED_KEYS` as an encrypted environment variable.
+On a plain dstack deployment, set `SSH_AUTHORIZED_KEYS` as an encrypted environment variable. If your keys live in the Phala Cloud workspace instead, drop the `environment:` entry from the service: the dev box still picks them up from `user_config`.
+
+`user_config` is optional and read defensively: a missing file, invalid JSON, a missing field, or an empty value all mean "this channel has no keys". The container exits with an error only when both channels turn up empty.
+
+Keys added to your Phala Cloud workspace reach the guest's `user_config` only at CVM boot, so a workspace key change works on the next start of the VM, not immediately.
 
 ## Connect
 
-`sshd` listens on port `1022`. Reach it through the dstack-gateway by adding this to `~/.ssh/config`:
+`sshd` listens on port `22`, the same as the 0.5.x dev image. Reach it through the dstack-gateway by adding this to `~/.ssh/config`:
 
 ```
 Host my-app
     User root
-    ProxyCommand openssl s_client -quiet -connect <app-id>-1022.<gateway-domain>:443 -servername <app-id>-1022.<gateway-domain> -verify_hostname <app-id>-1022.<gateway-domain> -verify_return_error
+    ProxyCommand openssl s_client -quiet -connect <app-id>-22.<gateway-domain>:443 -servername <app-id>-22.<gateway-domain> -verify_hostname <app-id>-22.<gateway-domain> -verify_return_error
 ```
 
 Replace `<app-id>` with your app ID and `<gateway-domain>` with the gateway base domain of the node the CVM runs on, for example `dstack-pha-prod15.phala.network`. Change `443` if your gateway uses a different port.
