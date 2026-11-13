@@ -19,6 +19,11 @@ if [ -r /etc/dstack-ingress/build-info ]; then
         /etc/dstack-ingress/build-info
 fi
 
+# Build features of the haproxy binary (splice support, TLS library, exact
+# version). Build flags like +LINUX_SPLICE change forwarding behavior, and
+# incident response should not have to guess them from an image digest.
+haproxy -vv
+
 source /scripts/functions.sh
 source /scripts/haproxy-lib.sh
 
@@ -28,6 +33,19 @@ MAXCONN=${MAXCONN:-4096}
 TIMEOUT_CONNECT=${TIMEOUT_CONNECT:-10s}
 TIMEOUT_CLIENT=${TIMEOUT_CLIENT:-86400s}
 TIMEOUT_SERVER=${TIMEOUT_SERVER:-86400s}
+# Unset, a tunnel (every accepted TCP connection) falls back to the
+# client/server timeouts; pinning the default to TIMEOUT_CLIENT keeps that
+# behavior while making the knob explicit.
+TIMEOUT_TUNNEL=${TIMEOUT_TUNNEL:-$TIMEOUT_CLIENT}
+# Log at connection accept instead of at session end: a session that hangs
+# or outlives the container still leaves a line, but its timers/bytes are
+# incomplete. Off by default because the end-of-session line is the one
+# with the termination state.
+LOG_ASAP=${LOG_ASAP:-false}
+# Off-box log copy; see the warning below before setting it.
+SYSLOG_SERVER=${SYSLOG_SERVER:-}
+# Loopback-only Prometheus exporter; off when empty.
+METRICS_PORT=${METRICS_PORT:-}
 EVIDENCE_SERVER=${EVIDENCE_SERVER:-true}
 EVIDENCE_PORT=${EVIDENCE_PORT:-80}
 ALPN=${ALPN:-}
@@ -116,6 +134,26 @@ fi
 if ! TIMEOUT_SERVER=$(sanitize_haproxy_timeout "$TIMEOUT_SERVER" "TIMEOUT_SERVER"); then
     exit 1
 fi
+if ! TIMEOUT_TUNNEL=$(sanitize_haproxy_timeout "$TIMEOUT_TUNNEL" "TIMEOUT_TUNNEL"); then
+    exit 1
+fi
+if ! LOG_ASAP=$(sanitize_boolean "$LOG_ASAP" "LOG_ASAP"); then
+    exit 1
+fi
+if [ -n "$SYSLOG_SERVER" ]; then
+    if ! SYSLOG_SERVER=$(sanitize_syslog_server "$SYSLOG_SERVER"); then
+        exit 1
+    fi
+    # The traffic log carries client addresses, SNI and timing metadata. In
+    # the TEE threat model the host operator is an untrusted party, so this
+    # copy must go to a collector the *tenant* controls -- HAProxy speaks
+    # UDP syslog only, and a plaintext hop to somewhere inside the tenant's
+    # own network is the tenant's call to make.
+    echo "Warning: SYSLOG_SERVER ships traffic metadata (client IPs, SNI, timings) off this CVM; make sure $SYSLOG_SERVER is a collector you control" >&2
+fi
+if [ -n "$METRICS_PORT" ] && ! METRICS_PORT=$(sanitize_port "$METRICS_PORT" "METRICS_PORT"); then
+    exit 1
+fi
 if ! EVIDENCE_SERVER=$(sanitize_boolean "$EVIDENCE_SERVER" "EVIDENCE_SERVER"); then
     exit 1
 fi
@@ -171,7 +209,8 @@ fi
 # Everything from here on belongs to one mode. Exported so the mode script and
 # the helpers it invokes see the sanitized values.
 export PORT DOMAIN DOMAINS GATEWAY_DOMAIN TARGET_ENDPOINT ROUTING_MAP TXT_PREFIX MAXCONN
-export TIMEOUT_CONNECT TIMEOUT_CLIENT TIMEOUT_SERVER EVIDENCE_SERVER EVIDENCE_PORT ALPN
+export TIMEOUT_CONNECT TIMEOUT_CLIENT TIMEOUT_SERVER TIMEOUT_TUNNEL LOG_ASAP SYSLOG_SERVER METRICS_PORT
+export EVIDENCE_SERVER EVIDENCE_PORT ALPN
 export ACCEPT_PROXY_PROTOCOL SEND_PROXY_PROTOCOL
 export ACME_EMAIL ACME_STAGING DETERMINISTIC_TLS_KEY RENEW_INTERVAL RENEW_DAYS_BEFORE
 export DNS_SETUP_TIMEOUT DNS_SETUP_INTERVAL DNS_SETUP_MODE DNS_WEBHOOK_TIMEOUT

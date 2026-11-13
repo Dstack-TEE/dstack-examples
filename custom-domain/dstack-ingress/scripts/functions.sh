@@ -69,6 +69,29 @@ sanitize_target_endpoint() {
     fi
 }
 
+# A UDP syslog target, host:port. Reuses the host and port rules so a value
+# that would corrupt the generated haproxy config (whitespace, quotes, extra
+# fields) cannot reach it. Bracketed IPv6 ([::1]:514) works; bare IPv6 does
+# not, matching how HAProxy writes log targets.
+sanitize_syslog_server() {
+    local candidate="$1"
+    local host port
+    if [[ "$candidate" == \[*\]:* ]]; then
+        host="${candidate%]:*}]"
+        port="${candidate##*:}"
+    else
+        host="${candidate%:*}"
+        port="${candidate##*:}"
+    fi
+    if [ "$host" = "$candidate" ] || [ -z "$port" ] || [ "$port" = "$candidate" ]; then
+        echo "Error: Invalid SYSLOG_SERVER value: $candidate (must be host:port)" >&2
+        return 1
+    fi
+    host=$(sanitize_host "$host" SYSLOG_SERVER) || return 1
+    port=$(sanitize_port "$port" SYSLOG_SERVER) || return 1
+    echo "${host}:${port}"
+}
+
 sanitize_dns_label() {
     local candidate="$1"
     if [ -z "$candidate" ]; then
