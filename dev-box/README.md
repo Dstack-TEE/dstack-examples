@@ -12,7 +12,7 @@ Add the `dev-box` service from [`docker-compose.yaml`](./docker-compose.yaml) ne
 ```yaml
 services:
   dev-box:
-    image: ghcr.io/dstack-tee/dstack-dev-box:sha-5a930ae@sha256:2191420a255a0adbf5044700b848b0f5fc29c1c24323a1742054409f5f116d99
+    image: ghcr.io/dstack-tee/dstack-dev-box:sha-7725235@sha256:0dc661ea51fcbd70007d117b9e60883d9a96bac510a80683f5bdd6b7947b0291
     restart: unless-stopped
     privileged: true
     pid: host
