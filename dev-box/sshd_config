@@ -1,4 +1,4 @@
-Port 1022
+Port 22
 HostKey /etc/ssh/host-keys/ssh_host_ed25519_key
 AllowUsers root
 PermitRootLogin prohibit-password

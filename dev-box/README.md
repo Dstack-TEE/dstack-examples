@@ -47,12 +47,12 @@ On a plain dstack deployment, set `SSH_AUTHORIZED_KEYS` as an encrypted environm
 
 ## Connect
 
-`sshd` listens on port `1022`. Reach it through the dstack-gateway by adding this to `~/.ssh/config`:
+`sshd` listens on port `22`, the same as the 0.5.x dev image. Reach it through the dstack-gateway by adding this to `~/.ssh/config`:
 
 ```
 Host my-app
     User root
-    ProxyCommand openssl s_client -quiet -connect <app-id>-1022.<gateway-domain>:443 -servername <app-id>-1022.<gateway-domain> -verify_hostname <app-id>-1022.<gateway-domain> -verify_return_error
+    ProxyCommand openssl s_client -quiet -connect <app-id>-22.<gateway-domain>:443 -servername <app-id>-22.<gateway-domain> -verify_hostname <app-id>-22.<gateway-domain> -verify_return_error
 ```
 
 Replace `<app-id>` with your app ID and `<gateway-domain>` with the gateway base domain of the node the CVM runs on, for example `dstack-pha-prod15.phala.network`. Change `443` if your gateway uses a different port.
