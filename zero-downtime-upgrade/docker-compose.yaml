@@ -1,0 +1,200 @@
+services:
+  kv:
+    image: node:22-slim@sha256:e9f565d32859f0cbfb52125eafe8be39390f24dac302dc3cdf566e8ba3ab21ee
+    restart: unless-stopped
+    command: ["node", "/app/server.mjs"]
+    ports:
+      - "8080:8080"
+    environment:
+      - APP_VERSION=1
+      - PREDECESSOR_URL=${PREDECESSOR_URL:-}
+      - DORMANT=${DORMANT:-}
+      - GATEWAY_BASE=${GATEWAY_BASE:-}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+      - kv:/data
+    configs:
+      - source: server
+        target: /app/server.mjs
+
+volumes:
+  kv:
+
+configs:
+  server:
+    content: |
+      // A key-value server that can hand its state and its writer role to a successor CVM.
+      // Roles: writer serves locally; follower forwards to its predecessor until it takes over;
+      // retired forwards to its successor. Whichever instance the gateway picks, the writer answers.
+      // DORMANT makes a follower forward without taking over, for a replica that waits for its new compose.
+      import http from 'node:http'
+      import fs from 'node:fs'
+      import crypto from 'node:crypto'
+
+      const env = process.env
+      const PORT = Number(env.PORT || 8080)
+      const DATA = env.DATA_FILE || '/data/kv.json'
+      const SOCK = env.DSTACK_SOCK || '/var/run/dstack.sock'
+      const HEALTH = env.HEALTH_FILE || ''
+      const ABORT_MS = 15000
+
+      let kv = {}
+      let version = 0
+      let role = env.PREDECESSOR_URL ? 'follower' : 'writer'
+      let target = env.PREDECESSOR_URL || ''
+      let hold = null
+      let pending = null
+      let committed = ''
+
+      // The role on disk wins over env: after an upgrade the env still names a predecessor that is gone.
+      if (fs.existsSync(DATA)) ({ kv, version, role, target } = JSON.parse(fs.readFileSync(DATA, 'utf8')))
+
+      function dstack(method, body) {
+        return new Promise((resolve, reject) => {
+          const req = http.request({ socketPath: SOCK, path: '/' + method, method: 'POST',
+            headers: { 'content-type': 'application/json' } }, res => {
+            let s = ''
+            res.on('data', d => { s += d })
+            res.on('end', () => res.statusCode === 200 ? resolve(JSON.parse(s)) : reject(new Error(method + ' ' + res.statusCode + ' ' + s)))
+          })
+          req.on('error', reject)
+          req.end(JSON.stringify(body))
+        })
+      }
+
+      // Same app_id, same key: only CVMs running an allowed compose of this app can derive it.
+      const key = Buffer.from((await dstack('GetKey', { path: 'zero-downtime/handover' })).key.replace(/^0x/, ''), 'hex').subarray(0, 32)
+      const mac = s => crypto.createHmac('sha256', key).update(s).digest('hex')
+      function seal(obj, aad) {
+        const iv = crypto.randomBytes(12)
+        const c = crypto.createCipheriv('aes-256-gcm', key, iv).setAAD(Buffer.from(aad))
+        const ct = Buffer.concat([c.update(JSON.stringify(obj)), c.final()])
+        return { iv: iv.toString('hex'), ct: ct.toString('hex'), tag: c.getAuthTag().toString('hex') }
+      }
+      function open(box, aad) {
+        const d = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(box.iv, 'hex')).setAAD(Buffer.from(aad))
+        d.setAuthTag(Buffer.from(box.tag, 'hex'))
+        return JSON.parse(Buffer.concat([d.update(Buffer.from(box.ct, 'hex')), d.final()]).toString())
+      }
+      async function signedPost(url, obj) {
+        const body = JSON.stringify(obj)
+        const r = await fetch(url, { method: 'POST', body, headers: { 'x-mac': mac(body) } })
+        if (r.status !== 200) throw Object.assign(new Error(url + ' ' + r.status + ' ' + await r.text()), { status: r.status })
+        return r.json()
+      }
+
+      function save() {
+        fs.writeFileSync(DATA + '.tmp', JSON.stringify({ kv, version, role, target }))
+        fs.renameSync(DATA + '.tmp', DATA)
+      }
+      function writeHealth() {
+        if (HEALTH) fs.writeFileSync(HEALTH, (role === 'writer' ? 'healthy' : 'unhealthy') + '\n' + Math.floor(Date.now() / 1000) + '\n')
+      }
+      setInterval(writeHealth, 5000)
+      writeHealth()
+
+      async function selfUrl() {
+        if (env.SELF_URL) return env.SELF_URL
+        const info = await dstack('Info', {})
+        return 'https://' + info.instance_id + '-' + PORT + '.' + env.GATEWAY_BASE
+      }
+
+      // Writer side of the handover. begin freezes writes and returns sealed state; commit
+      // makes this instance forward to the successor; no commit within ABORT_MS resumes writing.
+      function begin(req) {
+        if (role !== 'writer' || pending) return [409, { error: 'not the writer, or a handover is running' }]
+        let release
+        hold = new Promise(r => { release = r })
+        const timer = setTimeout(() => { pending = null; hold = null; release() }, ABORT_MS)
+        pending = { nonce: req.nonce, timer, release }
+        return [200, { box: seal({ kv, version }, req.nonce) }]
+      }
+      function commit(req) {
+        if (role === 'retired' && committed === req.nonce) return [200, { ok: true }]
+        if (!pending || pending.nonce !== req.nonce) return [409, { error: 'no matching handover' }]
+        committed = req.nonce
+        clearTimeout(pending.timer)
+        role = 'retired'
+        target = req.successor
+        save()
+        pending.release()
+        pending = null
+        hold = null
+        writeHealth()
+        return [200, { ok: true }]
+      }
+
+      // Successor side: runs once at boot when PREDECESSOR_URL is set, retried until it succeeds.
+      async function takeOver() {
+        const me = await selfUrl()
+        for (;;) {
+          const nonce = crypto.randomBytes(16).toString('hex')
+          let release
+          hold = new Promise(r => { release = r })
+          try {
+            const { box } = await signedPost(target + '/_handover/begin', { nonce })
+            const state = open(box, nonce)
+            for (let i = 0; ; i++) {
+              try { await signedPost(target + '/_handover/commit', { nonce, successor: me }); break }
+              catch (e) { if (e.status === 409 || i === 4) throw e; await new Promise(r => setTimeout(r, 1000)) }
+            }
+            ;({ kv, version } = state)
+            role = 'writer'
+            target = ''
+            save()
+            hold = null
+            release()
+            writeHealth()
+            console.log('took over as writer at version', version)
+            return
+          } catch (e) {
+            hold = null
+            release()
+            console.log('handover failed, retrying:', e.message)
+            await new Promise(r => setTimeout(r, 3000))
+          }
+        }
+      }
+
+      async function forward(req, res, body) {
+        const hops = Number(req.headers['x-zdt-hops'] || 0)
+        if (hops > 3) return send(res, 508, { error: 'forwarding loop' })
+        const r = await fetch(target + req.url, { method: req.method, body: req.method === 'GET' ? undefined : body,
+          headers: { 'x-zdt-hops': String(hops + 1) } })
+        res.writeHead(r.status, { 'content-type': r.headers.get('content-type') || 'application/json' })
+        res.end(Buffer.from(await r.arrayBuffer()))
+      }
+      function send(res, status, obj) {
+        res.writeHead(status, { 'content-type': 'application/json' })
+        res.end(JSON.stringify(obj))
+      }
+
+      const server = http.createServer(async (req, res) => {
+        let body = ''
+        for await (const d of req) body += d
+        try {
+          if (req.url === '/_status') return send(res, 200, { app: env.APP_VERSION, role, version, keys: Object.keys(kv).length })
+          if (req.url.startsWith('/_handover/')) {
+            if (req.headers['x-mac'] !== mac(body)) return send(res, 401, { error: 'bad mac' })
+            const [status, out] = (req.url === '/_handover/begin' ? begin : commit)(JSON.parse(body))
+            return send(res, status, out)
+          }
+          if (hold) await hold
+          if (role !== 'writer') return await forward(req, res, body)
+          const k = decodeURIComponent(req.url.replace(/^\/kv\//, ''))
+          if (!req.url.startsWith('/kv/')) return send(res, 404, { error: 'use /kv/<key>' })
+          if (req.method === 'PUT') {
+            kv[k] = body
+            version++
+            save()
+            return send(res, 200, { version })
+          }
+          if (req.method === 'GET') return k in kv ? send(res, 200, { value: kv[k], version }) : send(res, 404, { version })
+          return send(res, 405, { error: 'GET or PUT' })
+        } catch (e) {
+          send(res, 502, { error: e.message })
+        }
+      }).listen(PORT, () => console.log('listening on', PORT, 'as', role))
+      process.on('SIGTERM', () => server.close(() => process.exit(0)))
+
+      if (role === 'follower' && !env.DORMANT) takeOver()
