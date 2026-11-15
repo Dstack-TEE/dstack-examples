@@ -74,7 +74,7 @@ stand-in gateway.
 
 ## Results
 
-On Phala Cloud (prod7, dstack 0.5.12, `tdx.small`), with `client.mjs` running throughout:
+On Phala Cloud (prod7, `tdx.small`, the `dstack-dev-0.5.12` image Phala picked by default), with `client.mjs` running throughout:
 
 | Upgrade | Failed requests | Longest request |
 |---------|-----------------|-----------------|
