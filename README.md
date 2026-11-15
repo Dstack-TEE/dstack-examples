@@ -233,6 +233,7 @@ Implementation details and infrastructure patterns.
 | Example | Description |
 |---------|-------------|
 | [launcher](./launcher) | Generic launcher pattern for Docker Compose apps |
+| [zero-downtime-upgrade](./zero-downtime-upgrade) | Upgrade a stateful app by handing over to a second CVM |
 | [prelaunch-script](./prelaunch-script) | Pre-launch script patterns (Phala Cloud) |
 | [private-docker-image-deployment](./private-docker-image-deployment) | Using private Docker registries |
 | [attestation/rtmr3-based](./attestation/rtmr3-based) | RTMR3-based attestation (legacy) |
