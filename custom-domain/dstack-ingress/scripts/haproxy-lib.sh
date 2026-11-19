@@ -7,6 +7,16 @@
 # reload are the same either way, so they live here and each mode composes them.
 # Nothing in this file branches on the mode; callers pass what differs.
 
+# Where the rendered configuration goes. Overridable so the generation logic
+# can be exercised off-container (scripts/tests/test_observability_config.sh);
+# production
+# never sets this.
+HAPROXY_CFG="${HAPROXY_CFG:-/etc/haproxy/haproxy.cfg}"
+
+# entrypoint.sh pins this to TIMEOUT_CLIENT; default it here too so the emit
+# functions stay callable without the entrypoint (as the tests call them).
+TIMEOUT_TUNNEL="${TIMEOUT_TUNNEL:-${TIMEOUT_CLIENT:-}}"
+
 # Parse TARGET_ENDPOINT into host:port for haproxy backend
 parse_target_endpoint() {
     local endpoint="$1"
@@ -23,11 +33,36 @@ parse_target_endpoint() {
 
 # global + defaults. Always the first thing written to haproxy.cfg.
 haproxy_emit_global() {
-    cat <<EOF >/etc/haproxy/haproxy.cfg
+    # Optional second log destination, off the box. Off by default on
+    # purpose: the log carries client addresses, SNI and timing metadata,
+    # and in the TEE threat model the host operator is not trusted with
+    # tenant traffic metadata. SYSLOG_SERVER must point at a collector the
+    # tenant controls (HAProxy speaks UDP syslog only; TLS needs a sidecar).
+    local syslog_line=""
+    if [ -n "${SYSLOG_SERVER:-}" ]; then
+        syslog_line="
+    log ${SYSLOG_SERVER} format rfc5424 local0"
+    fi
+    local logasap_line=""
+    if [ "${LOG_ASAP:-false}" = "true" ]; then
+        logasap_line="
+    option  logasap"
+    fi
+    cat <<EOF >"$HAPROXY_CFG"
 global
-    log stdout format raw local0
+    log stdout format raw local0${syslog_line}
+    log-tag dstack-ingress
     maxconn ${MAXCONN}
     pidfile /var/run/haproxy/haproxy.pid
+    # Runtime API for incident response: show sess / show fd / show info
+    # answer "is this flow still alive here, and how much is buffered" while
+    # it is happening. The operator level covers every read-only command;
+    # the admin-level commands (shutdown session, set server, clear table)
+    # stay disabled. Unix socket, root-only, inside the container: access
+    # equals whoever may exec into the container, i.e. the tenant. Never
+    # volume-mount this out of the CVM.
+    stats socket /var/run/haproxy/admin.sock mode 660 level operator
+    stats timeout 30s
     ssl-default-bind-ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305
     ssl-default-bind-ciphersuites TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256
     ssl-default-bind-options ssl-min-ver TLSv1.2 no-tls-tickets
@@ -36,11 +71,45 @@ global
 defaults
     log     global
     mode    tcp
-    option  tcplog
+    # Default tcplog fields plus a per-connection id and the TLS parameters,
+    # so a terminated long-lived session can be matched to a domain and a
+    # TLS stack after the fact. The custom log-format replaces option tcplog.
+    # %ts is the two-character termination state; its first letter names
+    # which side's timer or close ended the session (lowercase = a timeout:
+    # c client, s server).
+    unique-id-format %{+X}o\ %ci:%cp_%fi:%fp_%Ts_%rt:%pid
+    log-format "%ci:%cp [%tr] %ft %b/%s %Tw/%Tc/%Tt %B %ts %ac/%fc/%bc/%sc/%rc %sq/%bq id=%ID sni=%[ssl_fc_sni] sslv=%sslv sslc=%sslc"${logasap_line}
     timeout connect ${TIMEOUT_CONNECT}
     timeout client  ${TIMEOUT_CLIENT}
     timeout server  ${TIMEOUT_SERVER}
+    # Tunnels: in TCP mode a connection becomes a tunnel as soon as no
+    # analyzer remains attached, and the tunnel timeout then supersedes the
+    # client/server timeouts. Unset, the fallback is implicit; pinning it to
+    # TIMEOUT_CLIENT keeps that behavior but makes the effective value
+    # visible in the rendered config.
+    timeout tunnel  ${TIMEOUT_TUNNEL}
 
+EOF
+}
+
+# Optional Prometheus exporter, loopback only. The built-in service has no
+# authentication: binding it beyond loopback would serve per-connection
+# metadata to everything that can route to it, which on the dstack WireGuard
+# network includes other tenants' CVMs. Scrape it from a tenant-controlled
+# sidecar inside this CVM, or not at all. Scrapes are logged (httplog): an
+# unlogged HTTP listener would draw a config warning on every reload, and a
+# steady one-line-per-scrape trail doubles as proof the scrape path works.
+haproxy_emit_metrics() {
+    if [ -z "${METRICS_PORT:-}" ]; then
+        return 0
+    fi
+    cat <<EOF >>"$HAPROXY_CFG"
+frontend metrics_in
+    bind 127.0.0.1:${METRICS_PORT}
+    mode http
+    option httplog
+    option dontlognull
+    http-request use-service prometheus-exporter
 EOF
 }
 
@@ -59,13 +128,13 @@ haproxy_emit_tls_frontend() {
     local bind_spec="$1"
     # "crt <dir>" loads all PEM files from the directory.
     # ALPN is appended conditionally via ${ALPN:+ alpn ${ALPN}}.
-    cat <<EOF >>/etc/haproxy/haproxy.cfg
+    cat <<EOF >>"$HAPROXY_CFG"
 frontend tls_in
     bind ${bind_spec} ssl crt /etc/haproxy/certs/${ALPN:+ alpn ${ALPN}}
 EOF
 
     if [ "$EVIDENCE_SERVER" = "true" ]; then
-        cat <<'EVIDENCE_BLOCK' >>/etc/haproxy/haproxy.cfg
+        cat <<'EVIDENCE_BLOCK' >>"$HAPROXY_CFG"
 
     # Route /evidences and /evidences/... to the local evidence HTTP
     # server. The byte after the path has to be checked too, or an app
@@ -93,7 +162,7 @@ EVIDENCE_BLOCK
 # Append the evidence backend block to haproxy.cfg
 haproxy_emit_evidence_backend() {
     if [ "$EVIDENCE_SERVER" = "true" ]; then
-        cat <<EOF >>/etc/haproxy/haproxy.cfg
+        cat <<EOF >>"$HAPROXY_CFG"
 
 backend be_evidence
     mode http
@@ -108,7 +177,7 @@ haproxy_emit_backends_single() {
     local target_hostport
     target_hostport=$(parse_target_endpoint "$TARGET_ENDPOINT")
 
-    cat <<EOF >>/etc/haproxy/haproxy.cfg
+    cat <<EOF >>"$HAPROXY_CFG"
 
     default_backend be_upstream
 
@@ -156,15 +225,15 @@ backend ${be_name}
     server s1 ${target}$(haproxy_send_proxy)"
     done <<< "$routing_map_normalized"
 
-    echo "${exact_rules}${wildcard_rules}" >> /etc/haproxy/haproxy.cfg
+    echo "${exact_rules}${wildcard_rules}" >> "$HAPROXY_CFG"
 
     # Default to first backend in ROUTING_MAP
     if [ -n "$first_be_name" ]; then
-        echo "" >> /etc/haproxy/haproxy.cfg
-        echo "    default_backend ${first_be_name}" >> /etc/haproxy/haproxy.cfg
+        echo "" >> "$HAPROXY_CFG"
+        echo "    default_backend ${first_be_name}" >> "$HAPROXY_CFG"
     fi
 
-    echo "$backend_sections" >> /etc/haproxy/haproxy.cfg
+    echo "$backend_sections" >> "$HAPROXY_CFG"
 }
 
 # Parse and validate ROUTING_MAP (newline- or comma-separated domain=target
@@ -214,6 +283,7 @@ haproxy_emit_backends() {
         haproxy_emit_backends_single
     fi
     haproxy_emit_evidence_backend
+    haproxy_emit_metrics
 }
 
 haproxy_reload() {

@@ -123,7 +123,7 @@ txt_record_value() { echo "${DSTACK_INSTANCE_ID}:${PORT}"; }
 # else goes to the real TLS frontend on loopback. PROXY protocol carries the
 # client address across that hop so the backend still sees the real peer.
 emit_peek_frontend() {
-    cat <<EOF >>/etc/haproxy/haproxy.cfg
+    cat <<EOF >>"$HAPROXY_CFG"
 frontend tls_peek
     bind :${PORT}$(haproxy_accept_proxy)
     tcp-request inspect-delay 5s

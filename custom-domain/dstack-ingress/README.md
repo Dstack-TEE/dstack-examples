@@ -200,6 +200,10 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `TIMEOUT_CONNECT` | `10s` | Backend connect timeout |
 | `TIMEOUT_CLIENT` | `86400s` | Client-side timeout (24h for long-lived connections) |
 | `TIMEOUT_SERVER` | `86400s` | Server-side timeout |
+| `TIMEOUT_TUNNEL` | value of `TIMEOUT_CLIENT` | Tunnel timeout. In TCP mode every accepted connection becomes a tunnel, so this supersedes the client/server timeouts for established connections; the default keeps the previous behavior |
+| `LOG_ASAP` | `false` | Log at connection accept instead of at session end. A session that hangs past the container's lifetime still leaves a line, but its timers and byte counts are incomplete — the end-of-session line is the one with the termination state |
+| `SYSLOG_SERVER` | | Off-box copy of the traffic log, `host:port` (UDP syslog). See [Observability](#observability) before enabling: the log carries client addresses, SNI and timing metadata, and HAProxy speaks plaintext UDP syslog only — point it at a collector you control |
+| `METRICS_PORT` | | Prometheus exporter on `127.0.0.1:<port>`. Loopback only, deliberately: the built-in service has no authentication. See [Observability](#observability) |
 | `EVIDENCE_SERVER` | `true` | Serve evidence files at `/evidences/` on the TLS port. Set `false` for backends whose server speaks first — see [Evidence & Attestation](#evidence--attestation) |
 | `EVIDENCE_PORT` | `80` | Internal port for evidence HTTP server |
 | `ALPN` | | TLS ALPN protocols (e.g. `h2,http/1.1`). Only set if backends support h2c |
@@ -210,6 +214,54 @@ otherwise arbitrary — the gateway answers every name under its domain.
 | `CERTBOT_TIMEOUT` | propagation wait + 180s, never below 300s | Seconds a single certbot run may take. The default is derived from the provider's propagation wait (or `DELEGATION_PROPAGATION_SECONDS`), which is what dominates it. Set this only if a run needs longer still; an explicit value is used as given, even below 300s |
 
 Settings are checked at startup, and a bad value stops the container with an error naming the variable: booleans must be exactly `true` or `false`, ports 1-65535 without leading zeros, counts and intervals whole numbers, and every `DOMAINS` entry a valid hostname or `*.` wildcard.
+
+## Observability
+
+What a session did is reconstructable from the traffic log; what a session is
+doing right now is answerable through the runtime API. Both are designed
+around the TEE trust boundary: everything stays inside the CVM unless you
+explicitly ship it out, and only you (whoever may exec into the container)
+can read it.
+
+**Traffic log** (stdout): the extended TCP log format records, per session,
+the client and backend, the three timers (`Tw/Tc/Tt`), byte count, the
+two-character termination state, a per-connection id, and the TLS SNI,
+version and cipher:
+
+```
+127.0.0.1:64160 [14/Nov/2026:05:06:15.026] tls_in~ be_upstream/app1 6/3/8 5 CD 1/1/0/0/0 0/0 id=7F000001:FAA0_... sni=rep.example.com sslv=TLSv1.3 sslc=TLS_AES_128_GCM_SHA256
+```
+
+The termination state is the field that matters when sessions die young:
+its first letter names which side ended the session — uppercase `C`/`S` =
+the client/server closed or aborted, lowercase `c`/`s` = HAProxy's own
+client/server timeout expired — and the second letter the phase (`D` =
+data). The full table is section 8.5 of the HAProxy configuration manual.
+
+**Runtime API**: a stats socket at `/var/run/haproxy/admin.sock`, operator
+level — `show sess`, `show fd`, `show info` and the other read-only commands
+work; the destructive admin commands (shutdown session, set server, clear
+counters) are disabled. Example: `docker exec <container> sh -c 'echo show
+sess | nc -U /var/run/haproxy/admin.sock'`.
+
+**Metrics**: `METRICS_PORT=8405` serves the built-in Prometheus exporter on
+`127.0.0.1:8405`. The exporter has no authentication, so the bind is pinned
+to loopback — on the dstack WireGuard network a wider bind would be
+reachable by other tenants' CVMs. Scrape it from a sidecar in your own
+compose file if you want it collected.
+
+**Off-box logs**: `SYSLOG_SERVER=host:port` adds a UDP syslog copy. Container
+logs die with the container, and a CVM restart loses them entirely, so an
+off-box copy is the only way to keep the last minutes of a crashing
+deployment — but the log carries your clients' metadata, HAProxy speaks
+plaintext UDP syslog only, and in the TEE threat model the host operator is
+not trusted with it. Ship to a collector you control; for anything further,
+run a logging sidecar (vector, fluent-bit) in your own compose file.
+
+**Build identification**: startup prints the image's source revision (from
+its OCI labels) and `haproxy -vv`, so the exact HAProxy version and its
+build flags (e.g. splice support) are in the log before the first
+connection.
 
 For DNS provider credentials, see [DNS_PROVIDERS.md](DNS_PROVIDERS.md).
 
