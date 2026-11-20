@@ -1,0 +1,105 @@
+# Coordinator compose template — peer-VIP / service-VIP layout.
+#
+# A coordinator CVM runs exactly one container: the consolidated
+# `sidecar` image with ROLE=coordinator, plus an optional verifier
+# sidecar for attestation admission. Inside the consolidated sidecar:
+#
+#   bootstrap-secrets  one-shot init — derives per-CVM secrets from
+#                      the dstack KMS, writes /run/instance/info.json
+#                      (identity only — no per-protocol ports).
+#   mesh-conn          QUIC-on-pion/ICE overlay (binds the static
+#                      infra-port allowlist on every other peer's VIP).
+#   consul             Server agent (`-server -bootstrap-expect=N -ui`),
+#                      joins peer coordinators via mesh-conn-forwarded
+#                      VIPs (127.50.0.<coord-vip>:8301). Envoy is NOT
+#                      started here — coordinators don't host any
+#                      Connect-mTLS workload.
+#
+# coturn + signaling that earlier coordinator templates carried have
+# been removed: the cluster uses an external (Vultr) coordinator box
+# for both — see consul-postgres-ha/coordinator/docker-compose.yaml —
+# configured into each peer's mesh-conn via SIGNALING_URL / TURN_HOST /
+# TURN_SHARED_SECRET. The dstack-coordinator's local copies were never
+# reachable from outside (Phala dstack apps don't have UDP ingress
+# yet), so they were dead code burning CPU. When/if UDP ingress lands,
+# re-adding them is one small PR.
+#
+# Per-CVM secrets policy: nothing on the persisted disk holds secret
+# material. /run/secrets/* is tmpfs (gone on reboot, re-derived on
+# next boot from getKey()). /consul/data IS persisted but only
+# contains catalog, KV, and Raft state — no gossip key material.
+
+services:
+  sidecar:
+    image: ${MESH_SIDECAR_IMAGE}
+    network_mode: host
+    restart: on-failure
+    # NET_ADMIN: required for `ip addr add 127.50.0.<n>/32 dev lo` at
+    # entrypoint. Loopback-only, no external interface touched.
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - ROLE=coordinator
+      - CLUSTER_NAME=${CLUSTER_NAME}
+      - PEERS_JSON=${PEERS_JSON}
+      # SERVICES_JSON is the same content workers see — same shape, same
+      # source-of-truth (local.services in cluster.tf). Coordinators
+      # don't run Envoy sidecars, but coord-0 needs the service list so
+      # its config-entry writer can emit per-service service-resolver
+      # entries + intentions on cluster bringup. Without this, the
+      # config-entry writer only writes proxy-defaults/global and the
+      # whole Connect routing layer ends up with no resolvers, which
+      # manifests downstream as replicas' pg_basebackup connections
+      # closing on accept (empty EDS endpoint set).
+      - SERVICES_JSON=${SERVICES_JSON}
+      # COORDINATOR_ORDINAL is per-CVM (0..N-1); makes bootstrap-secrets
+      # write the right /run/instance/info.json without needing Consul
+      # KV (which itself runs on the coordinators — chicken-and-egg).
+      - COORDINATOR_ORDINAL=${COORDINATOR_ORDINAL}
+      - BOOTSTRAP_EXPECT=${BOOTSTRAP_EXPECT}
+      # Comma-separated VIPs of all coordinators — entrypoint uses these
+      # for retry-join (skipping self).
+      - COORDINATOR_VIPS=${COORDINATOR_VIPS}
+      # External coordinator path — coordinator's mesh-conn uses the
+      # same Vultr coturn + signaling that workers do, so peer-pair
+      # ICE rendezvous happens in a single shared place.
+      - SIGNALING_URL=${SIGNALING_URL}
+      - TURN_HOST=${TURN_HOST}
+      - TURN_SHARED_SECRET=${TURN_SHARED_SECRET}
+      # WORKAROUND: gossip key generated in Terraform and broadcast
+      # identically to every CVM. See cluster.tf.
+      - GOSSIP_KEY=${GOSSIP_KEY}
+      - MESH_CONN_DEBUG_ICE=${MESH_CONN_DEBUG_ICE:-}
+      - ADMISSION_BROKER_ENABLE=${ADMISSION_BROKER_ENABLE:-}
+      - ADMISSION_POLICY_JSON=${ADMISSION_POLICY_JSON:-}
+      - CONSUL_MANAGEMENT_TOKEN=${CONSUL_MANAGEMENT_TOKEN:-}
+      - DSTACK_VERIFIER_URL=${DSTACK_VERIFIER_URL:-http://127.0.0.1:8080/verify}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock:ro
+      - /tmp/dstack-runtime/secrets:/run/secrets
+      - /tmp/dstack-runtime/instance:/run/instance
+      - consul-data:/consul/data
+    healthcheck:
+      test: ["CMD-SHELL", "test -s /run/instance/info.json"]
+      interval: 2s
+      timeout: 1s
+      retries: 60
+      start_period: 5s
+
+  dstack-verifier:
+    image: ${DSTACK_VERIFIER_IMAGE}
+    network_mode: host
+    restart: on-failure
+    volumes:
+      - /tmp/dstack-runtime/verifier-cache:/tmp/dstack-verifier/cache
+
+volumes:
+  consul-data:
+
+# Shared state goes through HOST BIND MOUNTS, not named docker volumes
+# — on the dstack platform we run on, named volumes don't share data
+# across containers (the second container always sees an empty volume
+# even after the first wrote to it; filed as a phala-cloud issue).
+# Bind mounts to the CVM's /tmp work fine. /tmp is ephemeral inside
+# the TEE; secrets are re-derived deterministically from getKey() on
+# every boot, so the on-disk copy is effectively a per-boot cache.
